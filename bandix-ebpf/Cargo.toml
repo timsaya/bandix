@@ -1,0 +1,18 @@
+[package]
+name = "bandix-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bandix-common = { path = "../bandix-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+network-types = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "bandix"
+path = "src/main.rs"
