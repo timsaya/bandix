@@ -1,5 +1,7 @@
 # Bandix
 
+简体中文 | [English](README.en.md)
+
 Bandix 是一个基于 eBPF 技术的网络流量监控工具，使用 Rust 语言开发，可以实时监控局域网内各设备的网络流量和速率。
 
 ## 主要功能
