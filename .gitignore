@@ -51,3 +51,5 @@ Cargo.lock
 release/
 release_readme.md
 upload_release.sh
+
+bandix.db
