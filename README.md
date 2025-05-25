@@ -33,8 +33,12 @@ sudo ./bandix -i <网络接口名称> --mode tui
 ```shell
 sudo ./bandix -i <网络接口名称> --mode web --port <端口号>
 ```
-然后在浏览器中访问 `http://localhost:<端口号>/api/devices` 获取网络流量统计信息。
 
+
+##### 1. 获取网络流量统计
+- **URL**: `http://localhost:<端口号>/api/devices`
+- **方法**: GET
+- **响应示例**:
 ```json
 {
   "devices": [
@@ -57,3 +61,20 @@ sudo ./bandix -i <网络接口名称> --mode web --port <端口号>
 - `tx_bytes`: 设备发送的总字节数
 - `rx_rate`: 设备当前接收速率（字节/秒）
 - `tx_rate`: 设备当前发送速率（字节/秒）
+
+##### 2. 绑定设备名称
+- **URL**: `http://localhost:<端口号>/api/bind`
+- **方法**: POST
+- **请求体**:
+```json
+{
+  "mac": "da:d9:be:02:79:c5",
+  "hostname": "ubuntu.local"
+}
+```
+
+**字段说明**:
+- `mac`: 设备MAC地址
+- `hostname`: 设备自定义名称
+
+---

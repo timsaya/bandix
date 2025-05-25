@@ -33,7 +33,7 @@ pub async fn start_server(
 // 初始化SQLite数据库
 fn init_database() -> Result<(), anyhow::Error> {
     let db_path = "bandix.db";
-    let db = if Path::new(db_path).exists() {
+    let _db = if Path::new(db_path).exists() {
         Connection::open(db_path)?
     } else {
         let db = Connection::open(db_path)?;
@@ -160,12 +160,15 @@ fn is_valid_mac(mac: &str) -> bool {
 fn save_to_database(mac: &str, hostname: &str) -> Result<(), anyhow::Error> {
     let db = Connection::open("bandix.db")?;
     
+    // 将MAC地址转换为小写
+    let mac_lowercase = mac.to_lowercase();
+    
     // 使用REPLACE语法，如果已存在则替换
     let mut statement = db.prepare(
         "REPLACE INTO mac_hostname (mac, hostname) VALUES (?, ?)"
     )?;
     
-    statement.bind((1, mac))?;
+    statement.bind((1, mac_lowercase.as_str()))?;
     statement.bind((2, hostname))?;
     
     while statement.next()? != State::Done {}
@@ -195,6 +198,7 @@ fn generate_devices_json(ip_stats: &Arc<Mutex<HashMap<[u8; 4], IpTrafficStats>>>
             stats.mac_address[5]
         );
         
+        // MAC地址已经是小写格式，因为上面的格式化使用了小写十六进制格式{:02x}
         // 获取主机名（如果有）
         let hostname = hostnames.get(&mac_str).cloned().unwrap_or_default();
 

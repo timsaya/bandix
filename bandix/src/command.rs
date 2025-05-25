@@ -72,6 +72,26 @@ fn format_mac(mac: &[u8; 6]) -> String {
     )
 }
 
+// 判断是否为广播IP地址
+fn is_broadcast_ip(ip: &[u8; 4]) -> bool {
+    // 255.255.255.255
+    if ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255 {
+        return true;
+    }
+    
+    // 网段广播地址 (通常是以255结尾的地址)
+    if ip[3] == 255 {
+        return true;
+    }
+    
+    // 多播地址 (224.0.0.0 - 239.255.255.255)
+    if ip[0] >= 224 && ip[0] <= 239 {
+        return true;
+    }
+    
+    false
+}
+
 pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     env_logger::Builder::new()
         .filter(None, LevelFilter::Info)
@@ -156,10 +176,16 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         let mut all_ips = StdHashMap::<[u8; 4], ()>::new();
 
         for ip in ingress_data.keys() {
-            all_ips.insert(*ip, ());
+            // 排除广播IP地址
+            if !is_broadcast_ip(ip) {
+                all_ips.insert(*ip, ());
+            }
         }
         for ip in egress_data.keys() {
-            all_ips.insert(*ip, ());
+            // 排除广播IP地址
+            if !is_broadcast_ip(ip) {
+                all_ips.insert(*ip, ());
+            }
         }
 
         // 收集并排序IP地址
