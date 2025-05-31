@@ -3,7 +3,7 @@ use crate::ebpf::ingress::load_ingress;
 use crate::web;
 use aya::maps::HashMap;
 use aya::maps::MapData;
-use bandix_common::IpTrafficStats;
+use bandix_common::MacTrafficStats;
 use clap::Parser;
 use log::info;
 use log::LevelFilter;
@@ -161,6 +161,33 @@ fn get_subnet_mask(cidr: u8) -> [u8; 4] {
     mask
 }
 
+// 判断MAC地址是否应该被过滤
+fn should_filter_mac(
+    mac: &[u8; 6], 
+    mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
+    interface_ip: &[u8; 4],
+    subnet_mask: &[u8; 4]
+) -> bool {
+    // 检查是否有对应的IP
+    if let Some(ip) = mac_ip_mapping.get(mac) {
+        // 检查是否为广播IP
+        if is_broadcast_ip(ip) {
+            return true;
+        }
+        
+        // 检查是否在当前子网
+        if !is_in_same_subnet(ip, interface_ip, subnet_mask) {
+            return true;
+        }
+        
+        // 通过所有检查，不应该过滤
+        return false;
+    }
+    
+    // 没有对应的IP，应该过滤
+    true
+}
+
 pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     env_logger::Builder::new()
         .filter(None, LevelFilter::Info)
@@ -174,17 +201,17 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
 
     // 获取eBPF映射
     let ingress_traffic =
-        HashMap::<&MapData, [u8; 4], [u64; 2]>::try_from(ingress_ebpf.map("IP_TRAFFIC").unwrap())?;
+        HashMap::<&MapData, [u8; 6], [u64; 2]>::try_from(ingress_ebpf.map("MAC_TRAFFIC").unwrap())?;
 
     let egress_traffic =
-        HashMap::<&MapData, [u8; 4], [u64; 2]>::try_from(egress_ebpf.map("IP_TRAFFIC").unwrap())?;
+        HashMap::<&MapData, [u8; 6], [u64; 2]>::try_from(egress_ebpf.map("MAC_TRAFFIC").unwrap())?;
 
-    let ip_mac_mapping = HashMap::<&MapData, [u8; 4], [u8; 6]>::try_from(
-        egress_ebpf.map("IP_MAC_MAPPING").unwrap(),
+    let mac_ip_mapping = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
+        egress_ebpf.map("MAC_IP_MAPPING").unwrap(),
     )?;
 
-    // 存储IP的流量统计信息，使用Arc<Mutex>包装以便在线程间共享
-    let ip_stats: Arc<Mutex<StdHashMap<[u8; 4], IpTrafficStats>>> =
+    // 存储 MAC 的流量统计信息，使用Arc<Mutex>包装以便在线程间共享
+    let mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>> =
         Arc::new(Mutex::new(StdHashMap::new()));
 
     // 创建定时器，每秒更新一次
@@ -194,7 +221,7 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     let running = Arc::new(Mutex::new(true));
     let r = running.clone();
 
-    // 处理Ctrl+C信号
+    // 处理 Ctrl+C 信号
     tokio::spawn(async move {
         if let Ok(_) = signal::ctrl_c().await {
             info!("正在退出...");
@@ -205,9 +232,9 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
 
     // 如果模式是web或both，启动HTTP服务器
     if mode == "web" || mode == "both" {
-        let ip_stats_clone = Arc::clone(&ip_stats);
+        let mac_stats_clone = Arc::clone(&mac_stats);
         tokio::spawn(async move {
-            if let Err(e) = web::start_server(port, ip_stats_clone).await {
+            if let Err(e) = web::start_server(port, mac_stats_clone).await {
                 eprintln!("启动HTTP服务器失败: {}", e);
             }
         });
@@ -228,68 +255,68 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
             .as_millis() as u64;
 
         // 收集入站流量数据
-        let ingress_data: StdHashMap<[u8; 4], [u64; 2]> = ingress_traffic
+        let ingress_data: StdHashMap<[u8; 6], [u64; 2]> = ingress_traffic
             .iter()
             .filter_map(|entry| entry.ok())
             .collect();
 
         // 收集出站流量数据
-        let egress_data: StdHashMap<[u8; 4], [u64; 2]> = egress_traffic
+        let egress_data: StdHashMap<[u8; 6], [u64; 2]> = egress_traffic
             .iter()
             .filter_map(|entry| entry.ok())
             .collect();
 
-        // 收集IP和MAC地址的映射关系
-        let ip_mac_mapping: StdHashMap<[u8; 4], [u8; 6]> = ip_mac_mapping
+        // 收集 MAC 和 IP 的映射关系
+        let mac_ip_mapping: StdHashMap<[u8; 6], [u8; 4]> = mac_ip_mapping
             .iter()
             .filter_map(|entry| entry.ok())
             .collect();
 
-        // 合并所有IP地址
-        let mut all_ips = StdHashMap::<[u8; 4], ()>::new();
+        // 合并所有 mac 地址
+        let mut all_macs = Vec::<[u8; 6]>::new();
 
-        for ip in ingress_data.keys() {
-            // 排除广播IP地址，并确保IP在同一子网内
-            if !is_broadcast_ip(ip) && is_in_same_subnet(ip, &interface_ip, &subnet_mask) {
-                all_ips.insert(*ip, ());
+        for mac in ingress_data.keys() {
+            // 使用封装的函数检查是否应该过滤
+            if should_filter_mac(mac, &mac_ip_mapping, &interface_ip, &subnet_mask) {
+                continue;
             }
+            all_macs.push(*mac);
         }
-        for ip in egress_data.keys() {
-            // 排除广播IP地址，并确保IP在同一子网内
-            if !is_broadcast_ip(ip) && is_in_same_subnet(ip, &interface_ip, &subnet_mask) {
-                all_ips.insert(*ip, ());
+        
+        for mac in egress_data.keys() {
+            // 如果该MAC已经添加，则跳过
+            if all_macs.contains(mac) {
+                continue;
             }
+            
+            // 使用封装的函数检查是否应该过滤
+            if should_filter_mac(mac, &mac_ip_mapping, &interface_ip, &subnet_mask) {
+                continue;
+            }
+            all_macs.push(*mac);
         }
 
-        // 收集并排序IP地址
-        let mut ip_list: Vec<[u8; 4]> = all_ips.keys().cloned().collect();
-        ip_list.sort_by(|a, b| {
-            // 将IP地址转换为u32进行比较
-            let a_value = u32::from_be_bytes(*a);
-            let b_value = u32::from_be_bytes(*b);
-            a_value.cmp(&b_value)
-        });
+        // 获取 mac_stats 的锁，准备更新数据
+        let mut stats_map = mac_stats.lock().unwrap();
 
-        // 获取ip_stats的锁，准备更新数据
-        let mut stats_map = ip_stats.lock().unwrap();
-
-        // 对于每个IP，更新其统计信息
-        for ip in &ip_list {
-            let stats: &mut IpTrafficStats =
-                stats_map.entry(*ip).or_insert_with(IpTrafficStats::default);
+        // 对于每个 mac，更新其统计信息
+        for mac in &all_macs {
+            let stats: &mut MacTrafficStats = stats_map
+                .entry(*mac)
+                .or_insert_with(MacTrafficStats::default);
 
             // 从入站和出站数据中获取流量信息（从终端设备角度）
-            if let Some(ingress) = ingress_data.get(ip) {
+            if let Some(ingress) = ingress_data.get(mac) {
                 stats.tx_bytes = ingress[0]; // 终端设备发送的数据是路由器接收到的
             }
 
-            if let Some(egress) = egress_data.get(ip) {
+            if let Some(egress) = egress_data.get(mac) {
                 stats.rx_bytes = egress[1]; // 终端设备接收的数据是路由器发送的
             }
 
-            // 更新MAC地址
-            if let Some(mac) = ip_mac_mapping.get(ip) {
-                stats.mac_address = *mac;
+            // 更新 IP 地址
+            if let Some(ip) = mac_ip_mapping.get(mac) {
+                stats.ip_address = *ip;
             }
 
             // 计算速率 - 使用实际时间间隔
@@ -336,28 +363,29 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
             println!("{:-<120}", "");
 
             // 重新获取锁以读取数据进行显示
-            let stats_map = ip_stats.lock().unwrap();
+            let stats_map: std::sync::MutexGuard<'_, StdHashMap<[u8; 6], MacTrafficStats>> = mac_stats.lock().unwrap();
 
             // 打印每个IP的统计信息
-            for ip in &ip_list {
-                if let Some(stats) = stats_map.get(ip) {
-                    // 在打印当前IP的统计信息时添加MAC地址
-                    let mac_str = match ip_mac_mapping.get(ip) {
-                        Some(mac) => format_mac(mac),
-                        None => "unknown".to_string(),
-                    };
+            let mac_stats_data = stats_map.iter().collect::<Vec<_>>();
+            for (mac, stats) in mac_stats_data {
+                // 获取MAC地址对应的IP
+                let ip_str = match mac_ip_mapping.get(mac) {
+                    Some(ip) => format_ip(ip),
+                    None => "未知IP".to_string(),
+                };
 
-                    // 打印当前IP的统计信息
-                    println!(
-                        "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} ",
-                        format_ip(ip),
-                        mac_str,
-                        format_rate(stats.rx_rate),
-                        format_rate(stats.tx_rate),
-                        format_bytes(stats.rx_bytes),
-                        format_bytes(stats.tx_bytes),
-                    );
-                }
+                let mac_str = format_mac(mac);
+
+                // 打印当前 MAC 的统计信息
+                println!(
+                    "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} ",
+                    ip_str,
+                    mac_str,
+                    format_rate(stats.rx_rate),
+                    format_rate(stats.tx_rate),
+                    format_bytes(stats.rx_bytes),
+                    format_bytes(stats.tx_bytes),
+                );
             }
         }
     }

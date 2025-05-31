@@ -1,4 +1,4 @@
-use bandix_common::IpTrafficStats;
+use bandix_common::MacTrafficStats;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,7 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 // 简单的HTTP服务器，仅依赖于tokio
 pub async fn start_server(
     port: u16,
-    ip_stats: Arc<Mutex<HashMap<[u8; 4], IpTrafficStats>>>,
+    mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
 ) -> Result<(), anyhow::Error> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
@@ -15,10 +15,10 @@ pub async fn start_server(
 
     loop {
         let (stream, _) = listener.accept().await?;
-        let ip_stats = Arc::clone(&ip_stats);
+        let mac_stats = Arc::clone(&mac_stats);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, ip_stats).await {
+            if let Err(e) = handle_connection(stream, mac_stats).await {
                 eprintln!("处理连接时出错: {}", e);
             }
         });
@@ -27,7 +27,7 @@ pub async fn start_server(
 
 async fn handle_connection(
     mut stream: TcpStream,
-    ip_stats: Arc<Mutex<HashMap<[u8; 4], IpTrafficStats>>>,
+    mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
 ) -> Result<(), anyhow::Error> {
     let mut buffer = [0; 4096]; // 增加缓冲区大小以处理更大的请求
     let n = stream.read(&mut buffer).await?;
@@ -50,7 +50,7 @@ async fn handle_connection(
     let path = parts[1];
 
     if path == "/api/devices" {
-        let json = generate_devices_json(&ip_stats);
+        let json = generate_devices_json(&mac_stats);
         send_json_response(&mut stream, &json).await?;
     }
     {
@@ -60,23 +60,23 @@ async fn handle_connection(
     Ok(())
 }
 
-fn generate_devices_json(ip_stats: &Arc<Mutex<HashMap<[u8; 4], IpTrafficStats>>>) -> String {
-    let stats_map = ip_stats.lock().unwrap();
+fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>) -> String {
+    let stats_map = mac_stats.lock().unwrap();
 
     let mut json = String::from("{\n  \"devices\": [\n");
 
     let total_items = stats_map.len();
-    for (i, (ip, stats)) in stats_map.iter().enumerate() {
-        // 格式化IP地址
-        let ip_str = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    for (i, (mac, stats)) in stats_map.iter().enumerate() {
+        // 格式化MAC地址
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            stats.mac_address[0],
-            stats.mac_address[1],
-            stats.mac_address[2],
-            stats.mac_address[3],
-            stats.mac_address[4],
-            stats.mac_address[5]
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        
+        // 格式化IP地址
+        let ip_str = format!(
+            "{}.{}.{}.{}", 
+            stats.ip_address[0], stats.ip_address[1], stats.ip_address[2], stats.ip_address[3]
         );
 
         json.push_str(&format!(

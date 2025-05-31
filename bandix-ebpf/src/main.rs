@@ -12,13 +12,13 @@ use network_types::ip::Ipv4Hdr;
 #[no_mangle]
 static TRAFFIC_DIRECTION: i32 = 0;
 
-// 记录某个IP，即终端设备的流量情况。使用2个值的数组：[发送字节数, 接收字节数]
+// 记录某个MAC地址，即终端设备的流量情况。使用2个值的数组：[发送字节数, 接收字节数]
 #[map]
-static IP_TRAFFIC: HashMap<[u8; 4], [u64; 2]> = HashMap::with_max_entries(1024, 0);
+static MAC_TRAFFIC: HashMap<[u8; 6], [u64; 2]> = HashMap::with_max_entries(1024, 0);
 
-// 增加一个新的 HashMap 用于存储 IP 和 MAC 地址的关系
+// 用于存储 MAC 和 IP 地址的关系
 #[map]
-static IP_MAC_MAPPING: HashMap<[u8; 4], [u8; 6]> = HashMap::with_max_entries(1024, 0);
+static MAC_IP_MAPPING: HashMap<[u8; 6], [u8; 4]> = HashMap::with_max_entries(1024, 0);
 
 #[inline]
 fn is_ingress() -> bool {
@@ -101,16 +101,16 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
     if is_ingress() {
         if is_lan_ip(&src_ip) {
             // 对局域网 src_ip 设备来说，是发送数据
-            update_traffic_stats(&src_ip, data_len, false);
-            let _ = IP_MAC_MAPPING.insert(&src_ip, &src_mac, 0);
+            update_traffic_stats(&src_mac, data_len, false);
+            let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
         }
     }
 
     if is_egress() {
         if is_lan_ip(&dst_ip) {
             // 对局域网 dst_ip 设备来说，是接收数据
-            update_traffic_stats(&dst_ip, data_len, true);
-            let _ = IP_MAC_MAPPING.insert(&dst_ip, &dst_mac, 0);
+            update_traffic_stats(&dst_mac, data_len, true);
+            let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
         }
     }
 
@@ -118,8 +118,8 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
 }
 
 #[inline]
-fn update_traffic_stats(ip: &[u8; 4], data_len: u64, is_rx: bool) {
-    let traffic = IP_TRAFFIC.get_ptr_mut(ip);
+fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool) {
+    let traffic = MAC_TRAFFIC.get_ptr_mut(mac);
 
     match traffic {
         Some(t) => unsafe {
@@ -138,7 +138,7 @@ fn update_traffic_stats(ip: &[u8; 4], data_len: u64, is_rx: bool) {
             } else {
                 stats[0] = data_len; // 发送字节数
             }
-            let _ = IP_TRAFFIC.insert(ip, &stats, 0);
+            let _ = MAC_TRAFFIC.insert(mac, &stats, 0);
         }
     }
 }
