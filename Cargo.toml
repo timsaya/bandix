@@ -25,6 +25,15 @@ log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 
+
+# 优化编译大小
+[profile.release]
+debug = 0
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
 [profile.release.package.bandix-ebpf]
-debug = 2
+debug = 0
 codegen-units = 1

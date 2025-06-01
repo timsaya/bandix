@@ -22,11 +22,11 @@ tokio = { workspace = true, features = [
     "signal",
     "time",
     "io-util",
-] }
-clap = { workspace = true, features = ["derive"] }
+], default-features = false }
+clap = { workspace = true, features = ["derive"], default-features = false }
 ctrlc = { workspace = true }
-axum = { version = "0.7.3", features = ["json"] }
-serde = { version = "1.0", features = ["derive"] }
+axum = { version = "0.7.3", features = ["json"], default-features = false }
+serde = { version = "1.0", features = ["derive"], default-features = false }
 serde_json = "1.0"
 
 [build-dependencies]
