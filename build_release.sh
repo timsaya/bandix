@@ -24,6 +24,10 @@ TARGETS=(
   "x86_64-unknown-linux-musl"
   "aarch64-unknown-linux-gnu"
   "aarch64-unknown-linux-musl"
+  "armv7-unknown-linux-gnueabihf"
+  "armv7-unknown-linux-musleabihf"
+  "armv5te-unknown-linux-gnueabi"
+  "armv5te-unknown-linux-musleabi"
 )
 
 # 安装目标平台
