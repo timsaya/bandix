@@ -1,5 +1,8 @@
 mod command;
+mod display;
 mod ebpf;
+mod traffic;
+mod utils;
 mod web;
 
 use clap::Parser;

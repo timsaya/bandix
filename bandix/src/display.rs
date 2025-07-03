@@ -1,0 +1,49 @@
+use crate::utils::format_utils::format_bytes;
+use crate::utils::format_utils::format_ip;
+use crate::utils::format_utils::format_mac;
+use crate::utils::format_utils::format_rate;
+use bandix_common::MacTrafficStats;
+use std::collections::HashMap as StdHashMap;
+use std::sync::{Arc, Mutex};
+
+// 显示终端用户界面
+pub fn display_tui_interface(
+    mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
+    mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
+) {
+    // 清屏
+    print!("\x1B[2J\x1B[1;1H");
+
+    // 打印表头
+    println!(
+        "{:<16} | {:<16} | {:<12} | {:<11} | {:<11} | {:<11} ",
+        "IP地址", "MAC地址", "下载速率", "上传速率", "总下载", "总上传"
+    );
+    println!("{:-<120}", "");
+
+    // 重新获取锁以读取数据进行显示
+    let stats_map = mac_stats.lock().unwrap();
+
+    // 打印每个IP的统计信息
+    let mac_stats_data = stats_map.iter().collect::<Vec<_>>();
+    for (mac, stats) in mac_stats_data {
+        // 获取MAC地址对应的IP
+        let ip_str = match mac_ip_mapping.get(mac) {
+            Some(ip) => format_ip(ip),
+            None => "未知IP".to_string(),
+        };
+
+        let mac_str = format_mac(mac);
+
+        // 打印当前 MAC 的统计信息
+        println!(
+            "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} ",
+            ip_str,
+            mac_str,
+            format_rate(stats.rx_rate),
+            format_rate(stats.tx_rate),
+            format_bytes(stats.rx_bytes),
+            format_bytes(stats.tx_bytes),
+        );
+    }
+}
