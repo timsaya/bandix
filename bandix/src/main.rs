@@ -9,7 +9,7 @@ use clap::Parser;
 use command::{run, Opt};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), anyhow::Error> {
     // 解析命令行参数
     let opt = Opt::parse();
     run(opt).await?;

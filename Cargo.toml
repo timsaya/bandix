@@ -13,7 +13,7 @@ aya-ebpf = { version = "0.1.1", default-features = false }
 aya-log = { version = "0.2.1", default-features = false }
 aya-log-ebpf = { version = "0.1.1", default-features = false }
 network-types = { version = "0.0.8", default-features = false }
-ctrlc = {version = "3.4.7"}
+ctrlc = { version = "3.4.7" }
 anyhow = { version = "1", default-features = false }
 # `std` feature is currently required to build `clap`.
 #
