@@ -7,10 +7,7 @@ use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 
 // 显示终端用户界面
-pub fn display_tui_interface(
-    mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-    mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
-) {
+pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>) {
     // 清屏
     print!("\x1B[2J\x1B[1;1H");
 
@@ -36,19 +33,11 @@ pub fn display_tui_interface(
     });
 
     for (mac, stats) in mac_stats_data {
-        // 获取MAC地址对应的IP
-        let ip_str = match mac_ip_mapping.get(mac) {
-            Some(ip) => format_ip(ip),
-            None => "未知IP".to_string(),
-        };
-
-        let mac_str = format_mac(mac);
-
         // 打印当前 MAC 的统计信息
         println!(
             "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} ",
-            ip_str,
-            mac_str,
+            format_ip(&stats.ip_address),
+            format_mac(mac),
             format_rate(stats.tx_rate),
             format_rate(stats.rx_rate),
             format_bytes(stats.tx_bytes),

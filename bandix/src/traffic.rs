@@ -104,8 +104,6 @@ fn collect_traffic_data(
         }
     }
 
-    
-
     Ok(traffic_data)
 }
 
@@ -203,8 +201,7 @@ pub async fn update(
     let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
 
     update_traffic_stats(mac_stats, &device_traffic_stats)?;
-
-    display_tui_interface(mac_stats, &mac_ip_mapping);
+    display_tui_interface(mac_stats);
 
     Ok(())
 }
