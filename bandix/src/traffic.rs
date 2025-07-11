@@ -159,8 +159,8 @@ fn update_traffic_stats(
             rx_rate: 0,
             tx_rate: 0,
             last_update: now,
-            download_limit: 0,
-            upload_limit: 0,
+            rx_rate_limit: 0,
+            tx_rate_limit: 0,
         });
 
         // 更新总字节数

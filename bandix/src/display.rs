@@ -13,10 +13,10 @@ pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTraffi
 
     // 打印表头
     println!(
-        "{:<16} | {:<16} | {:<12} | {:<11} | {:<11} | {:<11} ",
-        "IP地址", "MAC地址", "上传速率", "下载速率", "总上传", "总下载"
+        "{:<16} | {:<16} | {:<12} | {:<11} | {:<11} | {:<12} | {:<10} | {:<11} |",
+        "IP地址", "MAC地址", "上传速率", "下载速率", "总上传", "总下载", "上传限制", "下载限制"
     );
-    println!("{:-<120}", "");
+    println!("{:-<148}", "");
 
     // 重新获取锁以读取数据进行显示
     let stats_map = mac_stats.lock().unwrap();
@@ -35,13 +35,15 @@ pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTraffi
     for (mac, stats) in mac_stats_data {
         // 打印当前 MAC 的统计信息
         println!(
-            "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} ",
+            "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} | {:<14} | {:<15} |",
             format_ip(&stats.ip_address),
             format_mac(mac),
             format_rate(stats.tx_rate),
             format_rate(stats.rx_rate),
             format_bytes(stats.tx_bytes),
             format_bytes(stats.rx_bytes),
+            format_rate(stats.tx_rate_limit),
+            format_rate(stats.rx_rate_limit),
         );
     }
 }

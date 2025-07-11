@@ -19,8 +19,8 @@ pub struct MacTrafficStats {
     pub rx_rate: u64,        // 接收速率 (字节/秒)
     pub tx_rate: u64,        // 发送速率 (字节/秒)
     pub last_update: u64,    // 上次更新时间戳
-    pub download_limit: u64, // 下载限制 (字节/秒)
-    pub upload_limit: u64,   // 上传限制 (字节/秒)
+    pub rx_rate_limit: u64,       // 下载限制 (字节/秒)
+    pub tx_rate_limit: u64,       // 上传限制 (字节/秒)
 }
 
 impl Default for MacTrafficStats {
@@ -36,8 +36,8 @@ impl Default for MacTrafficStats {
             rx_rate: 0,
             tx_rate: 0,
             last_update: 0,
-            download_limit: 0,
-            upload_limit: 0,
+            rx_rate_limit: 0,
+            tx_rate_limit: 0,
         }
     }
 }

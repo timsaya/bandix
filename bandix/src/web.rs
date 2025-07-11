@@ -1,5 +1,6 @@
 use bandix_common::MacTrafficStats;
 use log::info;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -55,10 +56,10 @@ async fn handle_connection(
         let json = generate_devices_json(&mac_stats);
         send_json_response(&mut stream, &json).await?;
     } else if path.starts_with("/api/limit") && method == "POST" {
-        // 解析请求体获取MAC地址和限速设置
+        // 解析JSON请求体获取MAC地址和限速设置
         let body = parse_request_body(&request);
         if let Some(body_content) = body {
-            match set_device_limit(&body_content, &mac_stats).await {
+            match set_device_limit_json(&body_content, &mac_stats).await {
                 Ok(_) => send_json_response(&mut stream, r#"{"status":"success"}"#).await?,
                 Err(e) => {
                     let error_json = format!(r#"{{"status":"error","message":"{}"}}"#, e);
@@ -137,81 +138,58 @@ fn parse_rate(rate_str: &str) -> Result<u64, anyhow::Error> {
     Ok(bytes_per_second)
 }
 
-// 设置设备限速
-async fn set_device_limit(
+// 设置设备限速（JSON格式）
+async fn set_device_limit_json(
     body: &str,
     mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
 ) -> Result<(), anyhow::Error> {
-    // 解析请求体，格式: mac=00:11:22:33:44:55&download=1MB&upload=500KB
-    let params: Vec<&str> = body.split('&').collect();
+    // 解析JSON请求体
+    let json: Value = serde_json::from_str(body)?;
 
-    let mut mac_str = None;
-    let mut download_limit_str = None;
-    let mut upload_limit_str = None;
+    let mac_str = json["mac"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("缺少MAC地址参数"))?;
 
-    for param in params {
-        let kv: Vec<&str> = param.split('=').collect();
-        if kv.len() != 2 {
-            continue;
-        }
+    let mac = parse_mac_address(mac_str)?;
 
-        match kv[0] {
-            "mac" => mac_str = Some(kv[1]),
-            "download" => download_limit_str = Some(kv[1]),
-            "upload" => upload_limit_str = Some(kv[1]),
-            _ => {}
-        }
-    }
+    // 解析下载和上传限速（直接解析数字，单位为字节）
+    let rx_rate_limit = json["rx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
 
-    let mac = match mac_str {
-        Some(m) => parse_mac_address(m)?,
-        None => return Err(anyhow::anyhow!("缺少MAC地址参数")),
-    };
-
-    // 默认无限制
-    let download_limit = match download_limit_str {
-        Some(dl) => parse_rate(dl)?,
-        None => 0,
-    };
-
-    let upload_limit = match upload_limit_str {
-        Some(ul) => parse_rate(ul)?,
-        None => 0,
-    };
+    let tx_rate_limit = json["tx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
 
     // 更新用户空间的统计信息
     {
         let mut stats_map = mac_stats.lock().unwrap();
         if let Some(stats) = stats_map.get_mut(&mac) {
-            stats.download_limit = download_limit;
-            stats.upload_limit = upload_limit;
+            stats.rx_rate_limit = rx_rate_limit;
+            stats.tx_rate_limit = tx_rate_limit;
         } else {
             // 如果没有找到MAC地址，创建一个新的记录
             let mut new_stats = MacTrafficStats::default();
-            new_stats.download_limit = download_limit;
-            new_stats.upload_limit = upload_limit;
+            new_stats.rx_rate_limit = rx_rate_limit;
+            new_stats.tx_rate_limit = tx_rate_limit;
             stats_map.insert(mac, new_stats);
         }
     }
 
     // 格式化速率为可读的字符串
-    let download_str = if download_limit == 0 {
+    let rx_str = if rx_rate_limit == 0 {
         "无限制".to_string()
     } else {
-        format_bytes(download_limit) + "/s"
+        format!("{}/s", format_bytes(rx_rate_limit))
     };
 
-    let upload_str = if upload_limit == 0 {
+    let tx_str = if tx_rate_limit == 0 {
         "无限制".to_string()
     } else {
-        format_bytes(upload_limit) + "/s"
+        format!("{}/s", format_bytes(tx_rate_limit))
     };
 
     info!(
-        "已设置 MAC: {} 的限速 - 下载: {}, 上传: {}",
+        "已设置 MAC: {} 的限速 - 接收: {}, 发送: {}",
         format_mac(&mac),
-        download_str,
-        upload_str
+        rx_str,
+        tx_str
     );
 
     Ok(())
@@ -259,8 +237,8 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
         );
 
         json.push_str(&format!(
-            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"rx_bytes\": {},\n      \"tx_bytes\": {},\n      \"rx_rate\": {},\n      \"tx_rate\": {},\n      \"download_limit\": {},\n      \"upload_limit\": {}\n    }}",
-            ip_str, mac_str, stats.rx_bytes, stats.tx_bytes, stats.rx_rate, stats.tx_rate, stats.download_limit, stats.upload_limit
+            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"rx_bytes\": {},\n      \"tx_bytes\": {},\n      \"rx_rate\": {},\n      \"tx_rate\": {},\n      \"rx_rate_limit\": {},\n      \"tx_rate_limit\": {}\n    }}",
+            ip_str, mac_str, stats.rx_bytes, stats.tx_bytes, stats.rx_rate, stats.tx_rate, stats.rx_rate_limit, stats.tx_rate_limit
         ));
 
         if i < total_items - 1 {
