@@ -17,7 +17,7 @@ pub fn display_tui_interface(
     // 打印表头
     println!(
         "{:<16} | {:<16} | {:<12} | {:<11} | {:<11} | {:<11} ",
-        "IP地址", "MAC地址", "下载速率", "上传速率", "总下载", "总上传"
+        "IP地址", "MAC地址", "上传速率", "下载速率", "总上传", "总下载"
     );
     println!("{:-<120}", "");
 
@@ -25,7 +25,16 @@ pub fn display_tui_interface(
     let stats_map = mac_stats.lock().unwrap();
 
     // 打印每个IP的统计信息
-    let mac_stats_data = stats_map.iter().collect::<Vec<_>>();
+    let mut mac_stats_data = stats_map.iter().collect::<Vec<_>>();
+
+    // 按 IP 地址从小到大排序
+    mac_stats_data.sort_by(|(_, a), (_, b)| {
+        // 将 IP 地址转换为 u32 便于比较
+        let a_ip = u32::from_be_bytes(a.ip_address);
+        let b_ip = u32::from_be_bytes(b.ip_address);
+        a_ip.cmp(&b_ip)
+    });
+
     for (mac, stats) in mac_stats_data {
         // 获取MAC地址对应的IP
         let ip_str = match mac_ip_mapping.get(mac) {
@@ -40,10 +49,10 @@ pub fn display_tui_interface(
             "{:<18} | {:<18} | {:<16} | {:<15} | {:<14} | {:<15} ",
             ip_str,
             mac_str,
-            format_rate(stats.rx_rate),
             format_rate(stats.tx_rate),
-            format_bytes(stats.rx_bytes),
+            format_rate(stats.rx_rate),
             format_bytes(stats.tx_bytes),
+            format_bytes(stats.rx_bytes),
         );
     }
 }

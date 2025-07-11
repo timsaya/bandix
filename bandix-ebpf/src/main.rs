@@ -8,7 +8,6 @@ mod utils;
 use aya_ebpf::macros::map;
 use aya_ebpf::maps::{Array, HashMap};
 use aya_ebpf::{bindings::TC_ACT_PIPE, macros::classifier, programs::TcContext};
-use aya_log_ebpf::info;
 use network_types::eth::EthHdr;
 use network_types::ip::Ipv4Hdr;
 
@@ -83,43 +82,27 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
 
     // monitor lan traffic, ingress direction. device send data to router
     if is_ingress() {
-        // info!(
-        //     &ctx,
-        //     "ingress src_ip: {}.{}.{}.{}, dst_ip: {}.{}.{}.{}",
-        //     src_ip[0],
-        //     src_ip[1],
-        //     src_ip[2],
-        //     src_ip[3],
-        //     dst_ip[0],
-        //     dst_ip[1],
-        //     dst_ip[2],
-        //     dst_ip[3]
-        // );
-
         if is_subnet_ip(&src_ip) {
             update_traffic_stats(&src_mac, data_len, false);
             let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
+        }
+
+        if is_subnet_ip(&dst_ip) {
+            update_traffic_stats(&dst_mac, data_len, true);
+            let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
         }
     }
 
     // monitor lan traffic, egress direction. device receive data from router
     if is_egress() {
-        // info!(
-        //     &ctx,
-        //     "egress src_ip: {}.{}.{}.{}, dst_ip: {}.{}.{}.{}",
-        //     src_ip[0],
-        //     src_ip[1],
-        //     src_ip[2],
-        //     src_ip[3],
-        //     dst_ip[0],
-        //     dst_ip[1],
-        //     dst_ip[2],
-        //     dst_ip[3]
-        // );
-
         if is_subnet_ip(&dst_ip) {
             update_traffic_stats(&dst_mac, data_len, true);
             let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
+        }
+
+        if is_subnet_ip(&src_ip) {
+            update_traffic_stats(&src_mac, data_len, false);
+            let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
         }
     }
 

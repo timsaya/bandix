@@ -48,40 +48,10 @@ pub mod format_utils {
 }
 
 pub mod network_utils {
-    
+
     use std::net::Ipv4Addr;
     use std::process::Command;
     use std::str::FromStr;
-
-    // 判断是否为广播IP地址
-    pub fn is_broadcast_ip(ip: &[u8; 4]) -> bool {
-        // 255.255.255.255
-        if ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255 {
-            return true;
-        }
-
-        // 网段广播地址 (通常是以255结尾的地址)
-        if ip[3] == 255 {
-            return true;
-        }
-
-        // 多播地址 (224.0.0.0 - 239.255.255.255)
-        if ip[0] >= 224 && ip[0] <= 239 {
-            return true;
-        }
-
-        false
-    }
-
-    // 检查IP是否在同一子网
-    pub fn is_in_same_subnet(ip: &[u8; 4], interface_ip: &[u8; 4], subnet_mask: &[u8; 4]) -> bool {
-        for i in 0..4 {
-            if (ip[i] & subnet_mask[i]) != (interface_ip[i] & subnet_mask[i]) {
-                return false;
-            }
-        }
-        true
-    }
 
     // 获取接口的IP和子网掩码
     pub fn get_interface_info(interface: &str) -> Option<([u8; 4], [u8; 4])> {
@@ -139,5 +109,3 @@ pub mod network_utils {
         mask
     }
 }
-
-
