@@ -8,6 +8,7 @@ mod utils;
 use aya_ebpf::macros::map;
 use aya_ebpf::maps::{Array, HashMap};
 use aya_ebpf::{bindings::TC_ACT_PIPE, macros::classifier, programs::TcContext};
+use aya_log_ebpf::info;
 use network_types::eth::EthHdr;
 use network_types::ip::Ipv4Hdr;
 
@@ -72,19 +73,29 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
     let src_ip = unsafe { (*ipv4hdr).src_addr };
     let dst_ip = unsafe { (*ipv4hdr).dst_addr };
 
-    let network_addr = SUBNET_INFO.get(0);
-    let subnet_mask = SUBNET_INFO.get(1);
+    let network_addr = SUBNET_INFO.get(0).unwrap_or(&[0, 0, 0, 0]);
+    let subnet_mask = SUBNET_INFO.get(1).unwrap_or(&[0, 0, 0, 0]);
 
-    if let Some(network_addr) = network_addr {
-        if let Some(subnet_mask) = subnet_mask {
-            if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
-                return Ok(TC_ACT_PIPE);
-            }
-        }
+    // if subnet info is not set, skip
+    if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
+        return Ok(TC_ACT_PIPE);
     }
 
     // monitor lan traffic, ingress direction. device send data to router
     if is_ingress() {
+        // info!(
+        //     &ctx,
+        //     "ingress src_ip: {}.{}.{}.{}, dst_ip: {}.{}.{}.{}",
+        //     src_ip[0],
+        //     src_ip[1],
+        //     src_ip[2],
+        //     src_ip[3],
+        //     dst_ip[0],
+        //     dst_ip[1],
+        //     dst_ip[2],
+        //     dst_ip[3]
+        // );
+
         if is_subnet_ip(&src_ip) {
             update_traffic_stats(&src_mac, data_len, false);
             let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
@@ -93,6 +104,19 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
 
     // monitor lan traffic, egress direction. device receive data from router
     if is_egress() {
+        // info!(
+        //     &ctx,
+        //     "egress src_ip: {}.{}.{}.{}, dst_ip: {}.{}.{}.{}",
+        //     src_ip[0],
+        //     src_ip[1],
+        //     src_ip[2],
+        //     src_ip[3],
+        //     dst_ip[0],
+        //     dst_ip[1],
+        //     dst_ip[2],
+        //     dst_ip[3]
+        // );
+
         if is_subnet_ip(&dst_ip) {
             update_traffic_stats(&dst_mac, data_len, true);
             let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);

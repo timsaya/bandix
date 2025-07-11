@@ -1,9 +1,9 @@
 use bandix_common::MacTrafficStats;
+use log::info;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use log::info;
 
 // 简单的HTTP服务器，仅依赖于tokio
 pub async fn start_server(
@@ -66,7 +66,12 @@ async fn handle_connection(
                 }
             }
         } else {
-            send_json_response_with_status(&mut stream, r#"{"status":"error","message":"无效的请求体"}"#, 400).await?;
+            send_json_response_with_status(
+                &mut stream,
+                r#"{"status":"error","message":"无效的请求体"}"#,
+                400,
+            )
+            .await?;
         }
     } else {
         send_not_found(&mut stream).await?;
@@ -90,12 +95,12 @@ fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     if parts.len() != 6 {
         return Err(anyhow::anyhow!("无效的MAC地址格式"));
     }
-    
+
     let mut mac = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
         mac[i] = u8::from_str_radix(part, 16)?;
     }
-    
+
     Ok(mac)
 }
 
@@ -104,13 +109,13 @@ fn parse_rate(rate_str: &str) -> Result<u64, anyhow::Error> {
     if rate_str.is_empty() || rate_str == "0" {
         return Ok(0); // 0表示无限制
     }
-    
+
     let rate_str = rate_str.trim().to_lowercase();
     let rate_str = rate_str.trim_end_matches("/s"); // 移除可能存在的"/s"后缀
-    
+
     let mut numeric_part = String::new();
     let mut unit_part = String::new();
-    
+
     for c in rate_str.chars() {
         if c.is_ascii_digit() || c == '.' {
             numeric_part.push(c);
@@ -118,7 +123,7 @@ fn parse_rate(rate_str: &str) -> Result<u64, anyhow::Error> {
             unit_part.push(c);
         }
     }
-    
+
     let value: f64 = numeric_part.parse()?;
     let bytes_per_second = match unit_part.trim() {
         "" => value as u64, // 无单位，假设为字节/秒
@@ -128,7 +133,7 @@ fn parse_rate(rate_str: &str) -> Result<u64, anyhow::Error> {
         "gb" | "g" => (value * 1024.0 * 1024.0 * 1024.0) as u64,
         _ => return Err(anyhow::anyhow!("不支持的速率单位: {}", unit_part)),
     };
-    
+
     Ok(bytes_per_second)
 }
 
@@ -139,17 +144,17 @@ async fn set_device_limit(
 ) -> Result<(), anyhow::Error> {
     // 解析请求体，格式: mac=00:11:22:33:44:55&download=1MB&upload=500KB
     let params: Vec<&str> = body.split('&').collect();
-    
+
     let mut mac_str = None;
     let mut download_limit_str = None;
     let mut upload_limit_str = None;
-    
+
     for param in params {
         let kv: Vec<&str> = param.split('=').collect();
         if kv.len() != 2 {
             continue;
         }
-        
+
         match kv[0] {
             "mac" => mac_str = Some(kv[1]),
             "download" => download_limit_str = Some(kv[1]),
@@ -157,23 +162,23 @@ async fn set_device_limit(
             _ => {}
         }
     }
-    
+
     let mac = match mac_str {
         Some(m) => parse_mac_address(m)?,
         None => return Err(anyhow::anyhow!("缺少MAC地址参数")),
     };
-    
+
     // 默认无限制
     let download_limit = match download_limit_str {
         Some(dl) => parse_rate(dl)?,
         None => 0,
     };
-    
+
     let upload_limit = match upload_limit_str {
         Some(ul) => parse_rate(ul)?,
         None => 0,
     };
-    
+
     // 更新用户空间的统计信息
     {
         let mut stats_map = mac_stats.lock().unwrap();
@@ -188,27 +193,27 @@ async fn set_device_limit(
             stats_map.insert(mac, new_stats);
         }
     }
-    
+
     // 格式化速率为可读的字符串
     let download_str = if download_limit == 0 {
         "无限制".to_string()
     } else {
         format_bytes(download_limit) + "/s"
     };
-    
+
     let upload_str = if upload_limit == 0 {
         "无限制".to_string()
     } else {
         format_bytes(upload_limit) + "/s"
     };
-    
+
     info!(
-        "已设置 MAC: {} 的限速 - 下载: {}, 上传: {}", 
-        format_mac(&mac), 
-        download_str, 
+        "已设置 MAC: {} 的限速 - 下载: {}, 上传: {}",
+        format_mac(&mac),
+        download_str,
         upload_str
     );
-    
+
     Ok(())
 }
 
@@ -246,29 +251,16 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
     for (i, (mac, stats)) in stats_map.iter().enumerate() {
         // 格式化MAC地址
         let mac_str = format_mac(mac);
-        
+
         // 格式化IP地址
         let ip_str = format!(
-            "{}.{}.{}.{}", 
+            "{}.{}.{}.{}",
             stats.ip_address[0], stats.ip_address[1], stats.ip_address[2], stats.ip_address[3]
         );
 
-        // 格式化限速信息
-        let download_limit = if stats.download_limit == 0 {
-            "无限制".to_string()
-        } else {
-            format_bytes(stats.download_limit) + "/s"
-        };
-
-        let upload_limit = if stats.upload_limit == 0 {
-            "无限制".to_string()
-        } else {
-            format_bytes(stats.upload_limit) + "/s"
-        };
-
         json.push_str(&format!(
-            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"rx_bytes\": {},\n      \"tx_bytes\": {},\n      \"rx_rate\": {},\n      \"tx_rate\": {},\n      \"download_limit\": \"{}\",\n      \"upload_limit\": \"{}\"\n    }}",
-            ip_str, mac_str, stats.rx_bytes, stats.tx_bytes, stats.rx_rate, stats.tx_rate, download_limit, upload_limit
+            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"rx_bytes\": {},\n      \"tx_bytes\": {},\n      \"rx_rate\": {},\n      \"tx_rate\": {},\n      \"download_limit\": {},\n      \"upload_limit\": {}\n    }}",
+            ip_str, mac_str, stats.rx_bytes, stats.tx_bytes, stats.rx_rate, stats.tx_rate, stats.download_limit, stats.upload_limit
         ));
 
         if i < total_items - 1 {

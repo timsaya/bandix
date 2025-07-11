@@ -194,6 +194,7 @@ pub async fn update(
     ingress_ebpf: &aya::Ebpf,
     egress_ebpf: &aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
+    
     let mac_ip_mapping = collect_mac_ip_mapping(ingress_ebpf, egress_ebpf)?;
     let traffic_data = collect_traffic_data(ingress_ebpf, egress_ebpf)?;
     let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
