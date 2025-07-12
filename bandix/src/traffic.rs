@@ -190,17 +190,60 @@ fn update_traffic_stats(
     Ok(())
 }
 
-// 更新数据并显示界面
+fn update_rate_limit(
+    mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
+    ingress_ebpf: &mut aya::Ebpf,
+    egress_ebpf: &mut aya::Ebpf,
+) -> Result<(), anyhow::Error> {
+    let mut stats_map = mac_stats.lock().unwrap();
+
+    let mut ingress_mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
+        ingress_ebpf
+            .map_mut("MAC_RATE_LIMITS")
+            .ok_or(anyhow::anyhow!("找不到ingress MAC_RATE_LIMITS"))?,
+    )?;
+
+    let mut egress_mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
+        egress_ebpf
+            .map_mut("MAC_RATE_LIMITS")
+            .ok_or(anyhow::anyhow!("找不到egress MAC_RATE_LIMITS"))?,
+    )?;
+
+    for (mac, traffic_data) in stats_map.iter_mut() {
+        ingress_mac_rate_limits
+            .insert(
+                mac,
+                &[traffic_data.rx_rate_limit, traffic_data.tx_rate_limit],
+                0,
+            )
+            .unwrap();
+
+        egress_mac_rate_limits
+            .insert(
+                mac,
+                &[traffic_data.rx_rate_limit, traffic_data.tx_rate_limit],
+                0,
+            )
+            .unwrap();
+    }
+
+    Ok(())
+}
+
+// 更新数据
 pub async fn update(
     mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-    ingress_ebpf: &aya::Ebpf,
-    egress_ebpf: &aya::Ebpf,
+    ingress_ebpf: &mut aya::Ebpf,
+    egress_ebpf: &mut aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
     let mac_ip_mapping = collect_mac_ip_mapping(ingress_ebpf, egress_ebpf)?;
     let traffic_data = collect_traffic_data(ingress_ebpf, egress_ebpf)?;
     let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
 
     update_traffic_stats(mac_stats, &device_traffic_stats)?;
+
+    update_rate_limit(mac_stats, ingress_ebpf, egress_ebpf)?;
+
     display_tui_interface(mac_stats);
 
     Ok(())

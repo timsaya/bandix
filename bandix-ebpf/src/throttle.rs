@@ -1,10 +1,10 @@
 use crate::utils::math_utils::min;
 use crate::utils::time_utils::get_current_time;
-use crate::RATE_BUCKETS;
+use crate::{RATE_BUCKETS, MAC_RATE_LIMITS};
 
 // 检查是否需要限速
 #[inline]
-fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> bool {
+pub fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> bool {
     if limit == 0 {
         return false; // 无限制
     }
@@ -50,6 +50,24 @@ fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> boo
             bucket_state[idx] = bucket_state[idx].saturating_sub(data_len);
             let _ = RATE_BUCKETS.insert(mac, &bucket_state, 0);
             false
+        }
+    }
+}
+
+// 获取指定 MAC 地址的速率限制
+#[inline]
+pub fn get_rate_limit(mac: &[u8; 6], is_rx: bool) -> u64 {
+    unsafe {
+        let limits = MAC_RATE_LIMITS.get(mac);
+        match limits {
+            Some(limit) => {
+                if is_rx {
+                    limit[1] // 上传限制
+                } else {
+                    limit[0] // 下载限制
+                }
+            },
+            None => 0 // 无限制
         }
     }
 }

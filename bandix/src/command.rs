@@ -59,8 +59,8 @@ async fn init_subnet_info(
 async fn run_service(
     _iface: String,
     port: u16,
-    ingress_ebpf: aya::Ebpf,
-    egress_ebpf: aya::Ebpf,
+    mut ingress_ebpf: aya::Ebpf,
+    mut egress_ebpf: aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
     let mac_stats = Arc::new(Mutex::new(StdHashMap::<[u8; 6], MacTrafficStats>::new()));
 
@@ -85,7 +85,7 @@ async fn run_service(
     let mut interval = interval(Duration::from_millis(1000));
     while *running.lock().unwrap() {
         interval.tick().await;
-        update(&mac_stats, &ingress_ebpf, &egress_ebpf).await?;
+        update(&mac_stats, &mut ingress_ebpf, &mut egress_ebpf).await?;
     }
 
     Ok(())

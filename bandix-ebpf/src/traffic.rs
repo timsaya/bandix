@@ -1,7 +1,9 @@
+use crate::utils::network_utils::is_subnet_ip;
+use crate::MAC_IP_MAPPING;
 use crate::MAC_TRAFFIC;
 
 #[inline]
-pub fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool) {
+fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool) {
     let traffic = MAC_TRAFFIC.get_ptr_mut(mac);
 
     match traffic {
@@ -23,5 +25,23 @@ pub fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool) {
             }
             let _ = MAC_TRAFFIC.insert(mac, &stats, 0);
         }
+    }
+}
+
+pub fn monitor_traffic(
+    src_mac: &[u8; 6],
+    dst_mac: &[u8; 6],
+    data_len: u64,
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+) {
+    if is_subnet_ip(&src_ip) {
+        update_traffic_stats(&src_mac, data_len, false);
+        let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
+    }
+
+    if is_subnet_ip(&dst_ip) {
+        update_traffic_stats(&dst_mac, data_len, true);
+        let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
     }
 }

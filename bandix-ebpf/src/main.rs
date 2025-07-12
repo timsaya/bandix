@@ -7,15 +7,20 @@ mod utils;
 
 use aya_ebpf::macros::map;
 use aya_ebpf::maps::{Array, HashMap};
-use aya_ebpf::{bindings::TC_ACT_PIPE, macros::classifier, programs::TcContext};
+use aya_ebpf::{
+    bindings::{TC_ACT_PIPE, TC_ACT_SHOT, TC_ACT_STOLEN},
+    macros::classifier,
+    programs::TcContext,
+};
+use aya_log_ebpf::info;
 use network_types::eth::EthHdr;
 use network_types::ip::Ipv4Hdr;
 
-use utils::network_utils::is_subnet_ip;
-use utils::packet_utils::ptr_at;
-use utils::traffic_utils::{is_egress, is_ingress};
+use throttle::{get_rate_limit, should_throttle};
+use traffic::monitor_traffic;
+use utils::{network_utils::is_subnet_ip, packet_utils::ptr_at};
 
-use traffic::update_traffic_stats;
+use crate::utils::traffic_utils::{is_egress, is_ingress};
 
 // traffic direction: -1 for ingress, 1 for egress
 #[no_mangle]
@@ -68,7 +73,7 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
     let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
     let data_len = unsafe { u16::from_be_bytes((*ipv4hdr).tot_len) } as u64;
 
-    // IP 地址
+    // IP address
     let src_ip = unsafe { (*ipv4hdr).src_addr };
     let dst_ip = unsafe { (*ipv4hdr).dst_addr };
 
@@ -80,31 +85,22 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE);
     }
 
-    // monitor lan traffic, ingress direction. device send data to router
     if is_ingress() {
-        if is_subnet_ip(&src_ip) {
-            update_traffic_stats(&src_mac, data_len, false);
-            let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
-        }
-
-        if is_subnet_ip(&dst_ip) {
-            update_traffic_stats(&dst_mac, data_len, true);
-            let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
+        let upload_limit = get_rate_limit(&src_mac, false);
+        if should_throttle(&src_mac, data_len, upload_limit, false) {
+            return Ok(TC_ACT_SHOT);
         }
     }
 
-    // monitor lan traffic, egress direction. device receive data from router
     if is_egress() {
-        if is_subnet_ip(&dst_ip) {
-            update_traffic_stats(&dst_mac, data_len, true);
-            let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
-        }
-
-        if is_subnet_ip(&src_ip) {
-            update_traffic_stats(&src_mac, data_len, false);
-            let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
+        let download_limit = get_rate_limit(&dst_mac, true);
+        if should_throttle(&dst_mac, data_len, download_limit, true) {
+            return Ok(TC_ACT_SHOT);
         }
     }
+
+    // 监控流量统计
+    monitor_traffic(&src_mac, &dst_mac, data_len, &src_ip, &dst_ip);
 
     Ok(TC_ACT_PIPE)
 }
