@@ -105,38 +105,6 @@ fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     Ok(mac)
 }
 
-// 解析速率字符串为字节/秒
-fn parse_rate(rate_str: &str) -> Result<u64, anyhow::Error> {
-    if rate_str.is_empty() || rate_str == "0" {
-        return Ok(0); // 0表示无限制
-    }
-
-    let rate_str = rate_str.trim().to_lowercase();
-    let rate_str = rate_str.trim_end_matches("/s"); // 移除可能存在的"/s"后缀
-
-    let mut numeric_part = String::new();
-    let mut unit_part = String::new();
-
-    for c in rate_str.chars() {
-        if c.is_ascii_digit() || c == '.' {
-            numeric_part.push(c);
-        } else {
-            unit_part.push(c);
-        }
-    }
-
-    let value: f64 = numeric_part.parse()?;
-    let bytes_per_second = match unit_part.trim() {
-        "" => value as u64, // 无单位，假设为字节/秒
-        "b" => value as u64,
-        "kb" | "k" => (value * 1024.0) as u64,
-        "mb" | "m" => (value * 1024.0 * 1024.0) as u64,
-        "gb" | "g" => (value * 1024.0 * 1024.0 * 1024.0) as u64,
-        _ => return Err(anyhow::anyhow!("不支持的速率单位: {}", unit_part)),
-    };
-
-    Ok(bytes_per_second)
-}
 
 // 设置设备限速（JSON格式）
 async fn set_device_limit_json(
