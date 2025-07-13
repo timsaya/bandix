@@ -152,37 +152,37 @@ async fn set_device_limit_json(
 
     let mac = parse_mac_address(mac_str)?;
 
-    // 解析下载和上传限速（直接解析数字，单位为字节）
-    let rx_rate_limit = json["rx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
+    // 解析跨网络下载和上传限速（直接解析数字，单位为字节）
+    let wide_rx_rate_limit = json["wide_rx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
 
-    let tx_rate_limit = json["tx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
+    let wide_tx_rate_limit = json["wide_tx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
 
     // 更新用户空间的统计信息
     {
         let mut stats_map = mac_stats.lock().unwrap();
         if let Some(stats) = stats_map.get_mut(&mac) {
-            stats.rx_rate_limit = rx_rate_limit;
-            stats.tx_rate_limit = tx_rate_limit;
+            stats.wide_rx_rate_limit = wide_rx_rate_limit;
+            stats.wide_tx_rate_limit = wide_tx_rate_limit;
         } else {
             // 如果没有找到MAC地址，创建一个新的记录
             let mut new_stats = MacTrafficStats::default();
-            new_stats.rx_rate_limit = rx_rate_limit;
-            new_stats.tx_rate_limit = tx_rate_limit;
+            new_stats.wide_rx_rate_limit = wide_rx_rate_limit;
+            new_stats.wide_tx_rate_limit = wide_tx_rate_limit;
             stats_map.insert(mac, new_stats);
         }
     }
 
     // 格式化速率为可读的字符串
-    let rx_str = if rx_rate_limit == 0 {
+    let rx_str = if wide_rx_rate_limit == 0 {
         "无限制".to_string()
     } else {
-        format!("{}/s", format_bytes(rx_rate_limit))
+        format!("{}/s", format_bytes(wide_rx_rate_limit))
     };
 
-    let tx_str = if tx_rate_limit == 0 {
+    let tx_str = if wide_tx_rate_limit == 0 {
         "无限制".to_string()
     } else {
-        format!("{}/s", format_bytes(tx_rate_limit))
+        format!("{}/s", format_bytes(wide_tx_rate_limit))
     };
 
     info!(
@@ -237,8 +237,12 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
         );
 
         json.push_str(&format!(
-            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"rx_bytes\": {},\n      \"tx_bytes\": {},\n      \"rx_rate\": {},\n      \"tx_rate\": {},\n      \"rx_rate_limit\": {},\n      \"tx_rate_limit\": {}\n    }}",
-            ip_str, mac_str, stats.rx_bytes, stats.tx_bytes, stats.rx_rate, stats.tx_rate, stats.rx_rate_limit, stats.tx_rate_limit
+            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"total_rx_bytes\": {},\n      \"total_tx_bytes\": {},\n      \"total_rx_rate\": {},\n      \"total_tx_rate\": {},\n      \"wide_rx_rate_limit\": {},\n      \"wide_tx_rate_limit\": {},\n      \"local_rx_bytes\": {},\n      \"local_tx_bytes\": {},\n      \"local_rx_rate\": {},\n      \"local_tx_rate\": {},\n      \"wide_rx_bytes\": {},\n      \"wide_tx_bytes\": {},\n      \"wide_rx_rate\": {},\n      \"wide_tx_rate\": {}\n    }}",
+            ip_str, mac_str, 
+            stats.total_rx_bytes, stats.total_tx_bytes, stats.total_rx_rate, stats.total_tx_rate, 
+            stats.wide_rx_rate_limit, stats.wide_tx_rate_limit,
+            stats.local_rx_bytes, stats.local_tx_bytes, stats.local_rx_rate, stats.local_tx_rate,
+            stats.wide_rx_bytes, stats.wide_tx_bytes, stats.wide_rx_rate, stats.wide_tx_rate
         ));
 
         if i < total_items - 1 {

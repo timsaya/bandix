@@ -8,11 +8,10 @@ mod utils;
 use aya_ebpf::macros::map;
 use aya_ebpf::maps::{Array, HashMap};
 use aya_ebpf::{
-    bindings::{TC_ACT_PIPE, TC_ACT_SHOT, TC_ACT_STOLEN},
+    bindings::{TC_ACT_PIPE, TC_ACT_SHOT},
     macros::classifier,
     programs::TcContext,
 };
-use aya_log_ebpf::info;
 use network_types::eth::EthHdr;
 use network_types::ip::Ipv4Hdr;
 
@@ -26,9 +25,9 @@ use crate::utils::traffic_utils::{is_egress, is_ingress};
 #[no_mangle]
 static TRAFFIC_DIRECTION: i32 = 0;
 
-// record traffic stats of a mac address, [send bytes, receive bytes]
+// record traffic stats of a mac address, [local send bytes, local receive bytes, wide send bytes, wide receive bytes]
 #[map]
-static MAC_TRAFFIC: HashMap<[u8; 6], [u64; 2]> = HashMap::with_max_entries(1024, 0);
+static MAC_TRAFFIC: HashMap<[u8; 6], [u64; 4]> = HashMap::with_max_entries(1024, 0);
 
 // map mac to ip address
 #[map]
@@ -85,21 +84,40 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
         return Ok(TC_ACT_PIPE);
     }
 
+    // rate limit
+    let src_is_local = is_subnet_ip(&src_ip);
+    let dst_is_local = is_subnet_ip(&dst_ip);
+
+
     if is_ingress() {
-        let upload_limit = get_rate_limit(&src_mac, false);
-        if should_throttle(&src_mac, data_len, upload_limit, false) {
-            return Ok(TC_ACT_SHOT);
+        if src_is_local {
+            // source ip is in local network
+            if !dst_is_local {
+                // destination ip is not in local network, this is wide network traffic, need to throttle
+                let upload_limit = get_rate_limit(&src_mac, false);
+                if should_throttle(&src_mac, data_len, upload_limit, false) {
+                    return Ok(TC_ACT_SHOT);
+                }
+            }
+            // destination ip is in local network, this is local network traffic, no need to throttle
         }
     }
 
     if is_egress() {
-        let download_limit = get_rate_limit(&dst_mac, true);
-        if should_throttle(&dst_mac, data_len, download_limit, true) {
-            return Ok(TC_ACT_SHOT);
+        if dst_is_local {
+            // destination ip is in local network
+            if !src_is_local {
+                // source ip is not in local network, this is wide network traffic, need to throttle
+                let download_limit = get_rate_limit(&dst_mac, true);
+                if should_throttle(&dst_mac, data_len, download_limit, true) {
+                    return Ok(TC_ACT_SHOT);
+                }
+            }
+            // source ip is in local network, this is local network traffic, no need to throttle
         }
     }
 
-    // 监控流量统计
+    // monitor traffic stats
     monitor_traffic(&src_mac, &dst_mac, data_len, &src_ip, &dst_ip);
 
     Ok(TC_ACT_PIPE)

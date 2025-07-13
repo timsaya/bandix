@@ -42,10 +42,20 @@ Then access `http://localhost:<port_number>/api/devices` in your browser to get 
     {
       "ip": "192.168.1.100",
       "mac": "00:11:22:33:44:55",
-      "rx_bytes": 1024,
-      "tx_bytes": 2048,
-      "rx_rate": 100,
-      "tx_rate": 200
+      "total_rx_bytes": 1024,
+      "total_tx_bytes": 2048,
+      "total_rx_rate": 100,
+      "total_tx_rate": 200,
+      "local_rx_bytes": 512,
+      "local_tx_bytes": 1024,
+      "local_rx_rate": 50,
+      "local_tx_rate": 100,
+      "wide_rx_bytes": 512,
+      "wide_tx_bytes": 1024,
+      "wide_rx_rate": 50,
+      "wide_tx_rate": 100,
+      "wide_rx_rate_limit": 0,
+      "wide_tx_rate_limit": 0
     }
   ]
 }
@@ -54,7 +64,17 @@ Then access `http://localhost:<port_number>/api/devices` in your browser to get 
 **Field Descriptions**:
 - `ip`: Device IP address
 - `mac`: Device MAC address
-- `rx_bytes`: Total bytes received by the device
-- `tx_bytes`: Total bytes sent by the device
-- `rx_rate`: Current receiving rate of the device (bytes/second)
-- `tx_rate`: Current sending rate of the device (bytes/second) 
+- `total_rx_bytes`: Total bytes received by the device
+- `total_tx_bytes`: Total bytes sent by the device
+- `total_rx_rate`: Current total receiving rate of the device (bytes/second)
+- `total_tx_rate`: Current total sending rate of the device (bytes/second)
+- `wide_rx_rate_limit`: Wide network download limit (bytes/second)
+- `wide_tx_rate_limit`: Wide network upload limit (bytes/second)
+- `local_rx_bytes`: Local network receiving bytes
+- `local_tx_bytes`: Local network sending bytes
+- `local_rx_rate`: Local network receiving rate (bytes/second)
+- `local_tx_rate`: Local network sending rate (bytes/second)
+- `wide_rx_bytes`: Wide network receiving bytes
+- `wide_tx_bytes`: Wide network sending bytes
+- `wide_rx_rate`: Wide network receiving rate (bytes/second)
+- `wide_tx_rate`: Wide network sending rate (bytes/second) 

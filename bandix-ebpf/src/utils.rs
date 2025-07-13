@@ -4,21 +4,21 @@ pub mod network_utils {
 
     #[inline]
     pub fn is_subnet_ip(ip: &[u8; 4]) -> bool {
-        let network_addr = SUBNET_INFO.get(0);
-        let subnet_mask = SUBNET_INFO.get(1);
+        let network_addr = SUBNET_INFO.get(0).unwrap_or(&[0, 0, 0, 0]);
+        let subnet_mask = SUBNET_INFO.get(1).unwrap_or(&[0, 0, 0, 0]);
 
-        if let Some(network_addr) = network_addr {
-            if let Some(subnet_mask) = subnet_mask {
-                for i in 0..4 {
-                    if (ip[i] & subnet_mask[i]) != (network_addr[i] & subnet_mask[i]) {
-                        return false;
-                    }
-                }
-                return true;
-            }
+        // 如果子网信息未设置，返回 false
+        if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
             return false;
         }
-        return false;
+
+        // 检查IP是否在子网内
+        for i in 0..4 {
+            if (ip[i] & subnet_mask[i]) != (network_addr[i] & subnet_mask[i]) {
+                return false;
+            }
+        }
+        true
     }
 }
 

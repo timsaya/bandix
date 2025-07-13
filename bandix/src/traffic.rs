@@ -61,16 +61,16 @@ fn collect_mac_ip_mapping(
 fn collect_traffic_data(
     ingress_ebpf: &aya::Ebpf,
     egress_ebpf: &aya::Ebpf,
-) -> Result<StdHashMap<[u8; 6], [u64; 2]>, anyhow::Error> {
+) -> Result<StdHashMap<[u8; 6], [u64; 4]>, anyhow::Error> {
     let mut traffic_data = StdHashMap::new();
 
-    let ingress_traffic = HashMap::<&MapData, [u8; 6], [u64; 2]>::try_from(
+    let ingress_traffic = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
         ingress_ebpf
             .map("MAC_TRAFFIC")
             .ok_or(anyhow::anyhow!("找不到ingress MAC_TRAFFIC映射"))?,
     )?;
 
-    let egress_traffic = HashMap::<&MapData, [u8; 6], [u64; 2]>::try_from(
+    let egress_traffic = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
         egress_ebpf
             .map("MAC_TRAFFIC")
             .ok_or(anyhow::anyhow!("找不到egress MAC_TRAFFIC映射"))?,
@@ -96,9 +96,11 @@ fn collect_traffic_data(
         }
 
         if let Some(existing) = traffic_data.get_mut(&key) {
-            // 合并上传和下载流量
-            existing[0] = existing[0].saturating_add(value[0]);
-            existing[1] = existing[1].saturating_add(value[1]);
+            // 合并局域网内部和跨网络的流量
+            existing[0] = existing[0].saturating_add(value[0]); // 局域网内部发送
+            existing[1] = existing[1].saturating_add(value[1]); // 局域网内部接收
+            existing[2] = existing[2].saturating_add(value[2]); // 跨网络发送
+            existing[3] = existing[3].saturating_add(value[3]); // 跨网络接收
         } else {
             traffic_data.insert(key, value);
         }
@@ -109,12 +111,14 @@ fn collect_traffic_data(
 
 struct TrafficData {
     pub ip_address: [u8; 4],
-    pub tx_bytes: u64,
-    pub rx_bytes: u64,
+    pub local_tx_bytes: u64,    // 局域网内部发送字节数
+    pub local_rx_bytes: u64,    // 局域网内部接收字节数
+    pub wide_tx_bytes: u64, // 跨网络发送字节数
+    pub wide_rx_bytes: u64, // 跨网络接收字节数
 }
 
 fn merge(
-    traffic_data: &StdHashMap<[u8; 6], [u64; 2]>,
+    traffic_data: &StdHashMap<[u8; 6], [u64; 4]>,
     mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
 ) -> Result<StdHashMap<[u8; 6], TrafficData>, anyhow::Error> {
     let mut traffic = StdHashMap::new();
@@ -125,8 +129,10 @@ fn merge(
                 *mac,
                 TrafficData {
                     ip_address: *ip,
-                    tx_bytes: data[0],
-                    rx_bytes: data[1],
+                    local_tx_bytes: data[0],    // 局域网内部发送
+                    local_rx_bytes: data[1],    // 局域网内部接收
+                    wide_tx_bytes: data[2], // 跨网络发送
+                    wide_rx_bytes: data[3], // 跨网络接收
                 },
             );
         }
@@ -150,40 +156,88 @@ fn update_traffic_stats(
     for (mac, traffic_data) in device_traffic_stats.iter() {
         let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
             ip_address: traffic_data.ip_address,
-            rx_bytes: 0,
-            tx_bytes: 0,
-            rx_packets: 0,
-            tx_packets: 0,
-            last_rx_bytes: 0,
-            last_tx_bytes: 0,
-            rx_rate: 0,
-            tx_rate: 0,
+            // 总流量统计
+            total_rx_bytes: 0,
+            total_tx_bytes: 0,
+            total_rx_packets: 0,
+            total_tx_packets: 0,
+            total_last_rx_bytes: 0,
+            total_last_tx_bytes: 0,
+            total_rx_rate: 0,
+            total_tx_rate: 0,
+            // 跨网络速率限制
+            wide_rx_rate_limit: 0,
+            wide_tx_rate_limit: 0,
+            // 局域网内部流量统计
+            local_rx_bytes: 0,
+            local_tx_bytes: 0,
+            local_rx_rate: 0,
+            local_tx_rate: 0,
+            local_last_rx_bytes: 0,
+            local_last_tx_bytes: 0,
+            // 跨网络流量统计
+            wide_rx_bytes: 0,
+            wide_tx_bytes: 0,
+            wide_rx_rate: 0,
+            wide_tx_rate: 0,
+            wide_last_rx_bytes: 0,
+            wide_last_tx_bytes: 0,
             last_update: now,
-            rx_rate_limit: 0,
-            tx_rate_limit: 0,
         });
 
+        // 计算总流量
+        let total_rx_bytes = traffic_data.local_rx_bytes + traffic_data.wide_rx_bytes;
+        let total_tx_bytes = traffic_data.local_tx_bytes + traffic_data.wide_tx_bytes;
+
         // 更新总字节数
-        stats.rx_bytes = traffic_data.rx_bytes;
-        stats.tx_bytes = traffic_data.tx_bytes;
+        stats.total_rx_bytes = total_rx_bytes;
+        stats.total_tx_bytes = total_tx_bytes;
+
+        // 更新局域网内部流量
+        stats.local_rx_bytes = traffic_data.local_rx_bytes;
+        stats.local_tx_bytes = traffic_data.local_tx_bytes;
+
+        // 更新跨网络流量
+        stats.wide_rx_bytes = traffic_data.wide_rx_bytes;
+        stats.wide_tx_bytes = traffic_data.wide_tx_bytes;
 
         // 计算速率（字节/秒）
         if stats.last_update > 0 {
             let time_diff = now.saturating_sub(stats.last_update);
             if time_diff > 0 {
-                // 计算接收速率
-                let rx_diff = stats.rx_bytes.saturating_sub(stats.last_rx_bytes);
-                stats.rx_rate = (rx_diff * 1000) / time_diff; // 转换为字节/秒
+                // 计算总接收速率
+                let rx_diff = stats.total_rx_bytes.saturating_sub(stats.total_last_rx_bytes);
+                stats.total_rx_rate = (rx_diff * 1000) / time_diff; // 转换为字节/秒
 
-                // 计算发送速率
-                let tx_diff = stats.tx_bytes.saturating_sub(stats.last_tx_bytes);
-                stats.tx_rate = (tx_diff * 1000) / time_diff; // 转换为字节/秒
+                // 计算总发送速率
+                let tx_diff = stats.total_tx_bytes.saturating_sub(stats.total_last_tx_bytes);
+                stats.total_tx_rate = (tx_diff * 1000) / time_diff; // 转换为字节/秒
+
+                // 计算局域网内部接收速率
+                let local_rx_diff = stats.local_rx_bytes.saturating_sub(stats.local_last_rx_bytes);
+                stats.local_rx_rate = (local_rx_diff * 1000) / time_diff;
+
+                // 计算局域网内部发送速率
+                let local_tx_diff = stats.local_tx_bytes.saturating_sub(stats.local_last_tx_bytes);
+                stats.local_tx_rate = (local_tx_diff * 1000) / time_diff;
+
+                // 计算跨网络接收速率
+                let wide_rx_diff = stats.wide_rx_bytes.saturating_sub(stats.wide_last_rx_bytes);
+                stats.wide_rx_rate = (wide_rx_diff * 1000) / time_diff;
+
+                // 计算跨网络发送速率
+                let wide_tx_diff = stats.wide_tx_bytes.saturating_sub(stats.wide_last_tx_bytes);
+                stats.wide_tx_rate = (wide_tx_diff * 1000) / time_diff;
             }
         }
 
         // 保存当前值作为下次计算的基础
-        stats.last_rx_bytes = stats.rx_bytes;
-        stats.last_tx_bytes = stats.tx_bytes;
+        stats.total_last_rx_bytes = stats.total_rx_bytes;
+        stats.total_last_tx_bytes = stats.total_tx_bytes;
+        stats.local_last_rx_bytes = stats.local_rx_bytes;
+        stats.local_last_tx_bytes = stats.local_tx_bytes;
+        stats.wide_last_rx_bytes = stats.wide_rx_bytes;
+        stats.wide_last_tx_bytes = stats.wide_tx_bytes;
         stats.last_update = now;
     }
 
@@ -213,7 +267,7 @@ fn update_rate_limit(
         ingress_mac_rate_limits
             .insert(
                 mac,
-                &[traffic_data.rx_rate_limit, traffic_data.tx_rate_limit],
+                &[traffic_data.wide_rx_rate_limit, traffic_data.wide_tx_rate_limit],
                 0,
             )
             .unwrap();
@@ -221,7 +275,7 @@ fn update_rate_limit(
         egress_mac_rate_limits
             .insert(
                 mac,
-                &[traffic_data.rx_rate_limit, traffic_data.tx_rate_limit],
+                &[traffic_data.wide_rx_rate_limit, traffic_data.wide_tx_rate_limit],
                 0,
             )
             .unwrap();

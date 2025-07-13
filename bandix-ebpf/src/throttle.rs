@@ -1,6 +1,6 @@
 use crate::utils::math_utils::min;
 use crate::utils::time_utils::get_current_time;
-use crate::{RATE_BUCKETS, MAC_RATE_LIMITS};
+use crate::{MAC_RATE_LIMITS, RATE_BUCKETS};
 
 // 检查是否需要限速
 #[inline]
@@ -66,8 +66,8 @@ pub fn get_rate_limit(mac: &[u8; 6], is_rx: bool) -> u64 {
                 } else {
                     limit[0] // 下载限制
                 }
-            },
-            None => 0 // 无限制
+            }
+            None => 0, // 无限制
         }
     }
 }
