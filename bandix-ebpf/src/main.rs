@@ -76,8 +76,21 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
     let src_ip = unsafe { (*ipv4hdr).src_addr };
     let dst_ip = unsafe { (*ipv4hdr).dst_addr };
 
-    let network_addr = SUBNET_INFO.get(0).unwrap_or(&[0, 0, 0, 0]);
-    let subnet_mask = SUBNET_INFO.get(1).unwrap_or(&[0, 0, 0, 0]);
+    // 更安全的访问方式 
+    let network_addr = match SUBNET_INFO.get(0) {
+        Some(addr) => addr,
+        None => return Ok(TC_ACT_PIPE),
+    };
+
+    let subnet_mask = match SUBNET_INFO.get(1) {
+        Some(mask) => mask,
+        None => return Ok(TC_ACT_PIPE),
+    };
+
+    // 提前检查是否初始化
+    if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
+        return Ok(TC_ACT_PIPE);
+    }
 
     // if subnet info is not set, skip
     if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
@@ -87,7 +100,6 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
     // rate limit
     let src_is_local = is_subnet_ip(&src_ip);
     let dst_is_local = is_subnet_ip(&dst_ip);
-
 
     if is_ingress() {
         if src_is_local {

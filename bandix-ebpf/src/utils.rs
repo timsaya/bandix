@@ -4,8 +4,14 @@ pub mod network_utils {
 
     #[inline]
     pub fn is_subnet_ip(ip: &[u8; 4]) -> bool {
-        let network_addr = SUBNET_INFO.get(0).unwrap_or(&[0, 0, 0, 0]);
-        let subnet_mask = SUBNET_INFO.get(1).unwrap_or(&[0, 0, 0, 0]);
+        let network_addr = match SUBNET_INFO.get(0) {
+            Some(addr) => addr,
+            None => return false,
+        };
+        let subnet_mask = match SUBNET_INFO.get(1) {
+            Some(mask) => mask,
+            None => return false,
+        };
 
         // 如果子网信息未设置，返回 false
         if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
