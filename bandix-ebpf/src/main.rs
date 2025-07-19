@@ -76,7 +76,7 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
     let src_ip = unsafe { (*ipv4hdr).src_addr };
     let dst_ip = unsafe { (*ipv4hdr).dst_addr };
 
-    // 更安全的访问方式 
+    // Safer access method
     let network_addr = match SUBNET_INFO.get(0) {
         Some(addr) => addr,
         None => return Ok(TC_ACT_PIPE),
@@ -87,7 +87,7 @@ fn try_bandix(ctx: TcContext) -> Result<i32, ()> {
         None => return Ok(TC_ACT_PIPE),
     };
 
-    // 提前检查是否初始化
+    // Check initialization early
     if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
         return Ok(TC_ACT_PIPE);
     }

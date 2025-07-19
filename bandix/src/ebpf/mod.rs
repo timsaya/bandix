@@ -2,9 +2,9 @@ pub mod egress;
 pub mod ingress;
 use log::debug;
 
-// 移除内存限制
+// Remove memory limits
 fn remove_rlimit_memlock() {
-    // 移除内存锁限制
+    // Remove memory lock limit
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,

@@ -23,7 +23,7 @@ pub struct Opt {
     pub port: u16,
 }
 
-// 初始化eBPF程序和映射
+// Initialize eBPF programs and maps
 async fn init_ebpf_programs(iface: String) -> Result<(aya::Ebpf, aya::Ebpf), anyhow::Error> {
     let egress_ebpf = load_egress(iface.clone()).await?;
     let ingress_ebpf = load_ingress(iface.clone()).await?;
@@ -31,13 +31,13 @@ async fn init_ebpf_programs(iface: String) -> Result<(aya::Ebpf, aya::Ebpf), any
     Ok((ingress_ebpf, egress_ebpf))
 }
 
-// 初始化子网配置
+// Initialize subnet configuration
 async fn init_subnet_info(
     egress_ebpf: &mut aya::Ebpf,
     ingress_ebpf: &mut aya::Ebpf,
     iface: String,
 ) -> Result<(), anyhow::Error> {
-    // 子网配置
+    // Subnet configuration
     let interface_info = get_interface_info(&iface);
     let (interface_ip, subnet_mask) = interface_info.unwrap_or(([0, 0, 0, 0], [0, 0, 0, 0]));
 
@@ -55,7 +55,7 @@ async fn init_subnet_info(
     Ok(())
 }
 
-// 运行服务，同时启动Web服务器和提供TUI输出
+// Run service, start web server and provide TUI output
 async fn run_service(
     _iface: String,
     port: u16,
@@ -69,7 +69,7 @@ async fn run_service(
 
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {
-            info!("正在退出...");
+            info!("Exiting...");
             let mut r = r.lock().unwrap();
             *r = false;
         }
@@ -78,7 +78,7 @@ async fn run_service(
     let mac_stats_clone = Arc::clone(&mac_stats);
     tokio::spawn(async move {
         if let Err(e) = web::start_server(port, mac_stats_clone).await {
-            eprintln!("Web服务器错误: {}", e);
+            eprintln!("Web server error: {}", e);
         }
     });
 
@@ -92,20 +92,20 @@ async fn run_service(
 }
 
 pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
-    // 设置日志
+    // Set up logging
     env_logger::Builder::new()
         .filter(None, LevelFilter::Info)
         .init();
 
     let Opt { iface, port } = opt;
 
-    // 初始化eBPF程序
+    // Initialize eBPF programs
     let (mut ingress_ebpf, mut egress_ebpf) = init_ebpf_programs(iface.clone()).await?;
 
-    // 初始化子网配置
+    // Initialize subnet configuration
     init_subnet_info(&mut ingress_ebpf, &mut egress_ebpf, iface.clone()).await?;
 
-    // 运行服务（同时启动Web和TUI）
+    // Run service (start web and TUI)
     run_service(iface, port, ingress_ebpf, egress_ebpf).await?;
 
     Ok(())

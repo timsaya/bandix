@@ -9,38 +9,38 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct MacTrafficStats {
-    pub ip_address: [u8; 4], // IP地址
+    pub ip_address: [u8; 4], // IP address
 
-    // 总流量统计
-    pub total_rx_bytes: u64,      // 总接收字节数
-    pub total_tx_bytes: u64,      // 总发送字节数
-    pub total_rx_packets: u64,    // 总接收数据包数
-    pub total_tx_packets: u64,    // 总发送数据包数
-    pub total_last_rx_bytes: u64, // 上一次统计的总接收字节数
-    pub total_last_tx_bytes: u64, // 上一次统计的总发送字节数
-    pub total_rx_rate: u64,       // 总接收速率 (字节/秒)
-    pub total_tx_rate: u64,       // 总发送速率 (字节/秒)
+    // Total traffic statistics
+    pub total_rx_bytes: u64,      // Total receive bytes
+    pub total_tx_bytes: u64,      // Total send bytes
+    pub total_rx_packets: u64,    // Total receive packets
+    pub total_tx_packets: u64,    // Total send packets
+    pub total_last_rx_bytes: u64, // Last total receive bytes
+    pub total_last_tx_bytes: u64, // Last total send bytes
+    pub total_rx_rate: u64,       // Total receive rate (bytes/sec)
+    pub total_tx_rate: u64,       // Total send rate (bytes/sec)
 
-    // 局域网内部流量统计
-    pub local_rx_bytes: u64,      // 局域网内部接收字节数
-    pub local_tx_bytes: u64,      // 局域网内部发送字节数
-    pub local_rx_rate: u64,       // 局域网内部接收速率 (字节/秒)
-    pub local_tx_rate: u64,       // 局域网内部发送速率 (字节/秒)
-    pub local_last_rx_bytes: u64, // 上一次统计的局域网内部接收字节数
-    pub local_last_tx_bytes: u64, // 上一次统计的局域网内部发送字节数
+    // Local network traffic statistics
+    pub local_rx_bytes: u64,      // Local network receive bytes
+    pub local_tx_bytes: u64,      // Local network send bytes
+    pub local_rx_rate: u64,       // Local network receive rate (bytes/sec)
+    pub local_tx_rate: u64,       // Local network send rate (bytes/sec)
+    pub local_last_rx_bytes: u64, // Last local network receive bytes
+    pub local_last_tx_bytes: u64, // Last local network send bytes
 
-    // 跨网络流量统计
-    pub wide_rx_bytes: u64,      // 跨网络接收字节数
-    pub wide_tx_bytes: u64,      // 跨网络发送字节数
-    pub wide_rx_rate: u64,       // 跨网络接收速率 (字节/秒)
-    pub wide_tx_rate: u64,       // 跨网络发送速率 (字节/秒)
-    pub wide_last_rx_bytes: u64, // 上一次统计的跨网络接收字节数
-    pub wide_last_tx_bytes: u64, // 上一次统计的跨网络发送字节数
-    // 跨网络速率限制
-    pub wide_rx_rate_limit: u64, // 跨网络下载限制 (字节/秒)
-    pub wide_tx_rate_limit: u64, // 跨网络上传限制 (字节/秒)
+    // Cross-network traffic statistics
+    pub wide_rx_bytes: u64,      // Cross-network receive bytes
+    pub wide_tx_bytes: u64,      // Cross-network send bytes
+    pub wide_rx_rate: u64,       // Cross-network receive rate (bytes/sec)
+    pub wide_tx_rate: u64,       // Cross-network send rate (bytes/sec)
+    pub wide_last_rx_bytes: u64, // Last cross-network receive bytes
+    pub wide_last_tx_bytes: u64, // Last cross-network send bytes
+    // Cross-network rate limits
+    pub wide_rx_rate_limit: u64, // Cross-network download limit (bytes/sec)
+    pub wide_tx_rate_limit: u64, // Cross-network upload limit (bytes/sec)
 
-    pub last_update: u64, // 上次更新时间戳
+    pub last_update: u64, // Last update timestamp
 }
 
 impl Default for MacTrafficStats {
@@ -57,14 +57,14 @@ impl Default for MacTrafficStats {
             total_tx_rate: 0,
             wide_rx_rate_limit: 0,
             wide_tx_rate_limit: 0,
-            // 局域网内部流量统计
+            // Local network traffic statistics
             local_rx_bytes: 0,
             local_tx_bytes: 0,
             local_rx_rate: 0,
             local_tx_rate: 0,
             local_last_rx_bytes: 0,
             local_last_tx_bytes: 0,
-            // 跨网络流量统计
+            // Cross-network traffic statistics
             wide_rx_bytes: 0,
             wide_tx_bytes: 0,
             wide_rx_rate: 0,

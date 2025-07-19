@@ -1,4 +1,5 @@
 use bandix_common::MacTrafficStats;
+use crate::utils::format_utils::{format_bytes, format_mac};
 use log::info;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -6,14 +7,14 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-// 简单的HTTP服务器，仅依赖于tokio
+// Simple HTTP server, only depends on tokio
 pub async fn start_server(
     port: u16,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
 ) -> Result<(), anyhow::Error> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    println!("HTTP服务器监听在 {}", addr);
+    println!("HTTP server listening on {}", addr);
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -21,7 +22,7 @@ pub async fn start_server(
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, mac_stats).await {
-                eprintln!("处理连接时出错: {}", e);
+                eprintln!("Error handling connection: {}", e);
             }
         });
     }
@@ -31,10 +32,10 @@ async fn handle_connection(
     mut stream: TcpStream,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
 ) -> Result<(), anyhow::Error> {
-    let mut buffer = [0; 4096]; // 增加缓冲区大小以处理更大的请求
+    let mut buffer = [0; 4096]; // Increase buffer size to handle larger requests
     let n = stream.read(&mut buffer).await?;
 
-    // 解析HTTP请求以确定路径和方法
+    // Parse HTTP request to determine path and method
     let request = String::from_utf8_lossy(&buffer[..n]);
     let lines: Vec<&str> = request.lines().collect();
 
@@ -56,7 +57,7 @@ async fn handle_connection(
         let json = generate_devices_json(&mac_stats);
         send_json_response(&mut stream, &json).await?;
     } else if path.starts_with("/api/limit") && method == "POST" {
-        // 解析JSON请求体获取MAC地址和限速设置
+        // Parse JSON request body to get MAC address and rate limit settings
         let body = parse_request_body(&request);
         if let Some(body_content) = body {
             match set_device_limit_json(&body_content, &mac_stats).await {
@@ -69,7 +70,7 @@ async fn handle_connection(
         } else {
             send_json_response_with_status(
                 &mut stream,
-                r#"{"status":"error","message":"无效的请求体"}"#,
+                r#"{"status":"error","message":"Invalid request body"}"#,
                 400,
             )
             .await?;
@@ -81,7 +82,7 @@ async fn handle_connection(
     Ok(())
 }
 
-// 从请求中解析请求体
+// Parse request body from request
 fn parse_request_body(request: &str) -> Option<String> {
     let parts: Vec<&str> = request.split("\r\n\r\n").collect();
     if parts.len() < 2 {
@@ -90,11 +91,11 @@ fn parse_request_body(request: &str) -> Option<String> {
     Some(parts[1].to_string())
 }
 
-// 解析MAC地址字符串
+// Parse MAC address string
 fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     let parts: Vec<&str> = mac_str.split(':').collect();
     if parts.len() != 6 {
-        return Err(anyhow::anyhow!("无效的MAC地址格式"));
+        return Err(anyhow::anyhow!("Invalid MAC address format"));
     }
 
     let mut mac = [0u8; 6];
@@ -106,33 +107,33 @@ fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
 }
 
 
-// 设置设备限速（JSON格式）
+// Set device rate limit (JSON format)
 async fn set_device_limit_json(
     body: &str,
     mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
 ) -> Result<(), anyhow::Error> {
-    // 解析JSON请求体
+    // Parse JSON request body
     let json: Value = serde_json::from_str(body)?;
 
     let mac_str = json["mac"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("缺少MAC地址参数"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing MAC address parameter"))?;
 
     let mac = parse_mac_address(mac_str)?;
 
-    // 解析跨网络下载和上传限速（直接解析数字，单位为字节）
-    let wide_rx_rate_limit = json["wide_rx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
+    // Parse cross-network download and upload rate limits (parse numbers directly, unit is bytes)
+    let wide_rx_rate_limit = json["wide_rx_rate_limit"].as_u64().unwrap_or(0); // Default unlimited
 
-    let wide_tx_rate_limit = json["wide_tx_rate_limit"].as_u64().unwrap_or(0); // 默认无限制
+    let wide_tx_rate_limit = json["wide_tx_rate_limit"].as_u64().unwrap_or(0); // Default unlimited
 
-    // 更新用户空间的统计信息
+    // Update user space statistics
     {
         let mut stats_map = mac_stats.lock().unwrap();
         if let Some(stats) = stats_map.get_mut(&mac) {
             stats.wide_rx_rate_limit = wide_rx_rate_limit;
             stats.wide_tx_rate_limit = wide_tx_rate_limit;
         } else {
-            // 如果没有找到MAC地址，创建一个新的记录
+            // If MAC address not found, create a new record
             let mut new_stats = MacTrafficStats::default();
             new_stats.wide_rx_rate_limit = wide_rx_rate_limit;
             new_stats.wide_tx_rate_limit = wide_tx_rate_limit;
@@ -140,21 +141,21 @@ async fn set_device_limit_json(
         }
     }
 
-    // 格式化速率为可读的字符串
+    // Format rate as readable string
     let rx_str = if wide_rx_rate_limit == 0 {
-        "无限制".to_string()
+        "Unlimited".to_string()
     } else {
         format!("{}/s", format_bytes(wide_rx_rate_limit))
     };
 
     let tx_str = if wide_tx_rate_limit == 0 {
-        "无限制".to_string()
+        "Unlimited".to_string()
     } else {
         format!("{}/s", format_bytes(wide_tx_rate_limit))
     };
 
     info!(
-        "已设置 MAC: {} 的限速 - 接收: {}, 发送: {}",
+        "Rate limit set for MAC: {} - Receive: {}, Transmit: {}",
         format_mac(&mac),
         rx_str,
         tx_str
@@ -163,30 +164,7 @@ async fn set_device_limit_json(
     Ok(())
 }
 
-// 格式化MAC地址
-fn format_mac(mac: &[u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    )
-}
 
-// 格式化字节数
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2}GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2}MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2}KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
-    }
-}
 
 fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>) -> String {
     let stats_map = mac_stats.lock().unwrap();
@@ -195,10 +173,10 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
 
     let total_items = stats_map.len();
     for (i, (mac, stats)) in stats_map.iter().enumerate() {
-        // 格式化MAC地址
+        // Format MAC address
         let mac_str = format_mac(mac);
 
-        // 格式化IP地址
+        // Format IP address
         let ip_str = format!(
             "{}.{}.{}.{}",
             stats.ip_address[0], stats.ip_address[1], stats.ip_address[2], stats.ip_address[3]

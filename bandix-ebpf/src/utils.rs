@@ -13,12 +13,12 @@ pub mod network_utils {
             None => return false,
         };
 
-        // 如果子网信息未设置，返回 false
+        // If subnet info not set, return false
         if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
             return false;
         }
 
-        // 检查IP是否在子网内
+        // Check if IP is in subnet
         for i in 0..4 {
             if (ip[i] & subnet_mask[i]) != (network_addr[i] & subnet_mask[i]) {
                 return false;

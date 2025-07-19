@@ -10,7 +10,7 @@ use command::{run, Opt};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // 解析命令行参数
+    // Parse command line arguments
     let opt = Opt::parse();
     run(opt).await?;
     Ok(())

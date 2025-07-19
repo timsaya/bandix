@@ -10,18 +10,18 @@ fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool, is_local: boo
         Some(t) => unsafe {
             if is_local {
                 if is_rx {
-                    // 局域网内部接收字节数
+                    // Local network receive bytes
                     (*t)[1] = (*t)[1] + data_len;
                 } else {
-                    // 局域网内部发送字节数
+                    // Local network send bytes
                     (*t)[0] = (*t)[0] + data_len;
                 }
             } else {
                 if is_rx {
-                    // 跨网络接收字节数
+                    // Cross-network receive bytes
                     (*t)[3] = (*t)[3] + data_len;
                 } else {
-                    // 跨网络发送字节数
+                    // Cross-network send bytes
                     (*t)[2] = (*t)[2] + data_len;
                 }
             }
@@ -30,15 +30,15 @@ fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool, is_local: boo
             let mut stats = [0u64; 4];
             if is_local {
                 if is_rx {
-                    stats[1] = data_len; // 局域网内部接收字节数
+                    stats[1] = data_len; // Local network receive bytes
                 } else {
-                    stats[0] = data_len; // 局域网内部发送字节数
+                    stats[0] = data_len; // Local network send bytes
                 }
             } else {
                 if is_rx {
-                    stats[3] = data_len; // 跨网络接收字节数
+                    stats[3] = data_len; // Cross-network receive bytes
                 } else {
-                    stats[2] = data_len; // 跨网络发送字节数
+                    stats[2] = data_len; // Cross-network send bytes
                 }
             }
             let _ = MAC_TRAFFIC.insert(mac, &stats, 0);

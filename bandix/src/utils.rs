@@ -1,5 +1,6 @@
+// Only import these formatting functions in debug mode
 pub mod format_utils {
-    // 用于将字节数转换为人类可读的格式
+    // Convert bytes to human-readable format
     pub fn format_bytes(bytes: u64) -> String {
         const KB: u64 = 1024;
         const MB: u64 = KB * 1024;
@@ -16,7 +17,7 @@ pub mod format_utils {
         }
     }
 
-    // 用于将速率转换为人类可读的格式
+    // Convert rate to human-readable format
     pub fn format_rate(bytes_per_sec: u64) -> String {
         const KB: u64 = 1024;
         const MB: u64 = KB * 1024;
@@ -33,12 +34,12 @@ pub mod format_utils {
         }
     }
 
-    // 格式化IP地址
+    // Format IP address
     pub fn format_ip(ip: &[u8; 4]) -> String {
         format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
     }
 
-    // 格式化MAC地址
+    // Format MAC address
     pub fn format_mac(mac: &[u8; 6]) -> String {
         format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -47,13 +48,14 @@ pub mod format_utils {
     }
 }
 
+
 pub mod network_utils {
 
     use std::net::Ipv4Addr;
     use std::process::Command;
     use std::str::FromStr;
 
-    // 获取接口的IP和子网掩码
+    // Get interface IP and subnet mask
     pub fn get_interface_info(interface: &str) -> Option<([u8; 4], [u8; 4])> {
         let output = Command::new("ip")
             .args(&["addr", "show", interface])
@@ -62,7 +64,7 @@ pub mod network_utils {
 
         let output_str = String::from_utf8_lossy(&output.stdout);
 
-        // 提取IPv4地址和子网掩码
+        // Extract IPv4 address and subnet mask
         for line in output_str.lines() {
             if line.trim().starts_with("inet ") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -87,7 +89,7 @@ pub mod network_utils {
         None
     }
 
-    // 从CIDR计算子网掩码
+    // Calculate subnet mask from CIDR
     pub fn get_subnet_mask(cidr: u8) -> [u8; 4] {
         let mut mask = [0u8; 4];
         let bits = cidr as usize;
