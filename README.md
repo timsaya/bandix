@@ -25,14 +25,8 @@ Bandix is a network traffic monitoring tool based on eBPF technology, developed 
 
 ## Usage
 
-### Terminal Mode
 ```shell
-sudo ./bandix -i <network_interface_name> --mode tui
-```
-
-### Web API Mode
-```shell
-sudo ./bandix -i <network_interface_name> --mode web --port <port_number>
+sudo ./bandix --iface <network_interface_name>  --port <port_number>
 ```
 Then access `http://localhost:<port_number>/api/devices` in your browser to get network traffic statistics.
 

@@ -25,16 +25,9 @@ Bandix 是一个基于 eBPF 技术的网络流量监控工具，使用 Rust 语�
 
 ## 使用方法
 
-### 终端模式
 ```shell
-sudo ./bandix -i <网络接口名称> --mode tui
+sudo ./bandix --iface <network_interface_name>  --port <port_number>
 ```
-
-### Web API 模式
-```shell
-sudo ./bandix -i <网络接口名称> --mode web --port <端口号>
-```
-
 
 ##### 1. 获取网络流量统计
 - **URL**: `http://localhost:<端口号>/api/devices`
