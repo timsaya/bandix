@@ -15,11 +15,15 @@ use tokio::signal;
 use tokio::time::interval;
 
 #[derive(Debug, Parser)]
+#[clap(name = "bandix")]
+#[clap(author = "github.com/timsaya")]
+#[clap(version = env!("CARGO_PKG_VERSION"))]
+#[clap(about = "Network traffic monitoring based on eBPF for OpenWrt")]
 pub struct Opt {
-    #[clap(short, long, default_value = "wlo1")]
+    #[clap(short, long, default_value = "br-lan", help = "Network interface to monitor")]
     pub iface: String,
 
-    #[clap(long, default_value = "8686")]
+    #[clap(short, long, default_value = "8686", help = "Web server listening port")]
     pub port: u16,
 }
 
