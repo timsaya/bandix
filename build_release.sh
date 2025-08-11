@@ -42,7 +42,10 @@ for TARGET in "${TARGETS[@]}"; do
   echo "开始为 $TARGET 构建..."
   
   # 构建发布版本
-  cargo build --release --target $TARGET
+  if ! cargo build --release --target "$TARGET"; then
+    echo "cargo build 失败，尝试使用 cargo zigbuild ..."
+    cargo zigbuild --release --target "$TARGET"
+  fi
   
   # 创建发布包目录
   TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
