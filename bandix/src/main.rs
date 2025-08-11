@@ -1,6 +1,7 @@
 mod command;
 mod display;
 mod ebpf;
+mod storage;
 mod traffic;
 mod utils;
 mod web;

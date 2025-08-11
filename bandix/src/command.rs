@@ -1,6 +1,9 @@
 use crate::ebpf::egress::load_egress;
 use crate::ebpf::ingress::load_ingress;
+use crate::storage;
 use crate::traffic::update;
+use std::collections::HashMap as StdHashMap;
+use crate::storage::BaselineTotals;
 use crate::utils::network_utils::get_interface_info;
 use crate::web;
 use aya::maps::Array;
@@ -8,7 +11,7 @@ use bandix_common::MacTrafficStats;
 use clap::Parser;
 use log::info;
 use log::LevelFilter;
-use std::collections::HashMap as StdHashMap;
+// keep only one import alias for StdHashMap above
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
@@ -25,6 +28,20 @@ pub struct Opt {
 
     #[clap(short, long, default_value = "8686", help = "Web server listening port")]
     pub port: u16,
+
+    #[clap(
+        long,
+        default_value = "bandix.db",
+        help = "SQLite 数据库存储路径，用于持久化限速配置"
+    )]
+    pub db_path: String,
+
+    #[clap(
+        long,
+        default_value = "1000",
+        help = "统计写入 SQLite 的间隔(毫秒)"
+    )]
+    pub metrics_interval_ms: u64,
 }
 
 // Initialize eBPF programs and maps
@@ -63,10 +80,13 @@ async fn init_subnet_info(
 async fn run_service(
     _iface: String,
     port: u16,
+    db_path: String,
+    metrics_interval_ms: u64,
     mut ingress_ebpf: aya::Ebpf,
     mut egress_ebpf: aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
     let mac_stats = Arc::new(Mutex::new(StdHashMap::<[u8; 6], MacTrafficStats>::new()));
+    let baseline_totals = Arc::new(Mutex::new(StdHashMap::<[u8; 6], BaselineTotals>::new()));
 
     let running = Arc::new(Mutex::new(true));
     let r: Arc<Mutex<bool>> = running.clone();
@@ -79,6 +99,34 @@ async fn run_service(
         }
     });
 
+    // 初始化数据库并加载限速配置与基线流量
+    {
+        storage::ensure_schema(&db_path)?;
+        let limits = storage::load_all_limits(&db_path)?;
+        let latest = storage::load_latest_totals(&db_path)?;
+
+        // 限速配置
+        {
+            let mut stats_map = mac_stats.lock().unwrap();
+            for (mac, rx, tx) in limits {
+                let entry = stats_map.entry(mac).or_default();
+                entry.wide_rx_rate_limit = rx;
+                entry.wide_tx_rate_limit = tx;
+            }
+        }
+
+        // 基线总量
+        {
+            let mut b = baseline_totals.lock().unwrap();
+            for (mac, base) in latest {
+                b.insert(mac, base);
+            }
+        }
+    }
+
+    // 供 web 接口使用 db 路径（通过环境变量传递，避免到处穿参）
+    std::env::set_var("BANDIX_DB", &db_path);
+
     let mac_stats_clone = Arc::clone(&mac_stats);
     tokio::spawn(async move {
         if let Err(e) = web::start_server(port, mac_stats_clone).await {
@@ -86,10 +134,35 @@ async fn run_service(
         }
     });
 
+    // metrics 持久化任务
+    {
+        let mac_stats_for_metrics = Arc::clone(&mac_stats);
+        let db_path_for_metrics = db_path.clone();
+        tokio::spawn(async move {
+            let mut metrics_interval = interval(Duration::from_millis(metrics_interval_ms));
+            loop {
+                metrics_interval.tick().await;
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let ts_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_millis() as u64;
+                let snapshot: Vec<([u8; 6], MacTrafficStats)> = {
+                    let stats = mac_stats_for_metrics.lock().unwrap();
+                    stats.iter().map(|(k, v)| (*k, *v)).collect()
+                };
+                if let Err(e) = storage::insert_metrics_batch(&db_path_for_metrics, ts_ms, &snapshot)
+                {
+                    eprintln!("metrics persist error: {}", e);
+                }
+            }
+        });
+    }
+
     let mut interval = interval(Duration::from_millis(1000));
     while *running.lock().unwrap() {
         interval.tick().await;
-        update(&mac_stats, &mut ingress_ebpf, &mut egress_ebpf).await?;
+        update(&mac_stats, &mut ingress_ebpf, &mut egress_ebpf, &baseline_totals).await?;
     }
 
     Ok(())
@@ -101,7 +174,7 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         .filter(None, LevelFilter::Info)
         .init();
 
-    let Opt { iface, port } = opt;
+    let Opt { iface, port, db_path, metrics_interval_ms } = opt;
 
     // Initialize eBPF programs
     let (mut ingress_ebpf, mut egress_ebpf) = init_ebpf_programs(iface.clone()).await?;
@@ -110,7 +183,15 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     init_subnet_info(&mut ingress_ebpf, &mut egress_ebpf, iface.clone()).await?;
 
     // Run service (start web and TUI)
-    run_service(iface, port, ingress_ebpf, egress_ebpf).await?;
+    run_service(
+        iface,
+        port,
+        db_path,
+        metrics_interval_ms,
+        ingress_ebpf,
+        egress_ebpf,
+    )
+    .await?;
 
     Ok(())
 }

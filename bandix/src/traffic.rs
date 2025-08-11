@@ -5,6 +5,7 @@ use anyhow::Ok;
 use aya::maps::HashMap;
 use aya::maps::MapData;
 use bandix_common::MacTrafficStats;
+use crate::storage::BaselineTotals;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -146,6 +147,7 @@ fn merge(
 fn update_traffic_stats(
     mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
     device_traffic_stats: &StdHashMap<[u8; 6], TrafficData>,
+    baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
 ) -> Result<(), anyhow::Error> {
     // Get current timestamp
     let now = SystemTime::now()
@@ -154,6 +156,7 @@ fn update_traffic_stats(
         .as_millis() as u64;
 
     let mut stats_map = mac_stats.lock().unwrap();
+    let baseline_map = baselines.lock().unwrap();
 
     for (mac, traffic_data) in device_traffic_stats.iter() {
         let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
@@ -191,17 +194,30 @@ fn update_traffic_stats(
         let total_rx_bytes = traffic_data.local_rx_bytes + traffic_data.wide_rx_bytes;
         let total_tx_bytes = traffic_data.local_tx_bytes + traffic_data.wide_tx_bytes;
 
-        // Update total bytes
-        stats.total_rx_bytes = total_rx_bytes;
-        stats.total_tx_bytes = total_tx_bytes;
+        // Lookup baseline for current MAC (default zeros)
+        let b = baseline_map
+            .get(mac)
+            .copied()
+            .unwrap_or(BaselineTotals {
+                total_rx_bytes: 0,
+                total_tx_bytes: 0,
+                local_rx_bytes: 0,
+                local_tx_bytes: 0,
+                wide_rx_bytes: 0,
+                wide_tx_bytes: 0,
+            });
 
-        // Update local network traffic
-        stats.local_rx_bytes = traffic_data.local_rx_bytes;
-        stats.local_tx_bytes = traffic_data.local_tx_bytes;
+        // Update total bytes with baseline added
+        stats.total_rx_bytes = total_rx_bytes + b.total_rx_bytes;
+        stats.total_tx_bytes = total_tx_bytes + b.total_tx_bytes;
 
-        // Update cross-network traffic
-        stats.wide_rx_bytes = traffic_data.wide_rx_bytes;
-        stats.wide_tx_bytes = traffic_data.wide_tx_bytes;
+        // Update local network traffic with baseline added
+        stats.local_rx_bytes = traffic_data.local_rx_bytes + b.local_rx_bytes;
+        stats.local_tx_bytes = traffic_data.local_tx_bytes + b.local_tx_bytes;
+
+        // Update cross-network traffic with baseline added
+        stats.wide_rx_bytes = traffic_data.wide_rx_bytes + b.wide_rx_bytes;
+        stats.wide_tx_bytes = traffic_data.wide_tx_bytes + b.wide_tx_bytes;
 
         // Calculate rate (bytes/sec)
         if stats.last_update > 0 {
@@ -291,12 +307,13 @@ pub async fn update(
     mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
     ingress_ebpf: &mut aya::Ebpf,
     egress_ebpf: &mut aya::Ebpf,
+    baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
 ) -> Result<(), anyhow::Error> {
     let mac_ip_mapping = collect_mac_ip_mapping(ingress_ebpf, egress_ebpf)?;
     let traffic_data = collect_traffic_data(ingress_ebpf, egress_ebpf)?;
     let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
 
-    update_traffic_stats(mac_stats, &device_traffic_stats)?;
+    update_traffic_stats(mac_stats, &device_traffic_stats, baselines)?;
 
     update_rate_limit(mac_stats, ingress_ebpf, egress_ebpf)?;
 

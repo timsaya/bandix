@@ -1,4 +1,5 @@
 use bandix_common::MacTrafficStats;
+use crate::storage;
 use crate::utils::format_utils::{format_bytes, format_mac};
 use log::info;
 use serde_json::Value;
@@ -75,6 +76,97 @@ async fn handle_connection(
             )
             .await?;
         }
+    } else if path == "/api/limits" && method == "GET" {
+        let json = generate_limits_json(&mac_stats);
+        send_json_response(&mut stream, &json).await?;
+    } else if path.starts_with("/api/metrics") && method == "GET" {
+        // Query string format: /api/metrics?mac=aa:bb:cc:dd:ee:ff&start=ts_ms&end=ts_ms&limit=1000
+        let query = path.splitn(2, '?').nth(1).unwrap_or("");
+        let params: std::collections::HashMap<_, _> = query
+            .split('&')
+            .filter(|s| !s.is_empty())
+            .filter_map(|kv| {
+                let mut it = kv.splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some(k), Some(v)) => Some((k.to_string(), v.to_string())),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let mac_str = match params.get("mac") {
+            Some(v) => v,
+            None => {
+                send_json_response_with_status(
+                    &mut stream,
+                    r#"{"status":"error","message":"missing mac"}"#,
+                    400,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        let mac = match parse_mac_address(mac_str) {
+            Ok(m) => m,
+            Err(e) => {
+                let error_json = format!(
+                    r#"{{"status":"error","message":"invalid mac: {}"}}"#,
+                    e
+                );
+                send_json_response_with_status(&mut stream, &error_json, 400).await?;
+                return Ok(());
+            }
+        };
+
+        let start_ms: u64 = params
+            .get("start")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let end_ms: u64 = params
+            .get("end")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        let limit: Option<usize> = params
+            .get("limit")
+            .and_then(|s| s.parse::<usize>().ok());
+
+        let db_path = std::env::var("BANDIX_DB").unwrap_or_else(|_| "bandix.db".to_string());
+        match crate::storage::query_metrics(&db_path, &mac, start_ms, end_ms, limit) {
+            Ok(rows) => {
+                // Build JSON
+                let mut json = String::from("{\n  \"metrics\": [\n");
+                for (i, r) in rows.iter().enumerate() {
+                    json.push_str(&format!(
+                        "    {{\n      \"ts_ms\": {},\n      \"total_rx_rate\": {},\n      \"total_tx_rate\": {},\n      \"local_rx_rate\": {},\n      \"local_tx_rate\": {},\n      \"wide_rx_rate\": {},\n      \"wide_tx_rate\": {},\n      \"total_rx_bytes\": {},\n      \"total_tx_bytes\": {},\n      \"local_rx_bytes\": {},\n      \"local_tx_bytes\": {},\n      \"wide_rx_bytes\": {},\n      \"wide_tx_bytes\": {}\n    }}",
+                        r.ts_ms,
+                        r.total_rx_rate,
+                        r.total_tx_rate,
+                        r.local_rx_rate,
+                        r.local_tx_rate,
+                        r.wide_rx_rate,
+                        r.wide_tx_rate,
+                        r.total_rx_bytes,
+                        r.total_tx_bytes,
+                        r.local_rx_bytes,
+                        r.local_tx_bytes,
+                        r.wide_rx_bytes,
+                        r.wide_tx_bytes
+                    ));
+                    if i + 1 < rows.len() {
+                        json.push_str(",\n");
+                    } else {
+                        json.push_str("\n");
+                    }
+                }
+                json.push_str("  ]\n}");
+                send_json_response(&mut stream, &json).await?;
+            }
+            Err(e) => {
+                let error_json = format!(r#"{{"status":"error","message":"{}"}}"#, e);
+                send_json_response_with_status(&mut stream, &error_json, 500).await?;
+            }
+        }
     } else {
         send_not_found(&mut stream).await?;
     }
@@ -141,6 +233,12 @@ async fn set_device_limit_json(
         }
     }
 
+    // Persist to SQLite
+    // Note: db_path 目前通过命令行传入并在启动时使用；为了避免在此模块传递路径，
+    // 选择读取环境变量 BANDIX_DB，若未设置则回退到默认 bandix.db。
+    let db_path = std::env::var("BANDIX_DB").unwrap_or_else(|_| "bandix.db".to_string());
+    storage::upsert_limit(&db_path, &mac, wide_rx_rate_limit, wide_tx_rate_limit)?;
+
     // Format rate as readable string
     let rx_str = if wide_rx_rate_limit == 0 {
         "Unlimited".to_string()
@@ -198,6 +296,26 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
         }
     }
 
+    json.push_str("  ]\n}");
+    json
+}
+
+fn generate_limits_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>) -> String {
+    let stats_map = mac_stats.lock().unwrap();
+    let mut json = String::from("{\n  \"limits\": [\n");
+    let total_items = stats_map.len();
+    for (i, (mac, stats)) in stats_map.iter().enumerate() {
+        let mac_str = crate::utils::format_utils::format_mac(mac);
+        json.push_str(&format!(
+            "    {{\n      \"mac\": \"{}\",\n      \"wide_rx_rate_limit\": {},\n      \"wide_tx_rate_limit\": {}\n    }}",
+            mac_str, stats.wide_rx_rate_limit, stats.wide_tx_rate_limit
+        ));
+        if i < total_items - 1 {
+            json.push_str(",\n");
+        } else {
+            json.push_str("\n");
+        }
+    }
     json.push_str("  ]\n}");
     json
 }
