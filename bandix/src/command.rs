@@ -304,8 +304,9 @@ async fn run_service(
         }
     }
 
-    // Provide data directory for the web interface (via environment variable to avoid passing through everywhere)
+    // Provide data directory and retention for the web interface (via environment variables to avoid passing through everywhere)
     std::env::set_var("BANDIX_DATA_DIR", &data_dir);
+    std::env::set_var("BANDIX_RETENTION_SECONDS", retention_seconds.to_string());
 
     let mac_stats_clone = Arc::clone(&mac_stats);
     tokio::spawn(async move {

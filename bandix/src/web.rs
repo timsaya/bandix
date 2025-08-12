@@ -124,7 +124,12 @@ async fn handle_connection(
 
         match rows_result {
             Ok(rows) => {
-                let mut json = String::from("{\n  \"metrics\": [\n");
+                let retention_seconds: u32 = std::env::var("BANDIX_RETENTION_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(3600);
+
+                let mut json = format!("{{\n  \"retention_seconds\": {},\n  \"metrics\": [\n", retention_seconds);
                 for (i, r) in rows.iter().enumerate() {
                     json.push_str(&format!(
                         "    {{\n      \"ts_ms\": {},\n      \"total_rx_rate\": {},\n      \"total_tx_rate\": {},\n      \"local_rx_rate\": {},\n      \"local_tx_rate\": {},\n      \"wide_rx_rate\": {},\n      \"wide_tx_rate\": {},\n      \"total_rx_bytes\": {},\n      \"total_tx_bytes\": {},\n      \"local_rx_bytes\": {},\n      \"local_tx_bytes\": {},\n      \"wide_rx_bytes\": {},\n      \"wide_tx_bytes\": {}\n    }}",
