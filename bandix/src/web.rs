@@ -131,8 +131,8 @@ async fn handle_connection(
             .get("limit")
             .and_then(|s| s.parse::<usize>().ok());
 
-        let db_path = std::env::var("BANDIX_DB").unwrap_or_else(|_| "bandix.db".to_string());
-        match crate::storage::query_metrics(&db_path, &mac, start_ms, end_ms, limit) {
+        let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
+        match crate::storage::query_metrics(&data_dir, &mac, start_ms, end_ms, limit) {
             Ok(rows) => {
                 // Build JSON
                 let mut json = String::from("{\n  \"metrics\": [\n");
@@ -233,11 +233,12 @@ async fn set_device_limit_json(
         }
     }
 
-    // Persist to SQLite
-    // Note: db_path 目前通过命令行传入并在启动时使用；为了避免在此模块传递路径，
-    // 选择读取环境变量 BANDIX_DB，若未设置则回退到默认 bandix.db。
-    let db_path = std::env::var("BANDIX_DB").unwrap_or_else(|_| "bandix.db".to_string());
-    storage::upsert_limit(&db_path, &mac, wide_rx_rate_limit, wide_tx_rate_limit)?;
+    // Persist to files (ring files and rate limit configuration)
+    // Note: data_dir is currently provided via CLI and used at startup; to avoid passing the
+    // path through this module, read the BANDIX_DATA_DIR environment variable, falling back to
+    // the default 'bandix-data' if unset.
+    let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
+    storage::upsert_limit(&data_dir, &mac, wide_rx_rate_limit, wide_tx_rate_limit)?;
 
     // Format rate as readable string
     let rx_str = if wide_rx_rate_limit == 0 {

@@ -25,6 +25,10 @@ fn validate_arguments(opt: &Opt) -> Result<(), anyhow::Error> {
         return Err(anyhow::anyhow!("Port number cannot be 0"));
     }
 
+    if opt.retention_seconds == 0 {
+        return Err(anyhow::anyhow!("retention_seconds must be greater than 0"));
+    }
+
     Ok(())
 }
 

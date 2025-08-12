@@ -1,10 +1,10 @@
 use anyhow::Context;
-use rusqlite::{params, Connection};
-
-use crate::utils::format_utils::format_mac;
 use bandix_common::MacTrafficStats;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
-// Local helpers to parse/format MAC when interacting with DB
+// Local helpers to parse/format MAC addresses (for file storage interaction)
 fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     let parts: Vec<&str> = mac_str.split(':').collect();
     if parts.len() != 6 {
@@ -18,174 +18,259 @@ fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     Ok(mac)
 }
 
-fn format_mac_text(mac: &[u8; 6]) -> String {
-    format_mac(mac)
+// Convert MAC to a filename-safe 12-hex string without colons
+fn mac_to_filename(mac: &[u8; 6]) -> String {
+    let mut s = String::with_capacity(12);
+    for b in mac {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
-pub fn ensure_schema(db_path: &str) -> Result<(), anyhow::Error> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open SQLite DB at {}", db_path))?;
+// Directory layout:
+// base_dir/
+//   rate_limits.txt                 Text: one line per entry - mac rx tx
+//   metrics/
+//     <mac12>.ring                  Fixed-size ring file (capacity determined by config)
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS rate_limits (
-            mac TEXT PRIMARY KEY,
-            wide_rx_rate_limit INTEGER NOT NULL,
-            wide_tx_rate_limit INTEGER NOT NULL
-        )",
-        [],
-    )
-    .context("Failed to create table rate_limits")?;
+const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring v1
+const RING_VERSION: u32 = 1;
+// Default capacity is 3600 (1 hour, 1 sample per second); actual capacity is determined by argument when created
+const DEFAULT_RING_CAPACITY: u32 = 3600;
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS metrics (
-            ts_ms INTEGER NOT NULL,
-            mac TEXT NOT NULL,
-            total_rx_rate INTEGER NOT NULL,
-            total_tx_rate INTEGER NOT NULL,
-            local_rx_rate INTEGER NOT NULL,
-            local_tx_rate INTEGER NOT NULL,
-            wide_rx_rate INTEGER NOT NULL,
-            wide_tx_rate INTEGER NOT NULL,
-            total_rx_bytes INTEGER NOT NULL,
-            total_tx_bytes INTEGER NOT NULL,
-            local_rx_bytes INTEGER NOT NULL,
-            local_tx_bytes INTEGER NOT NULL,
-            wide_rx_bytes INTEGER NOT NULL,
-            wide_tx_bytes INTEGER NOT NULL,
-            PRIMARY KEY (ts_ms, mac)
-        )",
-        [],
-    )
-    .context("Failed to create table metrics")?;
+// Per-slot structure (little-endian):
+// ts_ms: u64
+// total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
+// Slot size = 13 * 8 = 104 bytes
+const SLOT_U64S: usize = 13;
+const SLOT_SIZE: usize = SLOT_U64S * 8;
+const HEADER_SIZE: usize = 4 /*magic*/ + 4 /*version*/ + 4 /*capacity*/;
 
+fn ring_dir(base: &str) -> PathBuf {
+    Path::new(base).join("metrics")
+}
+fn limits_path(base: &str) -> PathBuf {
+    Path::new(base).join("rate_limits.txt")
+}
+fn ring_file_path(base: &str, mac: &[u8; 6]) -> PathBuf {
+    ring_dir(base).join(format!("{}.ring", mac_to_filename(mac)))
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), anyhow::Error> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     Ok(())
 }
 
-pub fn load_all_limits(
-    db_path: &str,
-) -> Result<Vec<([u8; 6], u64, u64)>, anyhow::Error> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open SQLite DB at {}", db_path))?;
+fn write_header(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&RING_MAGIC)?;
+    f.write_all(&RING_VERSION.to_le_bytes())?;
+    f.write_all(&capacity.to_le_bytes())?;
+    Ok(())
+}
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT mac, wide_rx_rate_limit, wide_tx_rate_limit FROM rate_limits",
-        )
-        .context("Failed to prepare load_all_limits query")?;
+fn read_header(f: &mut File) -> Result<(u32, u32), anyhow::Error> {
+    let mut magic = [0u8; 4];
+    f.seek(SeekFrom::Start(0))?;
+    f.read_exact(&mut magic)?;
+    if magic != RING_MAGIC {
+        return Err(anyhow::anyhow!("invalid ring file magic"));
+    }
+    let mut buf4 = [0u8; 4];
+    f.read_exact(&mut buf4)?;
+    let ver = u32::from_le_bytes(buf4);
+    f.read_exact(&mut buf4)?;
+    let cap = u32::from_le_bytes(buf4);
+    Ok((ver, cap))
+}
 
-    let rows = stmt
-        .query_map([], |row| {
-            let mac_str: String = row.get(0)?;
-            let rx: i64 = row.get(1)?;
-            let tx: i64 = row.get(2)?;
-            Ok((mac_str, rx as u64, tx as u64))
-        })
-        .context("Failed to execute load_all_limits query")?;
+fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
+    ensure_parent_dir(path)?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
 
+    let metadata = f.metadata()?;
+    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
+    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE as u64);
+
+    if metadata.len() != expected_size {
+        // Reinitialize
+        f.set_len(0)?;
+        write_header(&mut f, cap)?;
+        // Write zeroed slot area
+        let zero_chunk = vec![0u8; 4096];
+        let mut remaining = expected_size - HEADER_SIZE as u64;
+        while remaining > 0 {
+            let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
+            f.write_all(&zero_chunk[..to_write])?;
+            remaining -= to_write as u64;
+        }
+        f.flush()?;
+    } else {
+        // Validate header
+        let _ = read_header(&mut f)?;
+    }
+    Ok(f)
+}
+
+fn calc_slot_index(ts_ms: u64, capacity: u32) -> u64 {
+    ((ts_ms / 1000) % capacity as u64) as u64
+}
+
+fn write_slot(mut f: &File, idx: u64, data: &[u64; SLOT_U64S]) -> Result<(), anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE as u64);
+    let mut bytes = [0u8; SLOT_SIZE];
+    for (i, v) in data.iter().enumerate() {
+        let b = v.to_le_bytes();
+        bytes[i * 8..(i + 1) * 8].copy_from_slice(&b);
+    }
+    f.seek(SeekFrom::Start(offset))?;
+    f.write_all(&bytes)?;
+    Ok(())
+}
+
+fn read_slot(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S], anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE as u64);
+    let mut bytes = [0u8; SLOT_SIZE];
+    f.seek(SeekFrom::Start(offset))?;
+    f.read_exact(&mut bytes)?;
+    let mut out = [0u64; SLOT_U64S];
+    for i in 0..SLOT_U64S {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        out[i] = u64::from_le_bytes(b);
+    }
+    Ok(out)
+}
+
+pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
+    // Create directory and empty rate limit file
+    fs::create_dir_all(ring_dir(base_dir))
+        .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
+    let limits = limits_path(base_dir);
+    if !limits.exists() {
+        File::create(&limits)?;
+    }
+    Ok(())
+}
+
+pub fn load_all_limits(base_dir: &str) -> Result<Vec<([u8; 6], u64, u64)>, anyhow::Error> {
+    let path = limits_path(base_dir);
     let mut out = Vec::new();
-    for r in rows {
-        let (mac_text, rx, tx) = r?;
-        let mac = parse_mac_text(&mac_text)
-            .with_context(|| format!("Invalid MAC stored in DB: {}", mac_text))?;
+    if !path.exists() {
+        return Ok(out);
+    }
+    let content = fs::read_to_string(&path)?;
+    for (lineno, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Format: mac rx tx (MAC in colon-separated or 12-hex format are both supported)
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let mac_str = parts[0];
+        let mac = if mac_str.contains(':') {
+            parse_mac_text(mac_str)
+        } else if mac_str.len() == 12 {
+            let mut mac = [0u8; 6];
+            for i in 0..6 {
+                mac[i] = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16)
+                    .with_context(|| format!("invalid mac hex at line {}", lineno + 1))?;
+            }
+            Ok(mac)
+        } else {
+            Err(anyhow::anyhow!("invalid mac format at line {}", lineno + 1))
+        }?;
+        let rx: u64 = parts[1]
+            .parse()
+            .with_context(|| format!("invalid rx at line {}", lineno + 1))?;
+        let tx: u64 = parts[2]
+            .parse()
+            .with_context(|| format!("invalid tx at line {}", lineno + 1))?;
         out.push((mac, rx, tx));
     }
     Ok(out)
 }
 
 pub fn upsert_limit(
-    db_path: &str,
+    base_dir: &str,
     mac: &[u8; 6],
     wide_rx_rate_limit: u64,
     wide_tx_rate_limit: u64,
 ) -> Result<(), anyhow::Error> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open SQLite DB at {}", db_path))?;
+    let path = limits_path(base_dir);
+    ensure_parent_dir(&path)?;
+    let mut map: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() != 3 {
+                continue;
+            }
+            map.insert(
+                parts[0].to_string(),
+                (parts[1].parse().unwrap_or(0), parts[2].parse().unwrap_or(0)),
+            );
+        }
+    }
+    let key = mac_to_filename(mac);
+    map.insert(key.clone(), (wide_rx_rate_limit, wide_tx_rate_limit));
 
-    let mac_text = format_mac_text(mac);
-    conn.execute(
-        "INSERT INTO rate_limits (mac, wide_rx_rate_limit, wide_tx_rate_limit)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(mac) DO UPDATE SET
-            wide_rx_rate_limit = excluded.wide_rx_rate_limit,
-            wide_tx_rate_limit = excluded.wide_tx_rate_limit",
-        params![mac_text, wide_rx_rate_limit as i64, wide_tx_rate_limit as i64],
-    )
-    .context("Failed to upsert rate limit")?;
-
+    let mut buf = String::new();
+    buf.push_str("# mac rx tx (rate limits in bytes/sec)\n");
+    for (k, (rx, tx)) in map {
+        buf.push_str(&format!("{} {} {}\n", k, rx, tx));
+    }
+    fs::write(&path, buf)?;
     Ok(())
 }
 
 pub fn insert_metrics_batch(
-    db_path: &str,
+    base_dir: &str,
     ts_ms: u64,
     rows: &Vec<([u8; 6], MacTrafficStats)>,
+    retention_seconds: u32,
 ) -> Result<(), anyhow::Error> {
     if rows.is_empty() {
         return Ok(());
     }
+    for (mac, s) in rows.iter() {
+        let path = ring_file_path(base_dir, mac);
+        let mut f = init_ring_file(&path, retention_seconds)?;
+        let (_ver, cap) = read_header(&mut f)?;
+        let idx = calc_slot_index(ts_ms, cap);
 
-    let mut conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open SQLite DB at {}", db_path))?;
-    let tx = conn.transaction().context("Failed to begin transaction")?;
-
-    {
-        let mut stmt = tx
-            .prepare(
-                "INSERT INTO metrics (
-                    ts_ms, mac,
-                    total_rx_rate, total_tx_rate,
-                    local_rx_rate, local_tx_rate,
-                    wide_rx_rate, wide_tx_rate,
-                    total_rx_bytes, total_tx_bytes,
-                    local_rx_bytes, local_tx_bytes,
-                    wide_rx_bytes, wide_tx_bytes
-                ) VALUES (
-                    ?1, ?2,
-                    ?3, ?4,
-                    ?5, ?6,
-                    ?7, ?8,
-                    ?9, ?10,
-                    ?11, ?12,
-                    ?13, ?14
-                ) ON CONFLICT(ts_ms, mac) DO UPDATE SET
-                    total_rx_rate=excluded.total_rx_rate,
-                    total_tx_rate=excluded.total_tx_rate,
-                    local_rx_rate=excluded.local_rx_rate,
-                    local_tx_rate=excluded.local_tx_rate,
-                    wide_rx_rate=excluded.wide_rx_rate,
-                    wide_tx_rate=excluded.wide_tx_rate,
-                    total_rx_bytes=excluded.total_rx_bytes,
-                    total_tx_bytes=excluded.total_tx_bytes,
-                    local_rx_bytes=excluded.local_rx_bytes,
-                    local_tx_bytes=excluded.local_tx_bytes,
-                    wide_rx_bytes=excluded.wide_rx_bytes,
-                    wide_tx_bytes=excluded.wide_tx_bytes",
-            )
-            .context("Failed to prepare insert_metrics_batch statement")?;
-
-        for (mac, s) in rows.iter() {
-            let mac_text = format_mac_text(mac);
-            stmt.execute(params![
-                ts_ms as i64,
-                mac_text,
-                s.total_rx_rate as i64,
-                s.total_tx_rate as i64,
-                s.local_rx_rate as i64,
-                s.local_tx_rate as i64,
-                s.wide_rx_rate as i64,
-                s.wide_tx_rate as i64,
-                s.total_rx_bytes as i64,
-                s.total_tx_bytes as i64,
-                s.local_rx_bytes as i64,
-                s.local_tx_bytes as i64,
-                s.wide_rx_bytes as i64,
-                s.wide_tx_bytes as i64,
-            ])
-            .context("Failed to insert metrics row")?;
-        }
+        let rec: [u64; SLOT_U64S] = [
+            ts_ms,
+            s.total_rx_rate,
+            s.total_tx_rate,
+            s.local_rx_rate,
+            s.local_tx_rate,
+            s.wide_rx_rate,
+            s.wide_tx_rate,
+            s.total_rx_bytes,
+            s.total_tx_bytes,
+            s.local_rx_bytes,
+            s.local_tx_bytes,
+            s.wide_rx_bytes,
+            s.wide_tx_bytes,
+        ];
+        write_slot(&f, idx, &rec)?;
+        f.sync_all()?;
     }
-
-    tx.commit().context("Failed to commit metrics batch")?;
     Ok(())
 }
 
@@ -207,77 +292,50 @@ pub struct MetricsRow {
 }
 
 pub fn query_metrics(
-    db_path: &str,
+    base_dir: &str,
     mac: &[u8; 6],
     start_ms: u64,
     end_ms: u64,
     limit: Option<usize>,
 ) -> Result<Vec<MetricsRow>, anyhow::Error> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open SQLite DB at {}", db_path))?;
-    let mac_text = format_mac_text(mac);
-
-    let sql_base = "SELECT ts_ms,
-        total_rx_rate, total_tx_rate,
-        local_rx_rate, local_tx_rate,
-        wide_rx_rate, wide_tx_rate,
-        total_rx_bytes, total_tx_bytes,
-        local_rx_bytes, local_tx_bytes,
-        wide_rx_bytes, wide_tx_bytes
-        FROM metrics
-        WHERE mac = ?1 AND ts_ms BETWEEN ?2 AND ?3
-        ORDER BY ts_ms ASC";
-
+    let path = ring_file_path(base_dir, mac);
     let mut rows_vec = Vec::new();
-
-    if let Some(max_rows) = limit {
-        let mut stmt = conn
-            .prepare(&format!("{} LIMIT {}", sql_base, max_rows))
-            .context("Failed to prepare limited query")?;
-        let rows = stmt.query_map(params![mac_text, start_ms as i64, end_ms as i64], |row| {
-            Ok(MetricsRow {
-                ts_ms: row.get::<_, i64>(0)? as u64,
-                total_rx_rate: row.get::<_, i64>(1)? as u64,
-                total_tx_rate: row.get::<_, i64>(2)? as u64,
-                local_rx_rate: row.get::<_, i64>(3)? as u64,
-                local_tx_rate: row.get::<_, i64>(4)? as u64,
-                wide_rx_rate: row.get::<_, i64>(5)? as u64,
-                wide_tx_rate: row.get::<_, i64>(6)? as u64,
-                total_rx_bytes: row.get::<_, i64>(7)? as u64,
-                total_tx_bytes: row.get::<_, i64>(8)? as u64,
-                local_rx_bytes: row.get::<_, i64>(9)? as u64,
-                local_tx_bytes: row.get::<_, i64>(10)? as u64,
-                wide_rx_bytes: row.get::<_, i64>(11)? as u64,
-                wide_tx_bytes: row.get::<_, i64>(12)? as u64,
-            })
-        })?;
-
-        for r in rows { rows_vec.push(r?); }
-    } else {
-        let mut stmt = conn
-            .prepare(sql_base)
-            .context("Failed to prepare query")?;
-        let rows = stmt.query_map(params![mac_text, start_ms as i64, end_ms as i64], |row| {
-            Ok(MetricsRow {
-                ts_ms: row.get::<_, i64>(0)? as u64,
-                total_rx_rate: row.get::<_, i64>(1)? as u64,
-                total_tx_rate: row.get::<_, i64>(2)? as u64,
-                local_rx_rate: row.get::<_, i64>(3)? as u64,
-                local_tx_rate: row.get::<_, i64>(4)? as u64,
-                wide_rx_rate: row.get::<_, i64>(5)? as u64,
-                wide_tx_rate: row.get::<_, i64>(6)? as u64,
-                total_rx_bytes: row.get::<_, i64>(7)? as u64,
-                total_tx_bytes: row.get::<_, i64>(8)? as u64,
-                local_rx_bytes: row.get::<_, i64>(9)? as u64,
-                local_tx_bytes: row.get::<_, i64>(10)? as u64,
-                wide_rx_bytes: row.get::<_, i64>(11)? as u64,
-                wide_tx_bytes: row.get::<_, i64>(12)? as u64,
-            })
-        })?;
-
-        for r in rows { rows_vec.push(r?); }
+    if !path.exists() {
+        return Ok(rows_vec);
     }
-
+    let mut f = OpenOptions::new().read(true).open(&path)?;
+    let (_ver, cap) = read_header(&mut f)?;
+    // Iterate over all slots and filter by range
+    for i in 0..(cap as u64) {
+        let rec = read_slot(&f, i)?;
+        let ts = rec[0];
+        if ts == 0 {
+            continue;
+        }
+        if ts < start_ms || ts > end_ms {
+            continue;
+        }
+        rows_vec.push(MetricsRow {
+            ts_ms: rec[0],
+            total_rx_rate: rec[1],
+            total_tx_rate: rec[2],
+            local_rx_rate: rec[3],
+            local_tx_rate: rec[4],
+            wide_rx_rate: rec[5],
+            wide_tx_rate: rec[6],
+            total_rx_bytes: rec[7],
+            total_tx_bytes: rec[8],
+            local_rx_bytes: rec[9],
+            local_tx_bytes: rec[10],
+            wide_rx_bytes: rec[11],
+            wide_tx_bytes: rec[12],
+        });
+    }
+    // Ascending order
+    rows_vec.sort_by_key(|r| r.ts_ms);
+    if let Some(max_rows) = limit {
+        rows_vec.truncate(max_rows);
+    }
     Ok(rows_vec)
 }
 
@@ -291,61 +349,67 @@ pub struct BaselineTotals {
     pub wide_tx_bytes: u64,
 }
 
-// Load latest totals per MAC as baseline from SQLite
-pub fn load_latest_totals(
-    db_path: &str,
-) -> Result<Vec<([u8; 6], BaselineTotals)>, anyhow::Error> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open SQLite DB at {}", db_path))?;
-
-    let sql = r#"
-        SELECT m.mac,
-               m.total_rx_bytes, m.total_tx_bytes,
-               m.local_rx_bytes, m.local_tx_bytes,
-               m.wide_rx_bytes,  m.wide_tx_bytes
-        FROM metrics m
-        INNER JOIN (
-            SELECT mac AS mac_key, MAX(ts_ms) AS max_ts
-            FROM metrics
-            GROUP BY mac
-        ) t ON m.mac = t.mac_key AND m.ts_ms = t.max_ts
-    "#;
-
-    let mut stmt = conn
-        .prepare(sql)
-        .context("Failed to prepare load_latest_totals query")?;
-
-    let rows = stmt.query_map([], |row| {
-        let mac_text: String = row.get(0)?;
-        let total_rx_bytes: i64 = row.get(1)?;
-        let total_tx_bytes: i64 = row.get(2)?;
-        let local_rx_bytes: i64 = row.get(3)?;
-        let local_tx_bytes: i64 = row.get(4)?;
-        let wide_rx_bytes: i64 = row.get(5)?;
-        let wide_tx_bytes: i64 = row.get(6)?;
-
-        Ok((
-            mac_text,
-            BaselineTotals {
-                total_rx_bytes: total_rx_bytes as u64,
-                total_tx_bytes: total_tx_bytes as u64,
-                local_rx_bytes: local_rx_bytes as u64,
-                local_tx_bytes: local_tx_bytes as u64,
-                wide_rx_bytes: wide_rx_bytes as u64,
-                wide_tx_bytes: wide_tx_bytes as u64,
-            },
-        ))
-    })?;
-
+// Use the latest record from each device's ring as baseline
+pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals)>, anyhow::Error> {
+    let dir = ring_dir(base_dir);
     let mut out = Vec::new();
-    for r in rows {
-        let (mac_text, baseline) = r?;
-        let mac = parse_mac_text(&mac_text)
-            .with_context(|| format!("Invalid MAC stored in DB: {}", mac_text))?;
-        out.push((mac, baseline));
+    if !dir.exists() {
+        return Ok(out);
     }
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+            continue;
+        }
 
+        // Parse MAC from filename
+        let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if fname.len() != 12 {
+            continue;
+        }
+        let mut mac = [0u8; 6];
+        let mut ok = true;
+        for i in 0..6 {
+            if let Ok(v) = u8::from_str_radix(&fname[i * 2..i * 2 + 2], 16) {
+                mac[i] = v;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+
+        let mut f = OpenOptions::new().read(true).open(&path)?;
+        let (_ver, cap) = read_header(&mut f)?;
+        let mut best: Option<[u64; SLOT_U64S]> = None;
+        for i in 0..(cap as u64) {
+            let rec = read_slot(&f, i)?;
+            if rec[0] == 0 {
+                continue;
+            }
+            if best.as_ref().map(|b| rec[0] > b[0]).unwrap_or(true) {
+                best = Some(rec);
+            }
+        }
+        if let Some(rec) = best {
+            out.push((
+                mac,
+                BaselineTotals {
+                    total_rx_bytes: rec[7],
+                    total_tx_bytes: rec[8],
+                    local_rx_bytes: rec[9],
+                    local_tx_bytes: rec[10],
+                    wide_rx_bytes: rec[11],
+                    wide_tx_bytes: rec[12],
+                },
+            ));
+        }
+    }
     Ok(out)
 }
-
-

@@ -11,7 +11,7 @@ use bandix_common::MacTrafficStats;
 use clap::Parser;
 use log::info;
 use log::LevelFilter;
-// keep only one import alias for StdHashMap above
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
@@ -31,17 +31,17 @@ pub struct Opt {
 
     #[clap(
         long,
-        default_value = "bandix.db",
-        help = "SQLite 数据库存储路径，用于持久化限速配置"
+        default_value = "bandix-data",
+        help = "Data directory (ring files and rate limit configurations will be stored here)"
     )]
-    pub db_path: String,
+    pub data_dir: String,
 
     #[clap(
         long,
-        default_value = "1000",
-        help = "统计写入 SQLite 的间隔(毫秒)"
+        default_value = "3600",
+        help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
     )]
-    pub metrics_interval_ms: u64,
+    pub retention_seconds: u32,
 }
 
 // Initialize eBPF programs and maps
@@ -80,8 +80,8 @@ async fn init_subnet_info(
 async fn run_service(
     _iface: String,
     port: u16,
-    db_path: String,
-    metrics_interval_ms: u64,
+    data_dir: String,
+    retention_seconds: u32,
     mut ingress_ebpf: aya::Ebpf,
     mut egress_ebpf: aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
@@ -99,13 +99,13 @@ async fn run_service(
         }
     });
 
-    // 初始化数据库并加载限速配置与基线流量
+    // Initialize data directory and load rate limits and baseline traffic
     {
-        storage::ensure_schema(&db_path)?;
-        let limits = storage::load_all_limits(&db_path)?;
-        let latest = storage::load_latest_totals(&db_path)?;
+        storage::ensure_schema(&data_dir)?;
+        let limits = storage::load_all_limits(&data_dir)?;
+        let latest = storage::load_latest_totals(&data_dir)?;
 
-        // 限速配置
+        // Rate limits
         {
             let mut stats_map = mac_stats.lock().unwrap();
             for (mac, rx, tx) in limits {
@@ -115,7 +115,7 @@ async fn run_service(
             }
         }
 
-        // 基线总量
+        // Baseline totals
         {
             let mut b = baseline_totals.lock().unwrap();
             for (mac, base) in latest {
@@ -124,8 +124,8 @@ async fn run_service(
         }
     }
 
-    // 供 web 接口使用 db 路径（通过环境变量传递，避免到处穿参）
-    std::env::set_var("BANDIX_DB", &db_path);
+    // Provide data directory for the web interface (via environment variable to avoid passing through everywhere)
+    std::env::set_var("BANDIX_DATA_DIR", &data_dir);
 
     let mac_stats_clone = Arc::clone(&mac_stats);
     tokio::spawn(async move {
@@ -134,12 +134,13 @@ async fn run_service(
         }
     });
 
-    // metrics 持久化任务
+    // Metrics persistence task
     {
         let mac_stats_for_metrics = Arc::clone(&mac_stats);
-        let db_path_for_metrics = db_path.clone();
+        let data_dir_for_metrics = data_dir.clone();
+        let retention_seconds_for_metrics = retention_seconds;
         tokio::spawn(async move {
-            let mut metrics_interval = interval(Duration::from_millis(metrics_interval_ms));
+            let mut metrics_interval = interval(Duration::from_secs(1));
             loop {
                 metrics_interval.tick().await;
                 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,7 +152,12 @@ async fn run_service(
                     let stats = mac_stats_for_metrics.lock().unwrap();
                     stats.iter().map(|(k, v)| (*k, *v)).collect()
                 };
-                if let Err(e) = storage::insert_metrics_batch(&db_path_for_metrics, ts_ms, &snapshot)
+                if let Err(e) = storage::insert_metrics_batch(
+                    &data_dir_for_metrics,
+                    ts_ms,
+                    &snapshot,
+                    retention_seconds_for_metrics,
+                )
                 {
                     eprintln!("metrics persist error: {}", e);
                 }
@@ -174,7 +180,7 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         .filter(None, LevelFilter::Info)
         .init();
 
-    let Opt { iface, port, db_path, metrics_interval_ms } = opt;
+    let Opt { iface, port, data_dir, retention_seconds } = opt;
 
     // Initialize eBPF programs
     let (mut ingress_ebpf, mut egress_ebpf) = init_ebpf_programs(iface.clone()).await?;
@@ -186,8 +192,8 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     run_service(
         iface,
         port,
-        db_path,
-        metrics_interval_ms,
+        data_dir,
+        retention_seconds,
         ingress_ebpf,
         egress_ebpf,
     )

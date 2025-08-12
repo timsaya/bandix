@@ -190,6 +190,12 @@ fn update_traffic_stats(
             last_update: now,
         });
 
+        // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
+        // overwrite with the latest IP collected by eBPF to avoid staying at 0.0.0.0.
+        if traffic_data.ip_address != [0, 0, 0, 0] && stats.ip_address != traffic_data.ip_address {
+            stats.ip_address = traffic_data.ip_address;
+        }
+
         // Calculate total traffic
         let total_rx_bytes = traffic_data.local_rx_bytes + traffic_data.wide_rx_bytes;
         let total_tx_bytes = traffic_data.local_tx_bytes + traffic_data.wide_tx_bytes;
