@@ -1,11 +1,11 @@
 // Only import display functions in debug mode
 #[cfg(debug_assertions)]
 use crate::display::display_tui_interface;
+use crate::storage::BaselineTotals;
 use anyhow::Ok;
 use aya::maps::HashMap;
 use aya::maps::MapData;
 use bandix_common::MacTrafficStats;
-use crate::storage::BaselineTotals;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -114,10 +114,10 @@ fn collect_traffic_data(
 
 struct TrafficData {
     pub ip_address: [u8; 4],
-    pub local_tx_bytes: u64,    // Local network send bytes
-    pub local_rx_bytes: u64,    // Local network receive bytes
-    pub wide_tx_bytes: u64, // Cross-network send bytes
-    pub wide_rx_bytes: u64, // Cross-network receive bytes
+    pub local_tx_bytes: u64, // Local network send bytes
+    pub local_rx_bytes: u64, // Local network receive bytes
+    pub wide_tx_bytes: u64,  // Cross-network send bytes
+    pub wide_rx_bytes: u64,  // Cross-network receive bytes
 }
 
 fn merge(
@@ -132,10 +132,10 @@ fn merge(
                 *mac,
                 TrafficData {
                     ip_address: *ip,
-                    local_tx_bytes: data[0],    // Local network send
-                    local_rx_bytes: data[1],    // Local network receive
-                    wide_tx_bytes: data[2], // Cross-network send
-                    wide_rx_bytes: data[3], // Cross-network receive
+                    local_tx_bytes: data[0], // Local network send
+                    local_rx_bytes: data[1], // Local network receive
+                    wide_tx_bytes: data[2],  // Cross-network send
+                    wide_rx_bytes: data[3],  // Cross-network receive
                 },
             );
         }
@@ -201,17 +201,14 @@ fn update_traffic_stats(
         let total_tx_bytes = traffic_data.local_tx_bytes + traffic_data.wide_tx_bytes;
 
         // Lookup baseline for current MAC (default zeros)
-        let b = baseline_map
-            .get(mac)
-            .copied()
-            .unwrap_or(BaselineTotals {
-                total_rx_bytes: 0,
-                total_tx_bytes: 0,
-                local_rx_bytes: 0,
-                local_tx_bytes: 0,
-                wide_rx_bytes: 0,
-                wide_tx_bytes: 0,
-            });
+        let b = baseline_map.get(mac).copied().unwrap_or(BaselineTotals {
+            total_rx_bytes: 0,
+            total_tx_bytes: 0,
+            local_rx_bytes: 0,
+            local_tx_bytes: 0,
+            wide_rx_bytes: 0,
+            wide_tx_bytes: 0,
+        });
 
         // Update total bytes with baseline added
         stats.total_rx_bytes = total_rx_bytes + b.total_rx_bytes;
@@ -230,19 +227,27 @@ fn update_traffic_stats(
             let time_diff = now.saturating_sub(stats.last_update);
             if time_diff > 0 {
                 // Calculate total receive rate
-                let rx_diff = stats.total_rx_bytes.saturating_sub(stats.total_last_rx_bytes);
+                let rx_diff = stats
+                    .total_rx_bytes
+                    .saturating_sub(stats.total_last_rx_bytes);
                 stats.total_rx_rate = (rx_diff * 1000) / time_diff; // Convert to bytes/sec
 
                 // Calculate total send rate
-                let tx_diff = stats.total_tx_bytes.saturating_sub(stats.total_last_tx_bytes);
+                let tx_diff = stats
+                    .total_tx_bytes
+                    .saturating_sub(stats.total_last_tx_bytes);
                 stats.total_tx_rate = (tx_diff * 1000) / time_diff; // Convert to bytes/sec
 
                 // Calculate local network receive rate
-                let local_rx_diff = stats.local_rx_bytes.saturating_sub(stats.local_last_rx_bytes);
+                let local_rx_diff = stats
+                    .local_rx_bytes
+                    .saturating_sub(stats.local_last_rx_bytes);
                 stats.local_rx_rate = (local_rx_diff * 1000) / time_diff;
 
                 // Calculate local network send rate
-                let local_tx_diff = stats.local_tx_bytes.saturating_sub(stats.local_last_tx_bytes);
+                let local_tx_diff = stats
+                    .local_tx_bytes
+                    .saturating_sub(stats.local_last_tx_bytes);
                 stats.local_tx_rate = (local_tx_diff * 1000) / time_diff;
 
                 // Calculate cross-network receive rate
@@ -291,7 +296,10 @@ fn update_rate_limit(
         ingress_mac_rate_limits
             .insert(
                 mac,
-                &[traffic_data.wide_rx_rate_limit, traffic_data.wide_tx_rate_limit],
+                &[
+                    traffic_data.wide_rx_rate_limit,
+                    traffic_data.wide_tx_rate_limit,
+                ],
                 0,
             )
             .unwrap();
@@ -299,7 +307,10 @@ fn update_rate_limit(
         egress_mac_rate_limits
             .insert(
                 mac,
-                &[traffic_data.wide_rx_rate_limit, traffic_data.wide_tx_rate_limit],
+                &[
+                    traffic_data.wide_rx_rate_limit,
+                    traffic_data.wide_tx_rate_limit,
+                ],
                 0,
             )
             .unwrap();
