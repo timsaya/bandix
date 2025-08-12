@@ -80,7 +80,7 @@ async fn handle_connection(
         let json = generate_limits_json(&mac_stats);
         send_json_response(&mut stream, &json).await?;
     } else if path.starts_with("/api/metrics") && method == "GET" {
-        // Query string format: /api/metrics?mac=aa:bb:cc:dd:ee:ff&start=ts_ms&end=ts_ms&limit=1000
+        // Query string format (updated): /api/metrics?mac=aa:bb:cc:dd:ee:ff|all&limit=1000
         let query = path.splitn(2, '?').nth(1).unwrap_or("");
         let params: std::collections::HashMap<_, _> = query
             .split('&')
@@ -94,47 +94,36 @@ async fn handle_connection(
             })
             .collect();
 
-        let mac_str = match params.get("mac") {
-            Some(v) => v,
-            None => {
-                send_json_response_with_status(
-                    &mut stream,
-                    r#"{"status":"error","message":"missing mac"}"#,
-                    400,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        let mac = match parse_mac_address(mac_str) {
-            Ok(m) => m,
-            Err(e) => {
-                let error_json = format!(
-                    r#"{{"status":"error","message":"invalid mac: {}"}}"#,
-                    e
-                );
-                send_json_response_with_status(&mut stream, &error_json, 400).await?;
-                return Ok(());
-            }
-        };
-
-        let start_ms: u64 = params
-            .get("start")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        let end_ms: u64 = params
-            .get("end")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(u64::MAX);
         let limit: Option<usize> = params
             .get("limit")
             .and_then(|s| s.parse::<usize>().ok());
 
         let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
-        match crate::storage::query_metrics(&data_dir, &mac, start_ms, end_ms, limit) {
+
+        let mac_opt = params.get("mac").cloned();
+        let rows_result = if let Some(mac_str) = mac_opt {
+            if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                crate::storage::query_metrics_aggregate_all(&data_dir, limit)
+            } else {
+                match parse_mac_address(&mac_str) {
+                    Ok(mac) => crate::storage::query_metrics(&data_dir, &mac, 0, u64::MAX, limit),
+                    Err(e) => {
+                        let error_json = format!(
+                            r#"{{"status":"error","message":"invalid mac: {}"}}"#,
+                            e
+                        );
+                        send_json_response_with_status(&mut stream, &error_json, 400).await?;
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            // mac omitted => aggregate all
+            crate::storage::query_metrics_aggregate_all(&data_dir, limit)
+        };
+
+        match rows_result {
             Ok(rows) => {
-                // Build JSON
                 let mut json = String::from("{\n  \"metrics\": [\n");
                 for (i, r) in rows.iter().enumerate() {
                     json.push_str(&format!(
