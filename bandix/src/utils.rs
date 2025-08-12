@@ -57,32 +57,71 @@ pub mod network_utils {
 
     // Get interface IP and subnet mask
     pub fn get_interface_info(interface: &str) -> Option<([u8; 4], [u8; 4])> {
-        let output = Command::new("ip")
-            .args(&["addr", "show", interface])
-            .output()
-            .ok()?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-
-        // Extract IPv4 address and subnet mask
-        for line in output_str.lines() {
-            if line.trim().starts_with("inet ") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let ip_with_cidr = parts[1];
-                    let ip_cidr: Vec<&str> = ip_with_cidr.split('/').collect();
-
-                    if ip_cidr.len() == 2 {
-                        if let Ok(ip) = Ipv4Addr::from_str(ip_cidr[0]) {
-                            let ip_bytes = ip.octets();
-
-                            if let Ok(cidr) = ip_cidr[1].parse::<u8>() {
-                                let mask = get_subnet_mask(cidr);
-                                return Some((ip_bytes, mask));
+        // Primary: ip addr show <iface>
+        if let Ok(output) = Command::new("ip").args(["addr", "show", interface]).output() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                if line.trim().starts_with("inet ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let ip_with_cidr = parts[1];
+                        let ip_cidr: Vec<&str> = ip_with_cidr.split('/').collect();
+                        if ip_cidr.len() == 2 {
+                            if let Ok(ip) = Ipv4Addr::from_str(ip_cidr[0]) {
+                                let ip_bytes = ip.octets();
+                                if let Ok(cidr) = ip_cidr[1].parse::<u8>() {
+                                    let mask = get_subnet_mask(cidr);
+                                    return Some((ip_bytes, mask));
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Fallback: BusyBox ifconfig output (common on OpenWrt)
+        if let Ok(output) = Command::new("ifconfig").arg(interface).output() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            // Two common formats:
+            // 1) inet addr:192.168.1.1  Bcast:...  Mask:255.255.255.0
+            // 2) inet 192.168.1.1  netmask 255.255.255.0  broadcast 192.168.1.255
+            let mut ip_opt: Option<[u8; 4]> = None;
+            let mut mask_opt: Option<[u8; 4]> = None;
+            for line in s.lines() {
+                let line = line.trim();
+                if line.contains("inet addr:") || line.starts_with("inet ") {
+                    // Try format 1 first
+                    if let Some(pos) = line.find("inet addr:") {
+                        let rest = &line[pos + "inet addr:".len()..];
+                        let ip_part = rest.split_whitespace().next().unwrap_or("");
+                        if let Ok(ip) = Ipv4Addr::from_str(ip_part) { ip_opt = Some(ip.octets()); }
+                    } else {
+                        // Try format 2: inet <ip>  ... netmask <mask>
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        for i in 0..parts.len() {
+                            if parts[i] == "inet" && i + 1 < parts.len() {
+                                if let Ok(ip) = Ipv4Addr::from_str(parts[i + 1]) { ip_opt = Some(ip.octets()); }
+                            }
+                            if parts[i] == "netmask" && i + 1 < parts.len() {
+                                if let Ok(mask_ip) = Ipv4Addr::from_str(parts[i + 1]) { mask_opt = Some(mask_ip.octets()); }
+                            }
+                        }
+                    }
+
+                    // Extract Mask:...
+                    if mask_opt.is_none() {
+                        if let Some(pos) = line.find("Mask:") {
+                            let rest = &line[pos + "Mask:".len()..];
+                            let mask_part = rest.split_whitespace().next().unwrap_or("");
+                            if let Ok(mask_ip) = Ipv4Addr::from_str(mask_part) { mask_opt = Some(mask_ip.octets()); }
+                        }
+                    }
+                }
+            }
+
+            if let (Some(ip), Some(mask)) = (ip_opt, mask_opt) {
+                return Some((ip, mask));
             }
         }
 

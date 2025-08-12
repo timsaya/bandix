@@ -1,7 +1,7 @@
 use bandix_common::MacTrafficStats;
 use crate::storage;
 use crate::utils::format_utils::{format_bytes, format_mac};
-use log::info;
+use log::{info, error};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,7 @@ pub async fn start_server(
 ) -> Result<(), anyhow::Error> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    println!("HTTP server listening on {}", addr);
+    info!("HTTP server listening on {}", addr);
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -23,7 +23,7 @@ pub async fn start_server(
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, mac_stats).await {
-                eprintln!("Error handling connection: {}", e);
+                error!("Error handling connection: {}", e);
             }
         });
     }

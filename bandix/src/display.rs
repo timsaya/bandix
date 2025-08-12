@@ -10,21 +10,21 @@ use comfy_table::{Table, ContentArrangement, presets::UTF8_FULL};
 
 // Display terminal user interface
 pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>) {
-    // 清屏
+    // Clear screen
     print!("\x1B[2J\x1B[1;1H");
 
-    // 读取数据
+    // Read data
     let stats_map = mac_stats.lock().unwrap();
     let mut mac_stats_data = stats_map.iter().collect::<Vec<_>>();
 
-    // 按 IP 升序
+    // Sort by IP ascending
     mac_stats_data.sort_by(|(_, a), (_, b)| {
         let a_ip = u32::from_be_bytes(a.ip_address);
         let b_ip = u32::from_be_bytes(b.ip_address);
         a_ip.cmp(&b_ip)
     });
 
-    // 构建表格
+    // Build table
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)

@@ -1,7 +1,6 @@
 use super::remove_rlimit_memlock;
 use super::EbpfTrafficDirection;
 use aya::programs::{tc, SchedClassifier, TcAttachType};
-use log::warn;
 
 pub async fn load_ingress(iface: String) -> anyhow::Result<aya::Ebpf> {
     remove_rlimit_memlock();
@@ -16,9 +15,6 @@ pub async fn load_ingress(iface: String) -> anyhow::Result<aya::Ebpf> {
         )))
         .unwrap();
 
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-        warn!("failed to initialize eBPF logger: {e}");
-    }
 
     let _ = tc::qdisc_add_clsact(&iface);
     let program: &mut SchedClassifier = ebpf.program_mut("bandix").unwrap().try_into().unwrap();
