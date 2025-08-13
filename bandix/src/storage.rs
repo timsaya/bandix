@@ -118,6 +118,31 @@ fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
     Ok(f)
 }
 
+fn reinit_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
+    ensure_parent_dir(path)?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+
+    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
+    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE as u64);
+
+    // Force reinitialize regardless of current size/header
+    f.set_len(0)?;
+    write_header(&mut f, cap)?;
+    let zero_chunk = vec![0u8; 4096];
+    let mut remaining = expected_size - HEADER_SIZE as u64;
+    while remaining > 0 {
+        let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
+        f.write_all(&zero_chunk[..to_write])?;
+        remaining -= to_write as u64;
+    }
+    f.flush()?;
+    Ok(f)
+}
+
 fn calc_slot_index(ts_ms: u64, capacity: u32) -> u64 {
     ((ts_ms / 1000) % capacity as u64) as u64
 }
@@ -156,6 +181,58 @@ pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     if !limits.exists() {
         File::create(&limits)?;
     }
+    Ok(())
+}
+
+/// 在启动时检查 `metrics` 目录下的所有 ring 文件容量是否与给定的
+/// `retention_seconds` 一致；若发现任意不一致，则重建该目录下所有 ring 文件。
+/// 注意：该操作会清空历史时间序列，仅保留限速配置文件。
+pub fn rebuild_all_ring_files_if_mismatch(
+    base_dir: &str,
+    retention_seconds: u32,
+) -> Result<(), anyhow::Error> {
+    let dir = ring_dir(base_dir);
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    // 先检测是否存在不一致
+    let mut mismatch_found = false;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+            continue;
+        }
+        let mut f = OpenOptions::new().read(true).open(&path)?;
+        let (_ver, cap) = read_header(&mut f)?;
+        if cap != retention_seconds {
+            mismatch_found = true;
+            break;
+        }
+    }
+
+    if !mismatch_found {
+        return Ok(());
+    }
+
+    // 若发现不一致，重建所有 .ring 文件
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+            continue;
+        }
+        // 强制重建
+        let _ = reinit_ring_file(&path, retention_seconds)?;
+    }
+
     Ok(())
 }
 

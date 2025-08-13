@@ -301,6 +301,8 @@ async fn run_service(
         storage::ensure_schema(&data_dir)?;
         let limits = storage::load_all_limits(&data_dir)?;
         let latest = storage::load_latest_totals(&data_dir)?;
+        // 启动时若发现与当前 retention 不一致，立刻重建所有 ring 文件（在读取基线之后执行，避免丢失基线）
+        storage::rebuild_all_ring_files_if_mismatch(&data_dir, retention_seconds)?;
 
         // Rate limits
         {
