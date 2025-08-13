@@ -132,7 +132,13 @@ fn parse_openwrt_from_os_release() -> Option<Vec<(String, String)>> {
     }
 }
 
-fn log_startup_info(iface: &str, port: u16, data_dir: &str, retention_seconds: u32) {
+fn log_startup_info(
+    iface: &str,
+    port: u16,
+    data_dir: &str,
+    retention_seconds: u32,
+    web_log: bool,
+) {
     let app_version = env!("CARGO_PKG_VERSION");
     let (uid, gid) = current_user_ids();
     let cwd = env::current_dir()
@@ -172,6 +178,10 @@ fn log_startup_info(iface: &str, port: u16, data_dir: &str, retention_seconds: u
     info!("Listening port: {}", port);
     info!("Data directory: {}", data_dir);
     info!("Retention seconds: {}", retention_seconds);
+    info!(
+        "Web request logging: {}",
+        if web_log { "enabled" } else { "disabled" }
+    );
     info!("Interface: {} (IP: {}, Mask: {})", iface, ip_str, mask_str);
     if let Some(kvs) = parse_openwrt_from_os_release() {
         info!("OpenWrt identifiers (/etc/os-release):");
@@ -222,6 +232,12 @@ pub struct Opt {
         help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
     )]
     pub retention_seconds: u32,
+
+    #[clap(
+        long,
+        help = "Enable web request logging (per-HTTP-request line)"
+    )]
+    pub web_log: bool,
 }
 
 // Initialize eBPF programs and maps
@@ -262,6 +278,7 @@ async fn run_service(
     port: u16,
     data_dir: String,
     retention_seconds: u32,
+    web_log: bool,
     mut ingress_ebpf: aya::Ebpf,
     mut egress_ebpf: aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
@@ -310,7 +327,7 @@ async fn run_service(
 
     let mac_stats_clone = Arc::clone(&mac_stats);
     tokio::spawn(async move {
-        if let Err(e) = web::start_server(port, mac_stats_clone).await {
+        if let Err(e) = web::start_server(port, mac_stats_clone, web_log).await {
             log::error!("Web server error: {}", e);
         }
     });
@@ -371,10 +388,11 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         port,
         data_dir,
         retention_seconds,
+        web_log,
     } = opt;
 
     // Startup diagnostics
-    log_startup_info(&iface, port, &data_dir, retention_seconds);
+    log_startup_info(&iface, port, &data_dir, retention_seconds, web_log);
 
     // Initialize eBPF programs
     let (mut ingress_ebpf, mut egress_ebpf) = init_ebpf_programs(iface.clone()).await?;
@@ -388,6 +406,7 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         port,
         data_dir,
         retention_seconds,
+        web_log,
         ingress_ebpf,
         egress_ebpf,
     )

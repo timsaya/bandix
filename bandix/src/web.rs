@@ -12,6 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub async fn start_server(
     port: u16,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+    web_log: bool,
 ) -> Result<(), anyhow::Error> {
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
@@ -22,7 +23,7 @@ pub async fn start_server(
         let mac_stats = Arc::clone(&mac_stats);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, mac_stats).await {
+            if let Err(e) = handle_connection(stream, mac_stats, web_log).await {
                 error!("Error handling connection: {}", e);
             }
         });
@@ -32,6 +33,7 @@ pub async fn start_server(
 async fn handle_connection(
     mut stream: TcpStream,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+    web_log: bool,
 ) -> Result<(), anyhow::Error> {
     let mut buffer = [0; 4096]; // Increase buffer size to handle larger requests
     let n = stream.read(&mut buffer).await?;
@@ -53,6 +55,10 @@ async fn handle_connection(
 
     let method = parts[0];
     let path = parts[1];
+
+    if web_log {
+        info!("{} {}", method, path);
+    }
 
     if path == "/api/devices" {
         let json = generate_devices_json(&mac_stats);
