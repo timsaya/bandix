@@ -228,7 +228,7 @@ pub struct Opt {
 
     #[clap(
         long,
-        default_value = "3600",
+        default_value = "600",
         help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
     )]
     pub retention_seconds: u32,
