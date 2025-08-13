@@ -2,6 +2,7 @@ use bandix_common::MacTrafficStats;
 use crate::storage;
 use crate::utils::format_utils::{format_bytes, format_mac};
 use log::{info, error};
+use chrono::Local;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -57,7 +58,13 @@ async fn handle_connection(
     let path = parts[1];
 
     if web_log {
-        info!("{} {}", method, path);
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let query = path.splitn(2, '?').nth(1).unwrap_or("");
+        if query.is_empty() {
+            info!("[{}] {} {}", timestamp, method, path);
+        } else {
+            info!("[{}] {} {} | params: {}", timestamp, method, path, query);
+        }
     }
 
     if path == "/api/devices" {
@@ -107,12 +114,15 @@ async fn handle_connection(
         let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
 
         let mac_opt = params.get("mac").cloned();
-        let rows_result = if let Some(mac_str) = mac_opt {
+        let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
-                crate::storage::query_metrics_aggregate_all(&data_dir, limit)
+                (crate::storage::query_metrics_aggregate_all(&data_dir, limit), "all".to_string())
             } else {
                 match parse_mac_address(&mac_str) {
-                    Ok(mac) => crate::storage::query_metrics(&data_dir, &mac, 0, u64::MAX, limit),
+                    Ok(mac) => (
+                        crate::storage::query_metrics(&data_dir, &mac, 0, u64::MAX, limit),
+                        format_mac(&mac),
+                    ),
                     Err(e) => {
                         let error_json = format!(
                             r#"{{"status":"error","message":"invalid mac: {}"}}"#,
@@ -125,7 +135,7 @@ async fn handle_connection(
             }
         } else {
             // mac omitted => aggregate all
-            crate::storage::query_metrics_aggregate_all(&data_dir, limit)
+            (crate::storage::query_metrics_aggregate_all(&data_dir, limit), "all".to_string())
         };
 
         match rows_result {
@@ -135,7 +145,11 @@ async fn handle_connection(
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(3600);
 
-                let mut json = format!("{{\n  \"retention_seconds\": {},\n  \"metrics\": [\n", retention_seconds);
+                let mut json = format!(
+                    "{{\n  \"retention_seconds\": {},\n  \"mac\": \"{}\",\n  \"metrics\": [\n",
+                    retention_seconds,
+                    mac_label
+                );
                 for (i, r) in rows.iter().enumerate() {
                     json.push_str(&format!(
                         "    {{\n      \"ts_ms\": {},\n      \"total_rx_rate\": {},\n      \"total_tx_rate\": {},\n      \"local_rx_rate\": {},\n      \"local_tx_rate\": {},\n      \"wide_rx_rate\": {},\n      \"wide_tx_rate\": {},\n      \"total_rx_bytes\": {},\n      \"total_tx_bytes\": {},\n      \"local_rx_bytes\": {},\n      \"local_tx_bytes\": {},\n      \"wide_rx_bytes\": {},\n      \"wide_tx_bytes\": {}\n    }}",

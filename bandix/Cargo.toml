@@ -29,6 +29,7 @@ axum = { version = "0.7.3", features = ["json"], default-features = false }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 serde_json = "1.0"
 comfy-table = "7"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [build-dependencies]
 anyhow = { workspace = true }
