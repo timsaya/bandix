@@ -28,6 +28,10 @@ TARGETS=(
   "armv7-unknown-linux-musleabihf"
   "armv5te-unknown-linux-gnueabi"
   "armv5te-unknown-linux-musleabi"
+  "arm-unknown-linux-musleabi"
+  "arm-unknown-linux-musleabihf"
+  "arm-unknown-linux-gnueabi"
+  "arm-unknown-linux-gnueabihf"
 )
 
 # 安装目标平台
