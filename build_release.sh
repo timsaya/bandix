@@ -20,18 +20,35 @@ fi
 
 # 构建目标平台列表
 TARGETS=(
+  # x86_64 架构
   "x86_64-unknown-linux-gnu"
   "x86_64-unknown-linux-musl"
+  
+  # AArch64 (ARM64) 架构
   "aarch64-unknown-linux-gnu"
   "aarch64-unknown-linux-musl"
+  
+  # ARM 32位架构
   "armv7-unknown-linux-gnueabihf"
   "armv7-unknown-linux-musleabihf"
+  "armv7-unknown-linux-musleabi"
+  "armv7-unknown-linux-gnueabi"
   "armv5te-unknown-linux-gnueabi"
   "armv5te-unknown-linux-musleabi"
   "arm-unknown-linux-musleabi"
   "arm-unknown-linux-musleabihf"
   "arm-unknown-linux-gnueabi"
   "arm-unknown-linux-gnueabihf"
+  
+  # RISC-V 架构 (新兴的开源架构)
+  "riscv64gc-unknown-linux-gnu"
+  "riscv64gc-unknown-linux-musl"
+  
+  # PowerPC 架构 (部分高端路由器)
+  "powerpc64-unknown-linux-gnu"
+  "powerpc64le-unknown-linux-gnu"
+  "powerpc64le-unknown-linux-musl"
+
 )
 
 # 安装目标平台
