@@ -54,3 +54,36 @@ linker = "powerpc64-linux-gnu-gcc"
 [target.powerpc64le-unknown-linux-gnu]
 linker = "powerpc64le-linux-gnu-gcc"
 
+# MIPS 架构配置
+[target.mips-unknown-linux-gnu]
+linker = "mips-linux-gnu-gcc"
+rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+
+[target.mips-unknown-linux-musl]
+linker = "mips-linux-gnu-gcc"
+rustflags = ["-C", "link-args=-lm -static", "-C", "panic=unwind"]
+
+[target.mips64-unknown-linux-gnuabi64]
+linker = "mips64-linux-gnuabi64-gcc"
+rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+
+[target.mips64-unknown-linux-muslabi64]
+linker = "mips64-linux-gnuabi64-gcc"
+rustflags = ["-C", "link-args=-lm -static", "-C", "panic=unwind"]
+
+[target.mipsel-unknown-linux-gnu]
+linker = "mipsel-linux-gnu-gcc"
+rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+
+[target.mipsel-unknown-linux-musl]
+linker = "mipsel-linux-gnu-gcc"
+rustflags = ["-C", "link-args=-lm -static", "-C", "panic=unwind"]
+
+[target.mips64el-unknown-linux-gnuabi64]
+linker = "mips64el-linux-gnuabi64-gcc"
+rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+
+[target.mips64el-unknown-linux-muslabi64]
+linker = "mips64el-linux-gnuabi64-gcc"
+rustflags = ["-C", "link-args=-lm -static", "-C", "panic=unwind"]
+
