@@ -65,14 +65,6 @@ MIPS_TARGETS=(
     # MIPS 32位 小端序 (MIPSEL)
     "mipsel-unknown-linux-gnu"
     "mipsel-unknown-linux-musl"
-    
-    # MIPS 64位 大端序
-    "mips64-unknown-linux-gnuabi64"
-    "mips64-unknown-linux-muslabi64"
-    
-    # MIPS 64位 小端序 (MIPS64EL)
-    "mips64el-unknown-linux-gnuabi64"
-    "mips64el-unknown-linux-muslabi64"
 )
 
 # 使用 cargo nightly + build-std，无需交叉编译工具链
