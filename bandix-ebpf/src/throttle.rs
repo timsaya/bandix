@@ -62,9 +62,9 @@ pub fn get_rate_limit(mac: &[u8; 6], is_rx: bool) -> u64 {
         match limits {
             Some(limit) => {
                 if is_rx {
-                    limit[1] // Upload limit
+                    limit[0] // Upload limit
                 } else {
-                    limit[0] // Download limit
+                    limit[1] // Download limit
                 }
             }
             None => 0, // No limit
