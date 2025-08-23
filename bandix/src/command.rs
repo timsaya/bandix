@@ -285,6 +285,7 @@ async fn run_service(
 ) -> Result<(), anyhow::Error> {
     let mac_stats = Arc::new(Mutex::new(StdHashMap::<[u8; 6], MacTrafficStats>::new()));
     let baseline_totals = Arc::new(Mutex::new(StdHashMap::<[u8; 6], BaselineTotals>::new()));
+    let rate_limits = Arc::new(Mutex::new(StdHashMap::<[u8; 6], [u64; 2]>::new()));
 
     let running = Arc::new(Mutex::new(true));
     let r: Arc<Mutex<bool>> = running.clone();
@@ -302,13 +303,11 @@ async fn run_service(
         storage::ensure_schema(&data_dir)?;
         let limits = storage::load_all_limits(&data_dir)?;
 
-        // Rate limits
+        // Load rate limits into dedicated map; do NOT write mac_stats
         {
-            let mut stats_map = mac_stats.lock().unwrap();
+            let mut rl = rate_limits.lock().unwrap();
             for (mac, rx, tx) in limits {
-                let entry = stats_map.entry(mac).or_default();
-                entry.wide_rx_rate_limit = rx;
-                entry.wide_tx_rate_limit = tx;
+                rl.insert(mac, [rx, tx]);
             }
         }
 
@@ -326,8 +325,9 @@ async fn run_service(
     std::env::set_var("BANDIX_RETENTION_SECONDS", retention_seconds.to_string());
 
     let mac_stats_clone = Arc::clone(&mac_stats);
+    let rate_limits_clone = Arc::clone(&rate_limits);
     tokio::spawn(async move {
-        if let Err(e) = web::start_server(port, mac_stats_clone, web_log).await {
+        if let Err(e) = web::start_server(port, mac_stats_clone, rate_limits_clone, web_log).await {
             log::error!("Web server error: {}", e);
         }
     });
@@ -370,6 +370,7 @@ async fn run_service(
             &mut ingress_ebpf,
             &mut egress_ebpf,
             &baseline_totals,
+            &rate_limits,
         )
         .await?;
     }

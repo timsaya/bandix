@@ -502,6 +502,7 @@ pub struct BaselineTotals {
     pub local_tx_bytes: u64,
     pub wide_rx_bytes: u64,
     pub wide_tx_bytes: u64,
+    pub last_online_ts: u64,
 }
 
 // Use the latest record from each device's ring as baseline
@@ -563,6 +564,7 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
                     local_tx_bytes: rec[10],
                     wide_rx_bytes: rec[11],
                     wide_tx_bytes: rec[12],
+                    last_online_ts: rec[13],
                 },
             ));
         }

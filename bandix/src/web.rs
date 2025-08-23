@@ -13,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub async fn start_server(
     port: u16,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+    rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
     web_log: bool,
 ) -> Result<(), anyhow::Error> {
     let addr = format!("0.0.0.0:{}", port);
@@ -22,9 +23,10 @@ pub async fn start_server(
     loop {
         let (stream, _) = listener.accept().await?;
         let mac_stats = Arc::clone(&mac_stats);
+        let rate_limits = Arc::clone(&rate_limits);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, mac_stats, web_log).await {
+            if let Err(e) = handle_connection(stream, mac_stats, rate_limits, web_log).await {
                 error!("Error handling connection: {}", e);
             }
         });
@@ -34,6 +36,7 @@ pub async fn start_server(
 async fn handle_connection(
     mut stream: TcpStream,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+    rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
     web_log: bool,
 ) -> Result<(), anyhow::Error> {
     let mut buffer = [0; 4096]; // Increase buffer size to handle larger requests
@@ -74,7 +77,7 @@ async fn handle_connection(
         // Parse JSON request body to get MAC address and rate limit settings
         let body = parse_request_body(&request);
         if let Some(body_content) = body {
-            match set_device_limit_json(&body_content, &mac_stats).await {
+            match set_device_limit_json(&body_content, &mac_stats, &rate_limits).await {
                 Ok(_) => send_json_response(&mut stream, r#"{"status":"success"}"#).await?,
                 Err(e) => {
                     let error_json = format!(r#"{{"status":"error","message":"{}"}}"#, e);
@@ -90,7 +93,7 @@ async fn handle_connection(
             .await?;
         }
     } else if path == "/api/limits" && method == "GET" {
-        let json = generate_limits_json(&mac_stats);
+        let json = generate_limits_json(&rate_limits);
         send_json_response(&mut stream, &json).await?;
     } else if path.starts_with("/api/metrics") && method == "GET" {
         // Query string format: /api/metrics?mac=aa:bb:cc:dd:ee:ff|all
@@ -235,6 +238,7 @@ fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
 async fn set_device_limit_json(
     body: &str,
     mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+    rate_limits: &Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
 ) -> Result<(), anyhow::Error> {
     // Parse JSON request body
     let json: Value = serde_json::from_str(body)?;
@@ -250,18 +254,18 @@ async fn set_device_limit_json(
 
     let wide_tx_rate_limit = json["wide_tx_rate_limit"].as_u64().unwrap_or(0); // Default unlimited
 
-    // Update user space statistics
+    // Update in-memory rate limits only (do not create mac_stats entries)
+    {
+        let mut rl = rate_limits.lock().unwrap();
+        rl.insert(mac, [wide_rx_rate_limit, wide_tx_rate_limit]);
+    }
+
+    // If the device already exists in mac_stats, sync the limit fields for UI consistency
     {
         let mut stats_map = mac_stats.lock().unwrap();
         if let Some(stats) = stats_map.get_mut(&mac) {
             stats.wide_rx_rate_limit = wide_rx_rate_limit;
             stats.wide_tx_rate_limit = wide_tx_rate_limit;
-        } else {
-            // If MAC address not found, create a new record
-            let mut new_stats = MacTrafficStats::default();
-            new_stats.wide_rx_rate_limit = wide_rx_rate_limit;
-            new_stats.wide_tx_rate_limit = wide_tx_rate_limit;
-            stats_map.insert(mac, new_stats);
         }
     }
 
@@ -302,8 +306,14 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
 
     let mut json = String::from("{\n  \"devices\": [\n");
 
-    let total_items = stats_map.len();
-    for (i, (mac, stats)) in stats_map.iter().enumerate() {
+    // 仅展示被 eBPF 实际采集到的设备（last_sample_ts > 0）
+    let filtered: Vec<(&[u8; 6], &MacTrafficStats)> = stats_map
+        .iter()
+        .filter(|(_mac, stats)| stats.last_sample_ts > 0)
+        .collect();
+
+    let total_items = filtered.len();
+    for (i, (mac, stats)) in filtered.into_iter().enumerate() {
         // Format MAC address
         let mac_str = format_mac(mac);
 
@@ -334,15 +344,15 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
     json
 }
 
-fn generate_limits_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>) -> String {
-    let stats_map = mac_stats.lock().unwrap();
+fn generate_limits_json(rate_limits: &Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>) -> String {
+    let rl_map = rate_limits.lock().unwrap();
     let mut json = String::from("{\n  \"limits\": [\n");
-    let total_items = stats_map.len();
-    for (i, (mac, stats)) in stats_map.iter().enumerate() {
+    let total_items = rl_map.len();
+    for (i, (mac, lim)) in rl_map.iter().enumerate() {
         let mac_str = crate::utils::format_utils::format_mac(mac);
         json.push_str(&format!(
             "    {{\n      \"mac\": \"{}\",\n      \"wide_rx_rate_limit\": {},\n      \"wide_tx_rate_limit\": {}\n    }}",
-            mac_str, stats.wide_rx_rate_limit, stats.wide_tx_rate_limit
+            mac_str, lim[0], lim[1]
         ));
         if i < total_items - 1 {
             json.push_str(",\n");

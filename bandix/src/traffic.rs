@@ -148,6 +148,7 @@ fn update_traffic_stats(
     mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
     device_traffic_stats: &StdHashMap<[u8; 6], TrafficData>,
     baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
+    rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
 ) -> Result<(), anyhow::Error> {
     // Get current timestamp
     let now = SystemTime::now()
@@ -157,6 +158,7 @@ fn update_traffic_stats(
 
     let mut stats_map = mac_stats.lock().unwrap();
     let baseline_map = baselines.lock().unwrap();
+    let rl_map = rate_limits.lock().unwrap();
 
     for (mac, traffic_data) in device_traffic_stats.iter() {
         let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
@@ -191,6 +193,12 @@ fn update_traffic_stats(
             last_sample_ts: now,
         });
 
+        // Apply rate limit if exists in rate_limits map
+        if let Some(lim) = rl_map.get(mac) {
+            stats.wide_rx_rate_limit = lim[0];
+            stats.wide_tx_rate_limit = lim[1];
+        }
+
         // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
         // overwrite with the latest IP collected by eBPF to avoid staying at 0.0.0.0.
         if traffic_data.ip_address != [0, 0, 0, 0] && stats.ip_address != traffic_data.ip_address {
@@ -209,6 +217,7 @@ fn update_traffic_stats(
             local_tx_bytes: 0,
             wide_rx_bytes: 0,
             wide_tx_bytes: 0,
+            last_online_ts: 0,
         });
 
         // Update total bytes with baseline added
@@ -222,6 +231,11 @@ fn update_traffic_stats(
         // Update cross-network traffic with baseline added
         stats.wide_rx_bytes = traffic_data.wide_rx_bytes + b.wide_rx_bytes;
         stats.wide_tx_bytes = traffic_data.wide_tx_bytes + b.wide_tx_bytes;
+
+        // If we have baseline last_online_ts and current value is zero, seed it to avoid startup gap
+        if stats.last_online_ts == 0 && b.last_online_ts > 0 {
+            stats.last_online_ts = b.last_online_ts;
+        }
 
         // Calculate rate (bytes/sec)
         if stats.last_sample_ts > 0 {
@@ -299,11 +313,11 @@ fn update_traffic_stats(
 }
 
 fn update_rate_limit(
-    mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
+    rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
     ingress_ebpf: &mut aya::Ebpf,
     egress_ebpf: &mut aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
-    let mut stats_map = mac_stats.lock().unwrap();
+    let rl_map = rate_limits.lock().unwrap();
 
     let mut ingress_mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
         ingress_ebpf
@@ -317,13 +331,13 @@ fn update_rate_limit(
             .ok_or(anyhow::anyhow!("Cannot find egress MAC_RATE_LIMITS"))?,
     )?;
 
-    for (mac, traffic_data) in stats_map.iter_mut() {
+    for (mac, lim) in rl_map.iter() {
         ingress_mac_rate_limits
             .insert(
                 mac,
                 &[
-                    traffic_data.wide_rx_rate_limit,
-                    traffic_data.wide_tx_rate_limit,
+                    lim[0],
+                    lim[1],
                 ],
                 0,
             )
@@ -333,8 +347,8 @@ fn update_rate_limit(
             .insert(
                 mac,
                 &[
-                    traffic_data.wide_rx_rate_limit,
-                    traffic_data.wide_tx_rate_limit,
+                    lim[0],
+                    lim[1],
                 ],
                 0,
             )
@@ -350,14 +364,15 @@ pub async fn update(
     ingress_ebpf: &mut aya::Ebpf,
     egress_ebpf: &mut aya::Ebpf,
     baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
+    rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
 ) -> Result<(), anyhow::Error> {
     let mac_ip_mapping = collect_mac_ip_mapping(ingress_ebpf, egress_ebpf)?;
     let traffic_data = collect_traffic_data(ingress_ebpf, egress_ebpf)?;
     let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
 
-    update_traffic_stats(mac_stats, &device_traffic_stats, baselines)?;
+    update_traffic_stats(mac_stats, &device_traffic_stats, baselines, rate_limits)?;
 
-    update_rate_limit(mac_stats, ingress_ebpf, egress_ebpf)?;
+    update_rate_limit(rate_limits, ingress_ebpf, egress_ebpf)?;
 
     // Only call display function in debug mode
     #[cfg(debug_assertions)]
