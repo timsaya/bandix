@@ -93,7 +93,7 @@ async fn handle_connection(
         let json = generate_limits_json(&mac_stats);
         send_json_response(&mut stream, &json).await?;
     } else if path.starts_with("/api/metrics") && method == "GET" {
-        // Query string format (updated): /api/metrics?mac=aa:bb:cc:dd:ee:ff|all&limit=1000
+        // Query string format: /api/metrics?mac=aa:bb:cc:dd:ee:ff|all
         let query = path.splitn(2, '?').nth(1).unwrap_or("");
         let params: std::collections::HashMap<_, _> = query
             .split('&')
@@ -107,20 +107,16 @@ async fn handle_connection(
             })
             .collect();
 
-        let limit: Option<usize> = params
-            .get("limit")
-            .and_then(|s| s.parse::<usize>().ok());
-
         let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
 
         let mac_opt = params.get("mac").cloned();
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
-                (crate::storage::query_metrics_aggregate_all(&data_dir, limit), "all".to_string())
+                (crate::storage::query_metrics_aggregate_all(&data_dir), "all".to_string())
             } else {
                 match parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        crate::storage::query_metrics(&data_dir, &mac, 0, u64::MAX, limit),
+                        crate::storage::query_metrics(&data_dir, &mac, 0, u64::MAX),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -135,7 +131,7 @@ async fn handle_connection(
             }
         } else {
             // mac omitted => aggregate all
-            (crate::storage::query_metrics_aggregate_all(&data_dir, limit), "all".to_string())
+            (crate::storage::query_metrics_aggregate_all(&data_dir), "all".to_string())
         };
 
         match rows_result {

@@ -373,7 +373,6 @@ pub fn query_metrics(
     mac: &[u8; 6],
     start_ms: u64,
     end_ms: u64,
-    limit: Option<usize>,
 ) -> Result<Vec<MetricsRow>, anyhow::Error> {
     let path = ring_file_path(base_dir, mac);
     let mut rows_vec = Vec::new();
@@ -410,19 +409,13 @@ pub fn query_metrics(
     }
     // Ascending order
     rows_vec.sort_by_key(|r| r.ts_ms);
-    if let Some(max_rows) = limit {
-        rows_vec.truncate(max_rows);
-    }
     Ok(rows_vec)
 }
 
 /// Aggregate metrics across all devices for the entire retention window.
-/// Returned rows are sorted by timestamp ascending. When `limit` is provided,
-/// it truncates the number of rows to the first `limit` entries after sorting.
+/// Returned rows are sorted by timestamp ascending.
 pub fn query_metrics_aggregate_all(
     base_dir: &str,
-    limit: Option<usize>,
-    
 ) -> Result<Vec<MetricsRow>, anyhow::Error> {
     use std::collections::BTreeMap;
 
@@ -459,7 +452,7 @@ pub fn query_metrics_aggregate_all(
         }
     }
 
-    let mut rows_vec: Vec<MetricsRow> = ts_to_agg
+    let rows_vec: Vec<MetricsRow> = ts_to_agg
         .into_iter()
         .map(|(_ts, rec)| MetricsRow {
             ts_ms: rec[0],
@@ -478,9 +471,6 @@ pub fn query_metrics_aggregate_all(
         })
         .collect();
 
-    if let Some(max_rows) = limit {
-        rows_vec.truncate(max_rows);
-    }
     Ok(rows_vec)
 }
 
