@@ -383,6 +383,7 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     // Set up logging
     env_logger::Builder::new()
         .filter(None, LevelFilter::Info)
+        .target(env_logger::Target::Stdout)
         .init();
 
     let Opt {
