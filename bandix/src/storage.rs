@@ -33,16 +33,17 @@ fn mac_to_filename(mac: &[u8; 6]) -> String {
 //   metrics/
 //     <mac12>.ring                  Fixed-size ring file (capacity determined by config)
 
-const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring v1
-const RING_VERSION: u32 = 1;
+const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring magic
+const RING_VERSION: u32 = 2; // bump to v2: slot adds last_online_ts
 // Default capacity is 3600 (1 hour, 1 sample per second); actual capacity is determined by argument when created
 const DEFAULT_RING_CAPACITY: u32 = 3600;
 
 // Per-slot structure (little-endian):
 // ts_ms: u64
 // total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
-// Slot size = 13 * 8 = 104 bytes
-const SLOT_U64S: usize = 13;
+// last_online_ts: u64
+// Slot size = 14 * 8 = 112 bytes (since v2)
+const SLOT_U64S: usize = 14;
 const SLOT_SIZE: usize = SLOT_U64S * 8;
 const HEADER_SIZE: usize = 4 /*magic*/ + 4 /*version*/ + 4 /*capacity*/;
 
@@ -95,7 +96,11 @@ fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
         .open(path)?;
 
     let metadata = f.metadata()?;
-    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
+    let cap = if capacity == 0 {
+        DEFAULT_RING_CAPACITY
+    } else {
+        capacity
+    };
     let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE as u64);
 
     if metadata.len() != expected_size {
@@ -126,7 +131,11 @@ fn reinit_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
         .create(true)
         .open(path)?;
 
-    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
+    let cap = if capacity == 0 {
+        DEFAULT_RING_CAPACITY
+    } else {
+        capacity
+    };
     let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE as u64);
 
     // Force reinitialize regardless of current size/header
@@ -344,6 +353,7 @@ pub fn insert_metrics_batch(
             s.local_tx_bytes,
             s.wide_rx_bytes,
             s.wide_tx_bytes,
+            s.last_online_ts,
         ];
         write_slot(&f, idx, &rec)?;
         f.sync_all()?;
@@ -380,7 +390,11 @@ pub fn query_metrics(
         return Ok(rows_vec);
     }
     let mut f = OpenOptions::new().read(true).open(&path)?;
-    let (_ver, cap) = read_header(&mut f)?;
+    let (ver, cap) = read_header(&mut f)?;
+    if ver != RING_VERSION {
+        // Skip old-version ring file
+        return Ok(rows_vec);
+    }
     // Iterate over all slots and filter by range
     for i in 0..(cap as u64) {
         let rec = read_slot(&f, i)?;
@@ -412,67 +426,6 @@ pub fn query_metrics(
     Ok(rows_vec)
 }
 
-/// Aggregate metrics across all devices for the entire retention window.
-/// Returned rows are sorted by timestamp ascending.
-pub fn query_metrics_aggregate_all(
-    base_dir: &str,
-) -> Result<Vec<MetricsRow>, anyhow::Error> {
-    use std::collections::BTreeMap;
-
-    let dir = ring_dir(base_dir);
-    let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S]> = BTreeMap::new();
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
-            continue;
-        }
-
-        let mut f = OpenOptions::new().read(true).open(&path)?;
-        let (_ver, cap) = read_header(&mut f)?;
-        for i in 0..(cap as u64) {
-            let rec = read_slot(&f, i)?;
-            let ts = rec[0];
-            if ts == 0 {
-                continue;
-            }
-            let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
-            agg[0] = ts; // keep timestamp
-            // Sum all counters/rates
-            for j in 1..SLOT_U64S {
-                agg[j] = agg[j].saturating_add(rec[j]);
-            }
-        }
-    }
-
-    let rows_vec: Vec<MetricsRow> = ts_to_agg
-        .into_iter()
-        .map(|(_ts, rec)| MetricsRow {
-            ts_ms: rec[0],
-            total_rx_rate: rec[1],
-            total_tx_rate: rec[2],
-            local_rx_rate: rec[3],
-            local_tx_rate: rec[4],
-            wide_rx_rate: rec[5],
-            wide_tx_rate: rec[6],
-            total_rx_bytes: rec[7],
-            total_tx_bytes: rec[8],
-            local_rx_bytes: rec[9],
-            local_tx_bytes: rec[10],
-            wide_rx_bytes: rec[11],
-            wide_tx_bytes: rec[12],
-        })
-        .collect();
-
-    Ok(rows_vec)
-}
 
 /// 按时间窗聚合所有设备的指标，返回按时间戳升序的行
 pub fn query_metrics_aggregate_all_with_window(
@@ -499,7 +452,8 @@ pub fn query_metrics_aggregate_all_with_window(
         }
 
         let mut f = OpenOptions::new().read(true).open(&path)?;
-        let (_ver, cap) = read_header(&mut f)?;
+        let (ver, cap) = read_header(&mut f)?;
+        if ver != RING_VERSION { continue; }
         for i in 0..(cap as u64) {
             let rec = read_slot(&f, i)?;
             let ts = rec[0];
@@ -511,7 +465,8 @@ pub fn query_metrics_aggregate_all_with_window(
             }
             let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
             agg[0] = ts; // keep timestamp
-            for j in 1..SLOT_U64S {
+            // Aggregate only metric fields (exclude last_online_ts at index 13)
+            for j in 1..13 {
                 agg[j] = agg[j].saturating_add(rec[j]);
             }
         }
@@ -586,7 +541,8 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
         }
 
         let mut f = OpenOptions::new().read(true).open(&path)?;
-        let (_ver, cap) = read_header(&mut f)?;
+        let (ver, cap) = read_header(&mut f)?;
+        if ver != RING_VERSION { continue; }
         let mut best: Option<[u64; SLOT_U64S]> = None;
         for i in 0..(cap as u64) {
             let rec = read_slot(&f, i)?;

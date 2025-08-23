@@ -187,7 +187,8 @@ fn update_traffic_stats(
             wide_tx_rate: 0,
             wide_last_rx_bytes: 0,
             wide_last_tx_bytes: 0,
-            last_update: now,
+            last_online_ts: 0,
+            last_sample_ts: now,
         });
 
         // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
@@ -223,8 +224,8 @@ fn update_traffic_stats(
         stats.wide_tx_bytes = traffic_data.wide_tx_bytes + b.wide_tx_bytes;
 
         // Calculate rate (bytes/sec)
-        if stats.last_update > 0 {
-            let time_diff = now.saturating_sub(stats.last_update);
+        if stats.last_sample_ts > 0 {
+            let time_diff = now.saturating_sub(stats.last_sample_ts);
             if time_diff > 0 {
                 // Calculate total receive rate
                 let rx_diff = stats
@@ -257,6 +258,30 @@ fn update_traffic_stats(
                 // Calculate cross-network send rate
                 let wide_tx_diff = stats.wide_tx_bytes.saturating_sub(stats.wide_last_tx_bytes);
                 stats.wide_tx_rate = (wide_tx_diff * 1000) / time_diff;
+
+                // Update last active time only if any traffic increased
+                if rx_diff > 0
+                    || tx_diff > 0
+                    || local_rx_diff > 0
+                    || local_tx_diff > 0
+                    || wide_rx_diff > 0
+                    || wide_tx_diff > 0
+                {
+                    stats.last_online_ts = now;
+                }
+            }
+        }
+
+        // If first sample and there is traffic, set last active time
+        if stats.last_sample_ts == 0 {
+            if stats.total_rx_bytes > 0
+                || stats.total_tx_bytes > 0
+                || stats.local_rx_bytes > 0
+                || stats.local_tx_bytes > 0
+                || stats.wide_rx_bytes > 0
+                || stats.wide_tx_bytes > 0
+            {
+                stats.last_online_ts = now;
             }
         }
 
@@ -267,7 +292,7 @@ fn update_traffic_stats(
         stats.local_last_tx_bytes = stats.local_tx_bytes;
         stats.wide_last_rx_bytes = stats.wide_rx_bytes;
         stats.wide_last_tx_bytes = stats.wide_tx_bytes;
-        stats.last_update = now;
+        stats.last_sample_ts = now;
     }
 
     Ok(())

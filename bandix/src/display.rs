@@ -7,6 +7,7 @@ use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 use comfy_table::{Table, ContentArrangement, presets::UTF8_FULL};
+use chrono::{Local, TimeZone};
 
 // Display terminal user interface
 pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>) {
@@ -42,9 +43,20 @@ pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTraffi
             "Local RX",
             "Wide TX",
             "Wide RX",
+            "Last Online",
         ]);
 
     for (mac, stats) in mac_stats_data {
+        let last_online_str = if stats.last_online_ts == 0 {
+            "-".to_string()
+        } else {
+            Local
+                .timestamp_millis_opt(stats.last_online_ts as i64)
+                .single()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| stats.last_online_ts.to_string())
+        };
+
         table.add_row(vec![
             format_ip(&stats.ip_address),
             format_mac(mac),
@@ -58,6 +70,7 @@ pub fn display_tui_interface(mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTraffi
             format_rate(stats.local_rx_rate),
             format_rate(stats.wide_tx_rate),
             format_rate(stats.wide_rx_rate),
+            last_online_str,
         ]);
     }
 

@@ -40,7 +40,8 @@ pub struct MacTrafficStats {
     pub wide_rx_rate_limit: u64, // Cross-network download limit (bytes/sec)
     pub wide_tx_rate_limit: u64, // Cross-network upload limit (bytes/sec)
 
-    pub last_update: u64, // Last update timestamp
+    pub last_online_ts: u64, // Last online timestamp (ms since epoch; updated only when traffic increases)
+    pub last_sample_ts: u64, // Last sample timestamp (ms since epoch)
 }
 
 impl Default for MacTrafficStats {
@@ -71,7 +72,8 @@ impl Default for MacTrafficStats {
             wide_tx_rate: 0,
             wide_last_rx_bytes: 0,
             wide_last_tx_bytes: 0,
-            last_update: 0,
+            last_online_ts: 0,
+            last_sample_ts: 0,
         }
     }
 }

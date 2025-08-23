@@ -314,12 +314,13 @@ fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>
         );
 
         json.push_str(&format!(
-            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"total_rx_bytes\": {},\n      \"total_tx_bytes\": {},\n      \"total_rx_rate\": {},\n      \"total_tx_rate\": {},\n      \"wide_rx_rate_limit\": {},\n      \"wide_tx_rate_limit\": {},\n      \"local_rx_bytes\": {},\n      \"local_tx_bytes\": {},\n      \"local_rx_rate\": {},\n      \"local_tx_rate\": {},\n      \"wide_rx_bytes\": {},\n      \"wide_tx_bytes\": {},\n      \"wide_rx_rate\": {},\n      \"wide_tx_rate\": {}\n    }}",
-            ip_str, mac_str, 
-            stats.total_rx_bytes, stats.total_tx_bytes, stats.total_rx_rate, stats.total_tx_rate, 
+            "    {{\n      \"ip\": \"{}\",\n      \"mac\": \"{}\",\n      \"total_rx_bytes\": {},\n      \"total_tx_bytes\": {},\n      \"total_rx_rate\": {},\n      \"total_tx_rate\": {},\n      \"wide_rx_rate_limit\": {},\n      \"wide_tx_rate_limit\": {},\n      \"local_rx_bytes\": {},\n      \"local_tx_bytes\": {},\n      \"local_rx_rate\": {},\n      \"local_tx_rate\": {},\n      \"wide_rx_bytes\": {},\n      \"wide_tx_bytes\": {},\n      \"wide_rx_rate\": {},\n      \"wide_tx_rate\": {},\n      \"last_online_ts\": {}\n    }}",
+            ip_str, mac_str,
+            stats.total_rx_bytes, stats.total_tx_bytes, stats.total_rx_rate, stats.total_tx_rate,
             stats.wide_rx_rate_limit, stats.wide_tx_rate_limit,
             stats.local_rx_bytes, stats.local_tx_bytes, stats.local_rx_rate, stats.local_tx_rate,
-            stats.wide_rx_bytes, stats.wide_tx_bytes, stats.wide_rx_rate, stats.wide_tx_rate
+            stats.wide_rx_bytes, stats.wide_tx_bytes, stats.wide_rx_rate, stats.wide_tx_rate,
+            stats.last_online_ts
         ));
 
         if i < total_items - 1 {
