@@ -279,6 +279,7 @@ async fn run_service(
     data_dir: String,
     retention_seconds: u32,
     web_log: bool,
+    preloaded_baselines: Vec<([u8; 6], BaselineTotals)>,
     mut ingress_ebpf: aya::Ebpf,
     mut egress_ebpf: aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
@@ -296,13 +297,10 @@ async fn run_service(
         }
     });
 
-    // Initialize data directory and load rate limits and baseline traffic
+    // Initialize data directory and load rate limits, apply preloaded baselines
     {
         storage::ensure_schema(&data_dir)?;
         let limits = storage::load_all_limits(&data_dir)?;
-        let latest = storage::load_latest_totals(&data_dir)?;
-        // 启动时若发现与当前 retention 不一致，立刻重建所有 ring 文件（在读取基线之后执行，避免丢失基线）
-        storage::rebuild_all_ring_files_if_mismatch(&data_dir, retention_seconds)?;
 
         // Rate limits
         {
@@ -314,10 +312,10 @@ async fn run_service(
             }
         }
 
-        // Baseline totals
+        // Baseline totals (use preloaded values from before potential rebuild)
         {
             let mut b = baseline_totals.lock().unwrap();
-            for (mac, base) in latest {
+            for (mac, base) in preloaded_baselines {
                 b.insert(mac, base);
             }
         }
@@ -397,6 +395,12 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
     // Startup diagnostics
     log_startup_info(&iface, port, &data_dir, retention_seconds, web_log);
 
+    // Ensure data schema, and rebuild ring files if retention mismatch before eBPF init
+    storage::ensure_schema(&data_dir)?;
+    let rebuilt = storage::rebuild_all_ring_files_if_mismatch(&data_dir, retention_seconds)?;
+    // Decide baseline: if rebuilt, start from zero; otherwise load latest totals
+    let preloaded_baselines = if rebuilt { Vec::new() } else { storage::load_latest_totals(&data_dir)? };
+
     // Initialize eBPF programs
     let (mut ingress_ebpf, mut egress_ebpf) = init_ebpf_programs(iface.clone()).await?;
 
@@ -410,6 +414,7 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         data_dir,
         retention_seconds,
         web_log,
+        preloaded_baselines,
         ingress_ebpf,
         egress_ebpf,
     )

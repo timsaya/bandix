@@ -190,10 +190,10 @@ pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
 pub fn rebuild_all_ring_files_if_mismatch(
     base_dir: &str,
     retention_seconds: u32,
-) -> Result<(), anyhow::Error> {
+) -> Result<bool, anyhow::Error> {
     let dir = ring_dir(base_dir);
     if !dir.exists() {
-        return Ok(());
+        return Ok(false);
     }
 
     // 先检测是否存在不一致
@@ -216,7 +216,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
     }
 
     if !mismatch_found {
-        return Ok(());
+        return Ok(false);
     }
 
     // 若发现不一致，重建所有 .ring 文件
@@ -233,7 +233,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
         let _ = reinit_ring_file(&path, retention_seconds)?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 pub fn load_all_limits(base_dir: &str) -> Result<Vec<([u8; 6], u64, u64)>, anyhow::Error> {
