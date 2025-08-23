@@ -109,14 +109,33 @@ async fn handle_connection(
 
         let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
 
+        let retention_seconds: u32 = std::env::var("BANDIX_RETENTION_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(3600);
+        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        let start_ms = now_ms.saturating_sub(retention_seconds as u64 * 1000);
+        let end_ms = now_ms;
+
         let mac_opt = params.get("mac").cloned();
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
-                (crate::storage::query_metrics_aggregate_all(&data_dir), "all".to_string())
+                (
+                    crate::storage::query_metrics_aggregate_all_with_window(
+                        &data_dir,
+                        start_ms,
+                        end_ms,
+                    ),
+                    "all".to_string(),
+                )
             } else {
                 match parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        crate::storage::query_metrics(&data_dir, &mac, 0, u64::MAX),
+                        crate::storage::query_metrics(&data_dir, &mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -130,17 +149,20 @@ async fn handle_connection(
                 }
             }
         } else {
-            // mac omitted => aggregate all
-            (crate::storage::query_metrics_aggregate_all(&data_dir), "all".to_string())
+            // mac omitted => aggregate all within window
+            (
+                crate::storage::query_metrics_aggregate_all_with_window(
+                    &data_dir,
+                    start_ms,
+                    end_ms,
+                ),
+                "all".to_string(),
+            )
         };
 
         match rows_result {
             Ok(rows) => {
-                let retention_seconds: u32 = std::env::var("BANDIX_RETENTION_SECONDS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(3600);
-
+                // rows 已在存储层按窗口裁剪
                 let mut json = format!(
                     "{{\n  \"retention_seconds\": {},\n  \"mac\": \"{}\",\n  \"metrics\": [\n",
                     retention_seconds,

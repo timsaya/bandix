@@ -474,6 +474,71 @@ pub fn query_metrics_aggregate_all(
     Ok(rows_vec)
 }
 
+/// 按时间窗聚合所有设备的指标，返回按时间戳升序的行
+pub fn query_metrics_aggregate_all_with_window(
+    base_dir: &str,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<Vec<MetricsRow>, anyhow::Error> {
+    use std::collections::BTreeMap;
+
+    let dir = ring_dir(base_dir);
+    let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S]> = BTreeMap::new();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+            continue;
+        }
+
+        let mut f = OpenOptions::new().read(true).open(&path)?;
+        let (_ver, cap) = read_header(&mut f)?;
+        for i in 0..(cap as u64) {
+            let rec = read_slot(&f, i)?;
+            let ts = rec[0];
+            if ts == 0 {
+                continue;
+            }
+            if ts < start_ms || ts > end_ms {
+                continue;
+            }
+            let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
+            agg[0] = ts; // keep timestamp
+            for j in 1..SLOT_U64S {
+                agg[j] = agg[j].saturating_add(rec[j]);
+            }
+        }
+    }
+
+    let rows_vec: Vec<MetricsRow> = ts_to_agg
+        .into_iter()
+        .map(|(_ts, rec)| MetricsRow {
+            ts_ms: rec[0],
+            total_rx_rate: rec[1],
+            total_tx_rate: rec[2],
+            local_rx_rate: rec[3],
+            local_tx_rate: rec[4],
+            wide_rx_rate: rec[5],
+            wide_tx_rate: rec[6],
+            total_rx_bytes: rec[7],
+            total_tx_bytes: rec[8],
+            local_rx_bytes: rec[9],
+            local_tx_bytes: rec[10],
+            wide_rx_bytes: rec[11],
+            wide_tx_bytes: rec[12],
+        })
+        .collect();
+
+    Ok(rows_vec)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineTotals {
     pub total_rx_bytes: u64,
