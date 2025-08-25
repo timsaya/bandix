@@ -28,7 +28,14 @@ Bandix is a network traffic monitoring tool based on eBPF technology, developed 
 ```shell
 sudo ./bandix --iface <network_interface_name>  --port <port_number>
 ```
-Then access `http://localhost:<port_number>/api/devices` in your browser to get network traffic statistics.
+### Command-line options
+
+- **--iface, -i**: Network interface to monitor. Default: `br-lan`.
+- **--port, -p**: Web server listening port. Default: `8686`.
+- **--data-dir**: Data directory (ring files and rate limit configurations will be stored here). Default: `bandix-data`.
+- **--retention-seconds**: Retention duration (seconds), i.e., ring file capacity (one slot per second). Default: `600`.
+- **--web-log**: Enable per-request web logging. Default: disabled.
+
 
 ```json
 {
