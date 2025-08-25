@@ -190,7 +190,7 @@ fn update_traffic_stats(
             wide_last_rx_bytes: 0,
             wide_last_tx_bytes: 0,
             last_online_ts: 0,
-            last_sample_ts: now,
+            last_sample_ts: 0,
         });
 
         // Apply rate limit if exists in rate_limits map
@@ -273,26 +273,17 @@ fn update_traffic_stats(
                 let wide_tx_diff = stats.wide_tx_bytes.saturating_sub(stats.wide_last_tx_bytes);
                 stats.wide_tx_rate = (wide_tx_diff * 1000) / time_diff;
 
-                // Update last active time only if any traffic increased
-                if rx_diff > 0
-                    || tx_diff > 0
-                    || local_rx_diff > 0
-                    || local_tx_diff > 0
-                    || wide_rx_diff > 0
-                    || wide_tx_diff > 0
-                {
+                // Update last active time only if any transmit traffic increased
+                if tx_diff > 0 || local_tx_diff > 0 || wide_tx_diff > 0 {
                     stats.last_online_ts = now;
                 }
             }
         }
 
-        // If first sample and there is traffic, set last active time
+        // If first sample and there is transmit traffic, set last active time
         if stats.last_sample_ts == 0 {
-            if stats.total_rx_bytes > 0
-                || stats.total_tx_bytes > 0
-                || stats.local_rx_bytes > 0
+            if stats.total_tx_bytes > 0
                 || stats.local_tx_bytes > 0
-                || stats.wide_rx_bytes > 0
                 || stats.wide_tx_bytes > 0
             {
                 stats.last_online_ts = now;
