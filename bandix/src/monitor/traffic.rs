@@ -366,10 +366,10 @@ pub async fn update(
     update_rate_limit(rate_limits, ingress_ebpf, egress_ebpf)?;
 
     // Only call display function in debug mode
-    #[cfg(debug_assertions)]
-    {
-        display_tui_interface(mac_stats);
-    }
+    // #[cfg(debug_assertions)]
+    // {
+    //     display_tui_interface(mac_stats);
+    // }
 
     Ok(())
 }

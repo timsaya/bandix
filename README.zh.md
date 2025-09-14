@@ -34,7 +34,7 @@ sudo ./bandix --iface <network_interface_name>  --port <port_number>
 - **--iface, -i**：要监控的网络接口。默认值：`br-lan`。
 - **--port, -p**：Web 服务监听端口。默认值：`8686`。
 - **--data-dir**：数据目录（用于存放环形文件和速率限制配置）。默认值：`bandix-data`。
-- **--retention-seconds**：保留时长（秒），即环形文件容量（每秒一个槽位）。默认值：`600`。
+- **--traffic-retention-seconds**：保留时长（秒），即环形文件容量（每秒一个槽位）。默认值：`600`。
 - **--web-log**：启用 Web 请求逐条日志。默认：关闭。
 
 ##### 1. 获取网络流量统计

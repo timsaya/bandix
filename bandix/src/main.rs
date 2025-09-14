@@ -1,8 +1,9 @@
 mod command;
 mod display;
 mod ebpf;
+mod monitor;
 mod storage;
-mod traffic;
+mod system;
 mod utils;
 mod web;
 
@@ -25,8 +26,8 @@ fn validate_arguments(opt: &Opt) -> Result<(), anyhow::Error> {
         return Err(anyhow::anyhow!("Port number cannot be 0"));
     }
 
-    if opt.retention_seconds == 0 {
-        return Err(anyhow::anyhow!("retention_seconds must be greater than 0"));
+    if opt.traffic_retention_seconds == 0 {
+        return Err(anyhow::anyhow!("traffic_retention_seconds must be greater than 0"));
     }
 
     Ok(())

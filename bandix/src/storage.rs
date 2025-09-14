@@ -194,11 +194,11 @@ pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
 }
 
 /// 在启动时检查 `metrics` 目录下的所有 ring 文件容量是否与给定的
-/// `retention_seconds` 一致；若发现任意不一致，则重建该目录下所有 ring 文件。
+/// `traffic_retention_seconds` 一致；若发现任意不一致，则重建该目录下所有 ring 文件。
 /// 注意：该操作会清空历史时间序列，仅保留限速配置文件。
 pub fn rebuild_all_ring_files_if_mismatch(
     base_dir: &str,
-    retention_seconds: u32,
+    traffic_retention_seconds: u32,
 ) -> Result<bool, anyhow::Error> {
     let dir = ring_dir(base_dir);
     if !dir.exists() {
@@ -218,7 +218,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
         }
         let mut f = OpenOptions::new().read(true).open(&path)?;
         let (_ver, cap) = read_header(&mut f)?;
-        if cap != retention_seconds {
+        if cap != traffic_retention_seconds {
             mismatch_found = true;
             break;
         }
@@ -239,7 +239,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
             continue;
         }
         // 强制重建
-        let _ = reinit_ring_file(&path, retention_seconds)?;
+        let _ = reinit_ring_file(&path, traffic_retention_seconds)?;
     }
 
     Ok(true)
@@ -328,14 +328,14 @@ pub fn insert_metrics_batch(
     base_dir: &str,
     ts_ms: u64,
     rows: &Vec<([u8; 6], MacTrafficStats)>,
-    retention_seconds: u32,
+    traffic_retention_seconds: u32,
 ) -> Result<(), anyhow::Error> {
     if rows.is_empty() {
         return Ok(());
     }
     for (mac, s) in rows.iter() {
         let path = ring_file_path(base_dir, mac);
-        let mut f = init_ring_file(&path, retention_seconds)?;
+        let mut f = init_ring_file(&path, traffic_retention_seconds)?;
         let (_ver, cap) = read_header(&mut f)?;
         let idx = calc_slot_index(ts_ms, cap);
 

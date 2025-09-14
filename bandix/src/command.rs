@@ -1,201 +1,21 @@
 use crate::ebpf::egress::load_egress;
 use crate::ebpf::ingress::load_ingress;
+use crate::monitor::{MonitorConfig, MonitorManager};
 use crate::storage;
 use crate::storage::BaselineTotals;
-use crate::traffic::update;
+use crate::system::log_startup_info;
 use crate::utils::network_utils::get_interface_info;
 use crate::web;
 use aya::maps::Array;
 use bandix_common::MacTrafficStats;
 use clap::Parser;
+use log::info;
 use log::LevelFilter;
-use log::{info, warn};
 use std::collections::HashMap as StdHashMap;
-
-use crate::utils::format_utils::format_ip;
-use std::env;
-use std::fs;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
 use tokio::time::interval;
-
-// ---- Startup diagnostics ----
-fn read_first_line(path: &str) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
-}
-
-fn kernel_version() -> Option<String> {
-    // Prefer concise output first
-    if let Ok(out) = std::process::Command::new("uname").args(["-sr"]).output() {
-        if let Ok(s) = String::from_utf8(out.stdout) {
-            return Some(s.trim().to_string());
-        }
-    }
-    // Fallback to /proc/version (verbose)
-    read_first_line("/proc/version")
-}
-
-fn hostname() -> Option<String> {
-    if let Some(h) = read_first_line("/proc/sys/kernel/hostname") {
-        return Some(h);
-    }
-    if let Some(h) = read_first_line("/etc/hostname") {
-        return Some(h);
-    }
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-}
-
-fn loadavg() -> Option<String> {
-    fs::read_to_string("/proc/loadavg").ok().map(|s| {
-        let parts: Vec<&str> = s.split_whitespace().collect();
-        if parts.len() >= 3 {
-            format!("{} {} {}", parts[0], parts[1], parts[2])
-        } else {
-            s.trim().to_string()
-        }
-    })
-}
-
-fn mem_total_mb() -> Option<u64> {
-    // Parse MemTotal: kB
-    if let Ok(content) = fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .find_map(|t| t.parse().ok())
-                    .unwrap_or(0);
-                return Some(kb / 1024);
-            }
-        }
-    }
-    None
-}
-
-fn cpu_model_and_cores() -> Option<(String, usize)> {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    if let Ok(content) = fs::read_to_string("/proc/cpuinfo") {
-        for line in content.lines() {
-            if let Some(model) = line.strip_prefix("model name\t: ") {
-                return Some((model.trim().to_string(), cores));
-            }
-            if let Some(hardware) = line.strip_prefix("Hardware\t: ") {
-                // arm
-                return Some((hardware.trim().to_string(), cores));
-            }
-        }
-    }
-    Some(("Unknown CPU".to_string(), cores))
-}
-
-fn current_user_ids() -> (u32, u32) {
-    unsafe {
-        let uid = libc::geteuid();
-        let gid = libc::getegid();
-        (uid as u32, gid as u32)
-    }
-}
-
-fn parse_openwrt_from_os_release() -> Option<Vec<(String, String)>> {
-    let content = fs::read_to_string("/etc/os-release").ok()?;
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if !line.starts_with("OPENWRT_") {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let mut val = v.trim().to_string();
-            if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
-                val = val[1..val.len() - 1].to_string();
-            }
-            pairs.push((k.to_string(), val));
-        }
-    }
-    if pairs.is_empty() {
-        None
-    } else {
-        Some(pairs)
-    }
-}
-
-fn log_startup_info(
-    iface: &str,
-    port: u16,
-    data_dir: &str,
-    retention_seconds: u32,
-    web_log: bool,
-) {
-    let app_version = env!("CARGO_PKG_VERSION");
-    let (uid, gid) = current_user_ids();
-    let cwd = env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_default();
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-
-    // Network info
-    let iface_info = get_interface_info(iface);
-    let (ip_str, mask_str) = if let Some((ip, mask)) = iface_info {
-        (format_ip(&ip), format_ip(&mask))
-    } else {
-        ("0.0.0.0".to_string(), "0.0.0.0".to_string())
-    };
-
-    // System info
-    let kver = kernel_version().unwrap_or_else(|| "unknown".to_string());
-    let host = hostname().unwrap_or_else(|| "unknown".to_string());
-    let load = loadavg().unwrap_or_else(|| "unknown".to_string());
-    let mem_mb = mem_total_mb().unwrap_or(0);
-    let (cpu_model, cores) = cpu_model_and_cores().unwrap_or(("Unknown CPU".to_string(), 1));
-
-    info!("bandix v{} started", app_version);
-    info!("Host: {} (uid={}, gid={})", host, uid, gid);
-    info!("OS: {}", os);
-    info!("Kernel: {}", kver);
-    info!("Arch: {}", arch);
-    info!("CPU: {} ({} cores)", cpu_model, cores);
-    info!("Memory: {} MiB", mem_mb);
-    info!("Load: {}", load);
-    info!("Working directory: {}", cwd);
-    if uid != 0 {
-        warn!("It is recommended to run as root to enable eBPF capabilities");
-    }
-    info!("Listening port: {}", port);
-    info!("Data directory: {}", data_dir);
-    info!("Retention seconds: {}", retention_seconds);
-    info!(
-        "Web request logging: {}",
-        if web_log { "enabled" } else { "disabled" }
-    );
-    info!("Interface: {} (IP: {}, Mask: {})", iface, ip_str, mask_str);
-    if let Some(kvs) = parse_openwrt_from_os_release() {
-        info!("OpenWrt identifiers (/etc/os-release):");
-        for (k, v) in kvs {
-            info!("{}=\"{}\"", k, v);
-        }
-    }
-    if !Path::new(data_dir).exists() {
-        warn!(
-            "Data directory does not exist and will be created during runtime: {}",
-            data_dir
-        );
-    }
-}
 
 #[derive(Debug, Parser)]
 #[clap(name = "bandix")]
@@ -203,20 +23,10 @@ fn log_startup_info(
 #[clap(version = env!("CARGO_PKG_VERSION"))]
 #[clap(about = "Network traffic monitoring based on eBPF for OpenWrt")]
 pub struct Opt {
-    #[clap(
-        short,
-        long,
-        default_value = "br-lan",
-        help = "Network interface to monitor"
-    )]
+    #[clap(long, help = "Network interface to monitor (required)")]
     pub iface: String,
 
-    #[clap(
-        short,
-        long,
-        default_value = "8686",
-        help = "Web server listening port"
-    )]
+    #[clap(long, default_value = "8686", help = "Web server listening port")]
     pub port: u16,
 
     #[clap(
@@ -231,13 +41,28 @@ pub struct Opt {
         default_value = "600",
         help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
     )]
-    pub retention_seconds: u32,
+    pub traffic_retention_seconds: u32,
 
     #[clap(
         long,
+        default_value = "false",
         help = "Enable web request logging (per-HTTP-request line)"
     )]
     pub web_log: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable traffic monitoring module"
+    )]
+    pub enable_traffic: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable DNS monitoring module (not yet implemented)"
+    )]
+    pub enable_dns: bool,
 }
 
 // Initialize eBPF programs and maps
@@ -254,7 +79,7 @@ async fn init_subnet_info(
     ingress_ebpf: &mut aya::Ebpf,
     iface: String,
 ) -> Result<(), anyhow::Error> {
-    // Subnet configuration
+    // Configure subnet information for eBPF maps
     let interface_info = get_interface_info(&iface);
     let (interface_ip, subnet_mask) = interface_info.unwrap_or(([0, 0, 0, 0], [0, 0, 0, 0]));
 
@@ -277,11 +102,11 @@ async fn run_service(
     _iface: String,
     port: u16,
     data_dir: String,
-    retention_seconds: u32,
+    traffic_retention_seconds: u32,
     web_log: bool,
+    monitor_config: MonitorConfig,
     preloaded_baselines: Vec<([u8; 6], BaselineTotals)>,
-    mut ingress_ebpf: aya::Ebpf,
-    mut egress_ebpf: aya::Ebpf,
+    ebpf_programs: Option<(aya::Ebpf, aya::Ebpf)>,
 ) -> Result<(), anyhow::Error> {
     let mac_stats = Arc::new(Mutex::new(StdHashMap::<[u8; 6], MacTrafficStats>::new()));
     let baseline_totals = Arc::new(Mutex::new(StdHashMap::<[u8; 6], BaselineTotals>::new()));
@@ -322,7 +147,10 @@ async fn run_service(
 
     // Provide data directory and retention for the web interface (via environment variables to avoid passing through everywhere)
     std::env::set_var("BANDIX_DATA_DIR", &data_dir);
-    std::env::set_var("BANDIX_RETENTION_SECONDS", retention_seconds.to_string());
+    std::env::set_var(
+        "BANDIX_TRAFFIC_RETENTION_SECONDS",
+        traffic_retention_seconds.to_string(),
+    );
 
     let mac_stats_clone = Arc::clone(&mac_stats);
     let rate_limits_clone = Arc::clone(&rate_limits);
@@ -336,7 +164,7 @@ async fn run_service(
     {
         let mac_stats_for_metrics = Arc::clone(&mac_stats);
         let data_dir_for_metrics = data_dir.clone();
-        let retention_seconds_for_metrics = retention_seconds;
+        let traffic_retention_seconds_for_metrics = traffic_retention_seconds;
         tokio::spawn(async move {
             let mut metrics_interval = interval(Duration::from_secs(1));
             loop {
@@ -354,7 +182,7 @@ async fn run_service(
                     &data_dir_for_metrics,
                     ts_ms,
                     &snapshot,
-                    retention_seconds_for_metrics,
+                    traffic_retention_seconds_for_metrics,
                 ) {
                     log::error!("metrics persist error: {}", e);
                 }
@@ -362,17 +190,34 @@ async fn run_service(
         });
     }
 
-    let mut interval = interval(Duration::from_millis(1000));
-    while *running.lock().unwrap() {
-        interval.tick().await;
-        update(
-            &mac_stats,
-            &mut ingress_ebpf,
-            &mut egress_ebpf,
-            &baseline_totals,
-            &rate_limits,
-        )
-        .await?;
+    // At least one monitoring module is guaranteed to be enabled (checked in run function)
+
+    // If eBPF programs are available, start monitoring loop
+    if let Some((mut ingress_ebpf, mut egress_ebpf)) = ebpf_programs {
+        // Create monitor manager
+        let monitor_manager = MonitorManager::new(monitor_config.clone());
+
+        let mut interval = interval(Duration::from_millis(1000));
+        while *running.lock().unwrap() {
+            interval.tick().await;
+
+            // Start monitors (at least one monitoring module is guaranteed to be enabled)
+            monitor_manager
+                .start_monitors(
+                    &mac_stats,
+                    &mut ingress_ebpf,
+                    &mut egress_ebpf,
+                    &baseline_totals,
+                    &rate_limits,
+                )
+                .await?;
+        }
+    } else {
+        // No eBPF programs needed but monitoring modules are enabled (e.g., DNS-only monitoring)
+        log::info!("Current monitoring modules don't require eBPF programs, running with web service only");
+        while *running.lock().unwrap() {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
     }
 
     Ok(())
@@ -389,35 +234,71 @@ pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
         iface,
         port,
         data_dir,
-        retention_seconds,
+        traffic_retention_seconds,
         web_log,
+        enable_traffic,
+        enable_dns,
     } = opt;
 
+    // Create monitoring configuration
+    let mut monitor_config = MonitorConfig::new();
+    if enable_traffic {
+        monitor_config = monitor_config.enable_traffic();
+    }
+    if enable_dns {
+        monitor_config = monitor_config.enable_dns();
+    }
+
+    // Exit if no monitoring modules are enabled
+    if !monitor_config.is_any_enabled() {
+        return Err(anyhow::anyhow!(
+            "No monitoring modules enabled. Use --enable-traffic to enable traffic monitoring, or --enable-dns to enable DNS monitoring"
+        ));
+    }
+
     // Startup diagnostics
-    log_startup_info(&iface, port, &data_dir, retention_seconds, web_log);
+    log_startup_info(
+        &iface,
+        port,
+        &data_dir,
+        traffic_retention_seconds,
+        web_log,
+        &monitor_config,
+    );
 
     // Ensure data schema, and rebuild ring files if retention mismatch before eBPF init
     storage::ensure_schema(&data_dir)?;
-    let rebuilt = storage::rebuild_all_ring_files_if_mismatch(&data_dir, retention_seconds)?;
+    let rebuilt =
+        storage::rebuild_all_ring_files_if_mismatch(&data_dir, traffic_retention_seconds)?;
     // Decide baseline: if rebuilt, start from zero; otherwise load latest totals
-    let preloaded_baselines = if rebuilt { Vec::new() } else { storage::load_latest_totals(&data_dir)? };
+    let preloaded_baselines = if rebuilt {
+        Vec::new()
+    } else {
+        storage::load_latest_totals(&data_dir)?
+    };
 
-    // Initialize eBPF programs
-    let (mut ingress_ebpf, mut egress_ebpf) = init_ebpf_programs(iface.clone()).await?;
-
-    // Initialize subnet configuration
-    init_subnet_info(&mut ingress_ebpf, &mut egress_ebpf, iface.clone()).await?;
+    // Initialize eBPF programs only if traffic monitoring is enabled
+    let ebpf_programs = if monitor_config.enable_traffic {
+        log::info!("Traffic monitoring enabled, initializing eBPF programs...");
+        let (mut ingress, mut egress) = init_ebpf_programs(iface.clone()).await?;
+        // Initialize subnet configuration
+        init_subnet_info(&mut ingress, &mut egress, iface.clone()).await?;
+        Some((ingress, egress))
+    } else {
+        log::info!("No eBPF-required monitoring modules enabled, skipping eBPF initialization");
+        None
+    };
 
     // Run service (start web and TUI)
     run_service(
         iface,
         port,
         data_dir,
-        retention_seconds,
+        traffic_retention_seconds,
         web_log,
+        monitor_config,
         preloaded_baselines,
-        ingress_ebpf,
-        egress_ebpf,
+        ebpf_programs,
     )
     .await?;
 

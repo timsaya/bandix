@@ -112,7 +112,7 @@ async fn handle_connection(
 
         let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
 
-        let retention_seconds: u32 = std::env::var("BANDIX_RETENTION_SECONDS")
+        let traffic_retention_seconds: u32 = std::env::var("BANDIX_TRAFFIC_RETENTION_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(3600);
@@ -121,7 +121,7 @@ async fn handle_connection(
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
-        let start_ms = now_ms.saturating_sub(retention_seconds as u64 * 1000);
+        let start_ms = now_ms.saturating_sub(traffic_retention_seconds as u64 * 1000);
         let end_ms = now_ms;
 
         let mac_opt = params.get("mac").cloned();
@@ -168,7 +168,7 @@ async fn handle_connection(
                 // rows 已在存储层按窗口裁剪
                 let mut json = format!(
                     "{{\n  \"retention_seconds\": {},\n  \"mac\": \"{}\",\n  \"metrics\": [\n",
-                    retention_seconds,
+                    traffic_retention_seconds,
                     mac_label
                 );
                 for (i, r) in rows.iter().enumerate() {
