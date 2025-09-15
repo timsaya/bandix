@@ -154,16 +154,16 @@ async fn run_service(
     }
 
     // Create monitor manager
-    let monitor_manager = MonitorManager::new(monitor_config);
+    let mut monitor_manager = MonitorManager::new(monitor_config);
 
     // Initialize all enabled modules
     monitor_manager.init_modules(&module_contexts).await?;
 
-    // Start web server with all module contexts
-    let module_contexts_for_web = module_contexts.clone();
+    // Start web server with API router
+    let api_router = monitor_manager.get_api_router().clone();
     let options_for_web = options.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::start_server(options_for_web, module_contexts_for_web).await {
+        if let Err(e) = web::start_server(options_for_web, api_router).await {
             log::error!("Web server error: {}", e);
         }
     });

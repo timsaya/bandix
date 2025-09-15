@@ -1,6 +1,7 @@
 pub mod dns;
 pub mod traffic;
 
+use crate::api::ApiRouter;
 use crate::command::Options;
 use crate::storage::traffic::BaselineTotals;
 use bandix_common::MacTrafficStats;
@@ -97,7 +98,7 @@ pub trait TrafficModule: Send + Sync {
     async fn init_data(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error>;
 
     /// Mount API interfaces
-    async fn mount_apis(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error>;
+    async fn mount_apis(&self, ctx: &TrafficModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error>;
 
     /// Start monitoring task
     async fn start_monitoring(&self, ctx: &mut TrafficModuleContext) -> Result<(), anyhow::Error>;
@@ -112,7 +113,7 @@ pub trait DnsModule: Send + Sync {
     async fn init_data(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error>;
 
     /// Mount API interfaces
-    async fn mount_apis(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error>;
+    async fn mount_apis(&self, ctx: &DnsModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error>;
 
     /// Start monitoring task
     async fn start_monitoring(&self, ctx: &mut DnsModuleContext) -> Result<(), anyhow::Error>;
@@ -164,8 +165,19 @@ impl TrafficModule for TrafficModuleImpl {
         Ok(())
     }
 
-    async fn mount_apis(&self, _ctx: &TrafficModuleContext) -> Result<(), anyhow::Error> {
-        // Traffic module APIs are already implemented in web.rs
+    async fn mount_apis(&self, ctx: &TrafficModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
+        use crate::api::{ApiHandler, traffic::TrafficApiHandler};
+        
+        // Create traffic API handler
+        let handler = ApiHandler::Traffic(TrafficApiHandler::new(
+            Arc::clone(&ctx.mac_stats),
+            Arc::clone(&ctx.rate_limits),
+            ctx.options.clone(),
+        ));
+        
+        // Register with API router
+        api_router.register_handler(handler);
+        
         Ok(())
     }
 
@@ -195,10 +207,15 @@ impl DnsModule for DnsModuleImpl {
         Ok(())
     }
 
-    async fn mount_apis(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error> {
-        // DNS module API mounting logic
-        let dns_monitor = dns::DnsMonitor::new();
-        dns_monitor.mount_dns_apis(ctx).await?;
+    async fn mount_apis(&self, ctx: &DnsModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
+        use crate::api::{ApiHandler, dns::DnsApiHandler};
+        
+        // Create DNS API handler
+        let handler = ApiHandler::Dns(DnsApiHandler::new(ctx.options.clone()));
+        
+        // Register with API router
+        api_router.register_handler(handler);
+        
         Ok(())
     }
 
@@ -235,13 +252,13 @@ impl ModuleType {
         }
     }
 
-    async fn mount_apis(&self, ctx: &ModuleContext) -> Result<(), anyhow::Error> {
+    async fn mount_apis(&self, ctx: &ModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
         match (self, ctx) {
             (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
-                module.mount_apis(traffic_ctx).await
+                module.mount_apis(traffic_ctx, api_router).await
             }
             (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
-                module.mount_apis(dns_ctx).await
+                module.mount_apis(dns_ctx, api_router).await
             }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
@@ -264,6 +281,7 @@ impl ModuleType {
 pub struct MonitorManager {
     config: MonitorConfig,
     modules: Vec<ModuleType>,
+    api_router: ApiRouter,
 }
 
 impl MonitorManager {
@@ -278,14 +296,18 @@ impl MonitorManager {
             modules.push(ModuleType::Dns(DnsModuleImpl));
         }
 
-        MonitorManager { config, modules }
+        MonitorManager { 
+            config, 
+            modules,
+            api_router: ApiRouter::new(),
+        }
     }
 
     /// Initialize all enabled modules
-    pub async fn init_modules(&self, contexts: &[ModuleContext]) -> Result<(), anyhow::Error> {
+    pub async fn init_modules(&mut self, contexts: &[ModuleContext]) -> Result<(), anyhow::Error> {
         for (module, ctx) in self.modules.iter().zip(contexts.iter()) {
             module.init_data(ctx).await?;
-            module.mount_apis(ctx).await?;
+            module.mount_apis(ctx, &mut self.api_router).await?;
         }
         Ok(())
     }
@@ -304,5 +326,10 @@ impl MonitorManager {
     /// Get count of enabled modules
     pub fn enabled_modules_count(&self) -> usize {
         self.modules.len()
+    }
+
+    /// Get the API router
+    pub fn get_api_router(&self) -> &ApiRouter {
+        &self.api_router
     }
 }
