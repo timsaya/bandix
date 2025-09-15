@@ -1,28 +1,25 @@
 use crate::ebpf::egress::load_egress;
 use crate::ebpf::ingress::load_ingress;
-use crate::monitor::{MonitorConfig, MonitorManager};
-use crate::storage;
-use crate::storage::BaselineTotals;
+use crate::monitor::{
+    dns, traffic, DnsModuleContext, ModuleContext, MonitorConfig, MonitorManager,
+    TrafficModuleContext,
+};
 use crate::system::log_startup_info;
 use crate::utils::network_utils::get_interface_info;
 use crate::web;
 use aya::maps::Array;
-use bandix_common::MacTrafficStats;
 use clap::Parser;
 use log::info;
 use log::LevelFilter;
-use std::collections::HashMap as StdHashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 use tokio::signal;
-use tokio::time::interval;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Clone)]
 #[clap(name = "bandix")]
 #[clap(author = "github.com/timsaya")]
 #[clap(version = env!("CARGO_PKG_VERSION"))]
 #[clap(about = "Network traffic monitoring based on eBPF for OpenWrt")]
-pub struct Opt {
+pub struct Options {
     #[clap(long, help = "Network interface to monitor (required)")]
     pub iface: String,
 
@@ -35,13 +32,6 @@ pub struct Opt {
         help = "Data directory (ring files and rate limit configurations will be stored here)"
     )]
     pub data_dir: String,
-
-    #[clap(
-        long,
-        default_value = "600",
-        help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
-    )]
-    pub traffic_retention_seconds: u32,
 
     #[clap(
         long,
@@ -59,16 +49,47 @@ pub struct Opt {
 
     #[clap(
         long,
+        default_value = "600",
+        help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
+    )]
+    pub traffic_retention_seconds: u32,
+
+    #[clap(
+        long,
         default_value = "false",
         help = "Enable DNS monitoring module (not yet implemented)"
     )]
     pub enable_dns: bool,
 }
 
+// Validate arguments
+fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
+    // Check if network interface exists
+    if get_interface_info(&opt.iface).is_none() {
+        return Err(anyhow::anyhow!(
+            "Network interface '{}' does not exist",
+            opt.iface
+        ));
+    }
+
+    // Check if port is valid (0-65535)
+    if opt.port == 0 {
+        return Err(anyhow::anyhow!("Port number cannot be 0"));
+    }
+
+    if opt.traffic_retention_seconds == 0 {
+        return Err(anyhow::anyhow!(
+            "traffic_retention_seconds must be greater than 0"
+        ));
+    }
+
+    Ok(())
+}
+
 // Initialize eBPF programs and maps
-async fn init_ebpf_programs(iface: String) -> Result<(aya::Ebpf, aya::Ebpf), anyhow::Error> {
-    let egress_ebpf = load_egress(iface.clone()).await?;
-    let ingress_ebpf = load_ingress(iface.clone()).await?;
+async fn init_ebpf_programs(options: &Options) -> Result<(aya::Ebpf, aya::Ebpf), anyhow::Error> {
+    let egress_ebpf = load_egress(options.iface.clone()).await?;
+    let ingress_ebpf = load_ingress(options.iface.clone()).await?;
 
     Ok((ingress_ebpf, egress_ebpf))
 }
@@ -99,208 +120,118 @@ async fn init_subnet_info(
 
 // Run service, start web server and provide TUI output
 async fn run_service(
-    _iface: String,
-    port: u16,
-    data_dir: String,
-    traffic_retention_seconds: u32,
-    web_log: bool,
-    monitor_config: MonitorConfig,
-    preloaded_baselines: Vec<([u8; 6], BaselineTotals)>,
-    ebpf_programs: Option<(aya::Ebpf, aya::Ebpf)>,
+    options: &Options,
+    ingress_ebpf: aya::Ebpf,
+    egress_ebpf: aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
-    let mac_stats = Arc::new(Mutex::new(StdHashMap::<[u8; 6], MacTrafficStats>::new()));
-    let baseline_totals = Arc::new(Mutex::new(StdHashMap::<[u8; 6], BaselineTotals>::new()));
-    let rate_limits = Arc::new(Mutex::new(StdHashMap::<[u8; 6], [u64; 2]>::new()));
+    // Create monitoring configuration
+    let monitor_config = MonitorConfig::from_options(&options);
 
-    let running = Arc::new(Mutex::new(true));
-    let r: Arc<Mutex<bool>> = running.clone();
+    // Use Notify for graceful shutdown
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let shutdown_notify_clone = shutdown_notify.clone();
 
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {
-            info!("Exiting...");
-            let mut r = r.lock().unwrap();
-            *r = false;
+            info!("Received shutdown signal, gracefully shutting down...");
+            shutdown_notify_clone.notify_waiters();
         }
     });
 
-    // Initialize data directory and load rate limits, apply preloaded baselines
-    {
-        storage::ensure_schema(&data_dir)?;
-        let limits = storage::load_all_limits(&data_dir)?;
+    // Create module contexts based on enabled modules
+    let mut module_contexts = Vec::new();
 
-        // Load rate limits into dedicated map; do NOT write mac_stats
-        {
-            let mut rl = rate_limits.lock().unwrap();
-            for (mac, rx, tx) in limits {
-                rl.insert(mac, [rx, tx]);
-            }
-        }
-
-        // Baseline totals (use preloaded values from before potential rebuild)
-        {
-            let mut b = baseline_totals.lock().unwrap();
-            for (mac, base) in preloaded_baselines {
-                b.insert(mac, base);
-            }
-        }
+    if monitor_config.enable_traffic {
+        module_contexts.push(ModuleContext::Traffic(TrafficModuleContext::new(
+            options.clone(),
+            ingress_ebpf,
+            egress_ebpf,
+        )));
     }
 
-    // Provide data directory and retention for the web interface (via environment variables to avoid passing through everywhere)
-    std::env::set_var("BANDIX_DATA_DIR", &data_dir);
-    std::env::set_var(
-        "BANDIX_TRAFFIC_RETENTION_SECONDS",
-        traffic_retention_seconds.to_string(),
-    );
+    if monitor_config.enable_dns {
+        module_contexts.push(ModuleContext::Dns(DnsModuleContext::new(options.clone())));
+    }
 
-    let mac_stats_clone = Arc::clone(&mac_stats);
-    let rate_limits_clone = Arc::clone(&rate_limits);
+    // Create monitor manager
+    let monitor_manager = MonitorManager::new(monitor_config);
+
+    // Initialize all enabled modules
+    monitor_manager.init_modules(&module_contexts).await?;
+
+    // Start web server with all module contexts
+    let module_contexts_for_web = module_contexts.clone();
+    let options_for_web = options.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::start_server(port, mac_stats_clone, rate_limits_clone, web_log).await {
+        if let Err(e) = web::start_server(options_for_web, module_contexts_for_web).await {
             log::error!("Web server error: {}", e);
         }
     });
 
-    // Metrics persistence task
-    {
-        let mac_stats_for_metrics = Arc::clone(&mac_stats);
-        let data_dir_for_metrics = data_dir.clone();
-        let traffic_retention_seconds_for_metrics = traffic_retention_seconds;
-        tokio::spawn(async move {
-            let mut metrics_interval = interval(Duration::from_secs(1));
-            loop {
-                metrics_interval.tick().await;
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let ts_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_millis() as u64;
-                let snapshot: Vec<([u8; 6], MacTrafficStats)> = {
-                    let stats = mac_stats_for_metrics.lock().unwrap();
-                    stats.iter().map(|(k, v)| (*k, *v)).collect()
-                };
-                if let Err(e) = storage::insert_metrics_batch(
-                    &data_dir_for_metrics,
-                    ts_ms,
-                    &snapshot,
-                    traffic_retention_seconds_for_metrics,
-                ) {
-                    log::error!("metrics persist error: {}", e);
+    // Start internal loops for all modules
+    let mut tasks = Vec::new();
+    for ctx in module_contexts {
+        let shutdown_notify = shutdown_notify.clone();
+        let task = tokio::spawn(async move {
+            match ctx {
+                ModuleContext::Traffic(mut traffic_ctx) => {
+                    if let Err(e) = traffic::start(&mut traffic_ctx, shutdown_notify).await {
+                        log::error!("Traffic monitoring module error: {}", e);
+                    }
+                }
+                ModuleContext::Dns(mut dns_ctx) => {
+                    let dns_monitor = dns::DnsMonitor::new();
+                    if let Err(e) = dns_monitor.start(&mut dns_ctx, shutdown_notify).await {
+                        log::error!("DNS monitoring module error: {}", e);
+                    }
                 }
             }
         });
+        tasks.push(task);
     }
 
-    // At least one monitoring module is guaranteed to be enabled (checked in run function)
+    // Wait for shutdown signal
+    shutdown_notify.notified().await;
+    info!("Stopping all modules...");
 
-    // If eBPF programs are available, start monitoring loop
-    if let Some((mut ingress_ebpf, mut egress_ebpf)) = ebpf_programs {
-        // Create monitor manager
-        let monitor_manager = MonitorManager::new(monitor_config.clone());
-
-        let mut interval = interval(Duration::from_millis(1000));
-        while *running.lock().unwrap() {
-            interval.tick().await;
-
-            // Start monitors (at least one monitoring module is guaranteed to be enabled)
-            monitor_manager
-                .start_monitors(
-                    &mac_stats,
-                    &mut ingress_ebpf,
-                    &mut egress_ebpf,
-                    &baseline_totals,
-                    &rate_limits,
-                )
-                .await?;
-        }
-    } else {
-        // No eBPF programs needed but monitoring modules are enabled (e.g., DNS-only monitoring)
-        log::info!("Current monitoring modules don't require eBPF programs, running with web service only");
-        while *running.lock().unwrap() {
-            tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Wait for all tasks to complete
+    for task in tasks {
+        if let Err(e) = task.await {
+            log::error!("Module task error: {}", e);
         }
     }
+
+    info!("All modules stopped, program exiting");
 
     Ok(())
 }
 
-pub async fn run(opt: Opt) -> Result<(), anyhow::Error> {
+pub async fn run(options: Options) -> Result<(), anyhow::Error> {
+    // Validate arguments
+    validate_arguments(&options)?;
+
     // Set up logging
     env_logger::Builder::new()
         .filter(None, LevelFilter::Info)
         .target(env_logger::Target::Stdout)
         .init();
 
-    let Opt {
-        iface,
-        port,
-        data_dir,
-        traffic_retention_seconds,
-        web_log,
-        enable_traffic,
-        enable_dns,
-    } = opt;
-
-    // Create monitoring configuration
-    let mut monitor_config = MonitorConfig::new();
-    if enable_traffic {
-        monitor_config = monitor_config.enable_traffic();
-    }
-    if enable_dns {
-        monitor_config = monitor_config.enable_dns();
-    }
-
-    // Exit if no monitoring modules are enabled
-    if !monitor_config.is_any_enabled() {
+    if !(options.enable_dns || options.enable_traffic) {
         return Err(anyhow::anyhow!(
             "No monitoring modules enabled. Use --enable-traffic to enable traffic monitoring, or --enable-dns to enable DNS monitoring"
         ));
     }
 
     // Startup diagnostics
-    log_startup_info(
-        &iface,
-        port,
-        &data_dir,
-        traffic_retention_seconds,
-        web_log,
-        &monitor_config,
-    );
+    log_startup_info(&options);
 
-    // Ensure data schema, and rebuild ring files if retention mismatch before eBPF init
-    storage::ensure_schema(&data_dir)?;
-    let rebuilt =
-        storage::rebuild_all_ring_files_if_mismatch(&data_dir, traffic_retention_seconds)?;
-    // Decide baseline: if rebuilt, start from zero; otherwise load latest totals
-    let preloaded_baselines = if rebuilt {
-        Vec::new()
-    } else {
-        storage::load_latest_totals(&data_dir)?
-    };
+    let (mut ingress, mut egress) = init_ebpf_programs(&options).await?;
 
-    // Initialize eBPF programs only if traffic monitoring is enabled
-    let ebpf_programs = if monitor_config.enable_traffic {
-        log::info!("Traffic monitoring enabled, initializing eBPF programs...");
-        let (mut ingress, mut egress) = init_ebpf_programs(iface.clone()).await?;
-        // Initialize subnet configuration
-        init_subnet_info(&mut ingress, &mut egress, iface.clone()).await?;
-        Some((ingress, egress))
-    } else {
-        log::info!("No eBPF-required monitoring modules enabled, skipping eBPF initialization");
-        None
-    };
+    // Initialize subnet configuration
+    init_subnet_info(&mut ingress, &mut egress, options.iface.clone()).await?;
 
     // Run service (start web and TUI)
-    run_service(
-        iface,
-        port,
-        data_dir,
-        traffic_retention_seconds,
-        web_log,
-        monitor_config,
-        preloaded_baselines,
-        ebpf_programs,
-    )
-    .await?;
+    run_service(&options, ingress, egress).await?;
 
     Ok(())
 }

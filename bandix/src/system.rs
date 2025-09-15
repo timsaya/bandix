@@ -1,6 +1,6 @@
-use crate::monitor::MonitorConfig;
-use crate::utils::network_utils::get_interface_info;
+use crate::command::Options;
 use crate::utils::format_utils::format_ip;
+use crate::utils::network_utils::get_interface_info;
 use log::{info, warn};
 use std::env;
 use std::fs;
@@ -117,14 +117,7 @@ fn parse_openwrt_from_os_release() -> Option<Vec<(String, String)>> {
     }
 }
 
-pub fn log_startup_info(
-    iface: &str,
-    port: u16,
-    data_dir: &str,
-    traffic_retention_seconds: u32,
-    web_log: bool,
-    monitor_config: &MonitorConfig,
-) {
+pub fn log_startup_info(options: &Options) {
     let app_version = env!("CARGO_PKG_VERSION");
     let (uid, gid) = current_user_ids();
     let cwd = env::current_dir()
@@ -135,7 +128,7 @@ pub fn log_startup_info(
     let arch = std::env::consts::ARCH;
 
     // Network info
-    let iface_info = get_interface_info(iface);
+    let iface_info = get_interface_info(options.iface.as_str());
     let (ip_str, mask_str) = if let Some((ip, mask)) = iface_info {
         (format_ip(&ip), format_ip(&mask))
     } else {
@@ -161,49 +154,59 @@ pub fn log_startup_info(
     if uid != 0 {
         warn!("It is recommended to run as root to enable eBPF capabilities");
     }
-    info!("Listening port: {}", port);
-    info!("Data directory: {}", data_dir);
-    info!("Retention seconds: {}", traffic_retention_seconds);
+    info!("Listening port: {}", options.port);
+    info!("Data directory: {}", options.data_dir);
+    info!("Retention seconds: {}", options.traffic_retention_seconds);
     info!(
         "Web request logging: {}",
-        if web_log { "enabled" } else { "disabled" }
+        if options.web_log {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
-    info!("Interface: {} (IP: {}, Mask: {})", iface, ip_str, mask_str);
-    
+    info!(
+        "Interface: {} (IP: {}, Mask: {})",
+        options.iface, ip_str, mask_str
+    );
+
     // Display enabled monitoring modules with their configurations
     let mut enabled_count = 0;
-    
-    if monitor_config.enable_traffic {
+
+    if options.enable_traffic {
         enabled_count += 1;
     }
-    if monitor_config.enable_dns {
+    if options.enable_dns {
         enabled_count += 1;
     }
-    
+
     if enabled_count == 0 {
         info!("Enabled monitoring modules: None");
     } else {
         info!("Enabled monitoring modules ({}):", enabled_count);
-        
-        if monitor_config.enable_traffic {
-            info!("  • Traffic monitoring (retention: {}s)", traffic_retention_seconds);
+
+        if options.enable_traffic {
+            info!(
+                "  • Traffic monitoring (retention: {}s)",
+                options.traffic_retention_seconds
+            );
         }
-        
-        if monitor_config.enable_dns {
+
+        if options.enable_dns {
             info!("  • DNS monitoring");
         }
     }
-    
+
     if let Some(kvs) = parse_openwrt_from_os_release() {
         info!("OpenWrt identifiers (/etc/os-release):");
         for (k, v) in kvs {
             info!("{}=\"{}\"", k, v);
         }
     }
-    if !Path::new(data_dir).exists() {
+    if !Path::new(&options.data_dir).exists() {
         warn!(
             "Data directory does not exist and will be created during runtime: {}",
-            data_dir
+            options.data_dir
         );
     }
 }

@@ -1,11 +1,13 @@
+pub mod dns;
 pub mod traffic;
 
+use crate::command::Options;
+use crate::storage::traffic::BaselineTotals;
+use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
-use bandix_common::MacTrafficStats;
-use crate::storage::BaselineTotals;
 
-/// 监控模块配置
+/// Monitor module configuration
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
     pub enable_traffic: bool,
@@ -13,21 +15,11 @@ pub struct MonitorConfig {
 }
 
 impl MonitorConfig {
-    pub fn new() -> Self {
+    pub fn from_options(options: &Options) -> Self {
         MonitorConfig {
-            enable_traffic: false,
-            enable_dns: false,
+            enable_traffic: options.enable_traffic,
+            enable_dns: options.enable_dns,
         }
-    }
-
-    pub fn enable_traffic(mut self) -> Self {
-        self.enable_traffic = true;
-        self
-    }
-
-    pub fn enable_dns(mut self) -> Self {
-        self.enable_dns = true;
-        self
     }
 
     pub fn is_any_enabled(&self) -> bool {
@@ -35,50 +27,282 @@ impl MonitorConfig {
     }
 }
 
-/// 监控管理器
+/// Traffic module context
+pub struct TrafficModuleContext {
+    pub options: Options,
+    pub mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
+    pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
+    pub rate_limits: Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+    pub ingress_ebpf: Option<aya::Ebpf>,
+    pub egress_ebpf: Option<aya::Ebpf>,
+}
+
+impl TrafficModuleContext {
+    /// Create traffic module context
+    pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
+        Self {
+            options,
+            mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
+            baselines: Arc::new(Mutex::new(StdHashMap::new())),
+            rate_limits: Arc::new(Mutex::new(StdHashMap::new())),
+            ingress_ebpf: Some(ingress_ebpf),
+            egress_ebpf: Some(egress_ebpf),
+        }
+    }
+}
+
+/// DNS module context
+#[derive(Clone)]
+pub struct DnsModuleContext {
+    pub options: Options,
+    // DNS module specific context fields
+    // e.g.: DNS query logs, DNS statistics, etc.
+}
+
+impl DnsModuleContext {
+    /// Create DNS module context
+    pub fn new(options: Options) -> Self {
+        Self { options }
+    }
+}
+
+/// Generic module context (for module manager)
+pub enum ModuleContext {
+    Traffic(TrafficModuleContext),
+    Dns(DnsModuleContext),
+}
+
+impl Clone for ModuleContext {
+    fn clone(&self) -> Self {
+        match self {
+            ModuleContext::Traffic(ctx) => ModuleContext::Traffic(TrafficModuleContext {
+                options: ctx.options.clone(),
+                mac_stats: Arc::clone(&ctx.mac_stats),
+                baselines: Arc::clone(&ctx.baselines),
+                rate_limits: Arc::clone(&ctx.rate_limits),
+                ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
+                egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
+            }),
+            ModuleContext::Dns(ctx) => ModuleContext::Dns(ctx.clone()),
+        }
+    }
+}
+
+/// Traffic module interface
+pub trait TrafficModule: Send + Sync {
+    /// Module name
+    fn name(&self) -> &'static str;
+
+    /// Initialize module data
+    async fn init_data(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error>;
+
+    /// Mount API interfaces
+    async fn mount_apis(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error>;
+
+    /// Start monitoring task
+    async fn start_monitoring(&self, ctx: &mut TrafficModuleContext) -> Result<(), anyhow::Error>;
+}
+
+/// DNS module interface
+pub trait DnsModule: Send + Sync {
+    /// Module name
+    fn name(&self) -> &'static str;
+
+    /// Initialize module data
+    async fn init_data(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error>;
+
+    /// Mount API interfaces
+    async fn mount_apis(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error>;
+
+    /// Start monitoring task
+    async fn start_monitoring(&self, ctx: &mut DnsModuleContext) -> Result<(), anyhow::Error>;
+}
+
+/// Traffic monitoring module
+pub struct TrafficModuleImpl;
+
+impl TrafficModule for TrafficModuleImpl {
+    fn name(&self) -> &'static str {
+        "traffic"
+    }
+
+    async fn init_data(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error> {
+        // Traffic module data initialization logic
+
+        // Ensure data directory and schema
+        crate::storage::traffic::ensure_schema(&ctx.options.data_dir)?;
+
+        // Load rate limits
+        let limits = crate::storage::traffic::load_all_limits(&ctx.options.data_dir)?;
+        {
+            let mut rl = ctx.rate_limits.lock().unwrap();
+            for (mac, rx, tx) in limits {
+                rl.insert(mac, [rx, tx]);
+            }
+        }
+
+        // Rebuild ring files (if needed)
+        let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
+            &ctx.options.data_dir,
+            ctx.options.traffic_retention_seconds,
+        )?;
+
+        // Load baseline data
+        let preloaded_baselines = if rebuilt {
+            Vec::new()
+        } else {
+            crate::storage::traffic::load_latest_totals(&ctx.options.data_dir)?
+        };
+
+        // Apply preloaded baseline data
+        {
+            let mut b = ctx.baselines.lock().unwrap();
+            for (mac, base) in preloaded_baselines {
+                b.insert(mac, base);
+            }
+        }
+        Ok(())
+    }
+
+    async fn mount_apis(&self, _ctx: &TrafficModuleContext) -> Result<(), anyhow::Error> {
+        // Traffic module APIs are already implemented in web.rs
+        Ok(())
+    }
+
+    async fn start_monitoring(&self, _ctx: &mut TrafficModuleContext) -> Result<(), anyhow::Error> {
+        // This method is no longer used as we directly call traffic::start in command.rs
+        log::info!("Traffic monitoring module enabled (started via direct call)");
+        Ok(())
+    }
+}
+
+/// DNS monitoring module
+pub struct DnsModuleImpl;
+
+impl DnsModule for DnsModuleImpl {
+    fn name(&self) -> &'static str {
+        "dns"
+    }
+
+    async fn init_data(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error> {
+        // DNS module data initialization logic
+
+        // TODO: Implement DNS data storage initialization
+        // e.g.: Create DNS query log tables, configure DNS monitoring parameters, etc.
+        let dns_monitor = dns::DnsMonitor::new();
+        dns_monitor.init_data_storage(ctx).await?;
+
+        Ok(())
+    }
+
+    async fn mount_apis(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error> {
+        // DNS module API mounting logic
+        let dns_monitor = dns::DnsMonitor::new();
+        dns_monitor.mount_dns_apis(ctx).await?;
+        Ok(())
+    }
+
+    async fn start_monitoring(&self, _ctx: &mut DnsModuleContext) -> Result<(), anyhow::Error> {
+        // This method is no longer used as we directly call dns::DnsMonitor::start in command.rs
+        log::info!("DNS monitoring module enabled (started via direct call)");
+        Ok(())
+    }
+}
+
+/// Module type enumeration
+pub enum ModuleType {
+    Traffic(TrafficModuleImpl),
+    Dns(DnsModuleImpl),
+}
+
+impl ModuleType {
+    fn name(&self) -> &'static str {
+        match self {
+            ModuleType::Traffic(module) => module.name(),
+            ModuleType::Dns(module) => module.name(),
+        }
+    }
+
+    async fn init_data(&self, ctx: &ModuleContext) -> Result<(), anyhow::Error> {
+        match (self, ctx) {
+            (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
+                module.init_data(traffic_ctx).await
+            }
+            (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
+                module.init_data(dns_ctx).await
+            }
+            _ => Err(anyhow::anyhow!("Module context type mismatch")),
+        }
+    }
+
+    async fn mount_apis(&self, ctx: &ModuleContext) -> Result<(), anyhow::Error> {
+        match (self, ctx) {
+            (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
+                module.mount_apis(traffic_ctx).await
+            }
+            (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
+                module.mount_apis(dns_ctx).await
+            }
+            _ => Err(anyhow::anyhow!("Module context type mismatch")),
+        }
+    }
+
+    async fn start_monitoring(&self, ctx: &mut ModuleContext) -> Result<(), anyhow::Error> {
+        match (self, ctx) {
+            (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
+                module.start_monitoring(traffic_ctx).await
+            }
+            (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
+                module.start_monitoring(dns_ctx).await
+            }
+            _ => Err(anyhow::anyhow!("Module context type mismatch")),
+        }
+    }
+}
+
+/// Monitor manager
 pub struct MonitorManager {
     config: MonitorConfig,
+    modules: Vec<ModuleType>,
 }
 
 impl MonitorManager {
     pub fn new(config: MonitorConfig) -> Self {
-        MonitorManager { config }
+        let mut modules: Vec<ModuleType> = Vec::new();
+
+        if config.enable_traffic {
+            modules.push(ModuleType::Traffic(TrafficModuleImpl));
+        }
+
+        if config.enable_dns {
+            modules.push(ModuleType::Dns(DnsModuleImpl));
+        }
+
+        MonitorManager { config, modules }
     }
 
-    /// 启动所有已启用的监控模块
-    pub async fn start_monitors(
-        &self,
-        mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-        ingress_ebpf: &mut aya::Ebpf,
-        egress_ebpf: &mut aya::Ebpf,
-        baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
-        rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
-    ) -> Result<(), anyhow::Error> {
-        if self.config.enable_traffic {
-            self.start_traffic_monitor(mac_stats, ingress_ebpf, egress_ebpf, baselines, rate_limits).await?;
+    /// Initialize all enabled modules
+    pub async fn init_modules(&self, contexts: &[ModuleContext]) -> Result<(), anyhow::Error> {
+        for (module, ctx) in self.modules.iter().zip(contexts.iter()) {
+            module.init_data(ctx).await?;
+            module.mount_apis(ctx).await?;
         }
-
-        if self.config.enable_dns {
-            self.start_dns_monitor().await?;
-        }
-
         Ok(())
     }
 
-    async fn start_traffic_monitor(
+    /// Start monitoring for all enabled modules
+    pub async fn start_all_monitoring(
         &self,
-        mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-        ingress_ebpf: &mut aya::Ebpf,
-        egress_ebpf: &mut aya::Ebpf,
-        baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
-        rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+        contexts: &mut [ModuleContext],
     ) -> Result<(), anyhow::Error> {
-        traffic::update(mac_stats, ingress_ebpf, egress_ebpf, baselines, rate_limits).await
+        for (module, ctx) in self.modules.iter().zip(contexts.iter_mut()) {
+            module.start_monitoring(ctx).await?;
+        }
+        Ok(())
     }
 
-    async fn start_dns_monitor(&self) -> Result<(), anyhow::Error> {
-        // TODO: DNS 监控功能待实现
-        // log::info!("DNS 监控模块已启用（功能待实现）");
-        Ok(())
+    /// Get count of enabled modules
+    pub fn enabled_modules_count(&self) -> usize {
+        self.modules.len()
     }
 }

@@ -193,9 +193,9 @@ pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// 在启动时检查 `metrics` 目录下的所有 ring 文件容量是否与给定的
-/// `traffic_retention_seconds` 一致；若发现任意不一致，则重建该目录下所有 ring 文件。
-/// 注意：该操作会清空历史时间序列，仅保留限速配置文件。
+/// At startup, check if all ring file capacities in the `metrics` directory match the given
+/// `traffic_retention_seconds`; if any inconsistency is found, rebuild all ring files in that directory.
+/// Note: This operation will clear historical time series data, only keeping rate limit configuration files.
 pub fn rebuild_all_ring_files_if_mismatch(
     base_dir: &str,
     traffic_retention_seconds: u32,
@@ -205,7 +205,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
         return Ok(false);
     }
 
-    // 先检测是否存在不一致
+    // First check if there are any inconsistencies
     let mut mismatch_found = false;
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
@@ -228,7 +228,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
         return Ok(false);
     }
 
-    // 若发现不一致，重建所有 .ring 文件
+    // If inconsistencies are found, rebuild all .ring files
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -238,7 +238,7 @@ pub fn rebuild_all_ring_files_if_mismatch(
         if path.extension().and_then(|s| s.to_str()) != Some("ring") {
             continue;
         }
-        // 强制重建
+        // Force rebuild
         let _ = reinit_ring_file(&path, traffic_retention_seconds)?;
     }
 
@@ -427,7 +427,7 @@ pub fn query_metrics(
 }
 
 
-/// 按时间窗聚合所有设备的指标，返回按时间戳升序的行
+/// Aggregate metrics for all devices by time window, returning rows sorted by timestamp in ascending order
 pub fn query_metrics_aggregate_all_with_window(
     base_dir: &str,
     start_ms: u64,

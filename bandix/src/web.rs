@@ -1,8 +1,9 @@
-use bandix_common::MacTrafficStats;
-use crate::storage;
+use crate::command::Options;
+use crate::monitor::ModuleContext;
 use crate::utils::format_utils::{format_bytes, format_mac};
-use log::{info, error};
+use bandix_common::MacTrafficStats;
 use chrono::Local;
+use log::{error, info};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -11,32 +12,49 @@ use tokio::net::{TcpListener, TcpStream};
 
 // Simple HTTP server, only depends on tokio
 pub async fn start_server(
-    port: u16,
-    mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
-    rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
-    web_log: bool,
+    options: Options,
+    module_contexts: Vec<ModuleContext>,
 ) -> Result<(), anyhow::Error> {
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", options.port);
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
+
+    // Extract data from module contexts
+    let (mac_stats, rate_limits) = extract_traffic_data(&module_contexts);
 
     loop {
         let (stream, _) = listener.accept().await?;
         let mac_stats = Arc::clone(&mac_stats);
         let rate_limits = Arc::clone(&rate_limits);
+        let module_contexts = module_contexts.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, mac_stats, rate_limits, web_log).await {
+            if let Err(e) = handle_connection(stream, mac_stats, rate_limits, module_contexts, options.web_log).await
+            {
                 error!("Error handling connection: {}", e);
             }
         });
     }
 }
 
+/// Extract traffic data from module contexts
+fn extract_traffic_data(module_contexts: &[ModuleContext]) -> (Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>, Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>) {
+    // Find traffic module context
+    for context in module_contexts {
+        if let ModuleContext::Traffic(traffic_ctx) = context {
+            return (Arc::clone(&traffic_ctx.mac_stats), Arc::clone(&traffic_ctx.rate_limits));
+        }
+    }
+    
+    // If no traffic module is found, return empty data structures
+    (Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new())))
+}
+
 async fn handle_connection(
     mut stream: TcpStream,
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
     rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+    _module_contexts: Vec<ModuleContext>,
     web_log: bool,
 ) -> Result<(), anyhow::Error> {
     let mut buffer = [0; 4096]; // Increase buffer size to handle larger requests
@@ -110,13 +128,14 @@ async fn handle_connection(
             })
             .collect();
 
-        let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
+        let data_dir =
+            std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
 
         let traffic_retention_seconds: u32 = std::env::var("BANDIX_TRAFFIC_RETENTION_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(3600);
-        use std::time::{SystemTime, UNIX_EPOCH, Duration};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
@@ -128,24 +147,20 @@ async fn handle_connection(
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    crate::storage::query_metrics_aggregate_all_with_window(
-                        &data_dir,
-                        start_ms,
-                        end_ms,
+                    crate::storage::traffic::query_metrics_aggregate_all_with_window(
+                        &data_dir, start_ms, end_ms,
                     ),
                     "all".to_string(),
                 )
             } else {
                 match parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        crate::storage::query_metrics(&data_dir, &mac, start_ms, end_ms),
+                        crate::storage::traffic::query_metrics(&data_dir, &mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
-                        let error_json = format!(
-                            r#"{{"status":"error","message":"invalid mac: {}"}}"#,
-                            e
-                        );
+                        let error_json =
+                            format!(r#"{{"status":"error","message":"invalid mac: {}"}}"#, e);
                         send_json_response_with_status(&mut stream, &error_json, 400).await?;
                         return Ok(());
                     }
@@ -154,10 +169,8 @@ async fn handle_connection(
         } else {
             // mac omitted => aggregate all within window
             (
-                crate::storage::query_metrics_aggregate_all_with_window(
-                    &data_dir,
-                    start_ms,
-                    end_ms,
+                crate::storage::traffic::query_metrics_aggregate_all_with_window(
+                    &data_dir, start_ms, end_ms,
                 ),
                 "all".to_string(),
             )
@@ -165,11 +178,10 @@ async fn handle_connection(
 
         match rows_result {
             Ok(rows) => {
-                // rows 已在存储层按窗口裁剪
+                // rows have already been windowed at the storage layer
                 let mut json = format!(
                     "{{\n  \"retention_seconds\": {},\n  \"mac\": \"{}\",\n  \"metrics\": [\n",
-                    traffic_retention_seconds,
-                    mac_label
+                    traffic_retention_seconds, mac_label
                 );
                 for (i, r) in rows.iter().enumerate() {
                     json.push_str(&format!(
@@ -233,7 +245,6 @@ fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     Ok(mac)
 }
 
-
 // Set device rate limit (JSON format)
 async fn set_device_limit_json(
     body: &str,
@@ -274,7 +285,7 @@ async fn set_device_limit_json(
     // path through this module, read the BANDIX_DATA_DIR environment variable, falling back to
     // the default 'bandix-data' if unset.
     let data_dir = std::env::var("BANDIX_DATA_DIR").unwrap_or_else(|_| "bandix-data".to_string());
-    storage::upsert_limit(&data_dir, &mac, wide_rx_rate_limit, wide_tx_rate_limit)?;
+    crate::storage::traffic::upsert_limit(&data_dir, &mac, wide_rx_rate_limit, wide_tx_rate_limit)?;
 
     // Format rate as readable string
     let rx_str = if wide_rx_rate_limit == 0 {
@@ -299,14 +310,12 @@ async fn set_device_limit_json(
     Ok(())
 }
 
-
-
 fn generate_devices_json(mac_stats: &Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>) -> String {
     let stats_map = mac_stats.lock().unwrap();
 
     let mut json = String::from("{\n  \"devices\": [\n");
 
-    // 仅展示被 eBPF 实际采集到的设备（last_sample_ts > 0）
+    // Only show devices actually collected by eBPF (last_sample_ts > 0)
     let filtered: Vec<(&[u8; 6], &MacTrafficStats)> = stats_map
         .iter()
         .filter(|(_mac, stats)| stats.last_sample_ts > 0)

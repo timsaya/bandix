@@ -1,13 +1,10 @@
-// Only import display functions in debug mode
-#[cfg(debug_assertions)]
-use crate::display::display_tui_interface;
-use crate::storage::BaselineTotals;
+use crate::storage::traffic::BaselineTotals;
 use anyhow::Ok;
 use aya::maps::HashMap;
 use aya::maps::MapData;
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Check if MAC address is special address (broadcast, multicast, etc.)
@@ -144,21 +141,25 @@ fn merge(
     Ok(traffic)
 }
 
-fn update_traffic_stats(
-    mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-    device_traffic_stats: &StdHashMap<[u8; 6], TrafficData>,
-    baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
-    rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+fn process_traffic_data(
+    ctx: &mut crate::monitor::TrafficModuleContext,
+    ingress_ebpf: &mut aya::Ebpf,
+    egress_ebpf: &mut aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
+    let mac_ip_mapping = collect_mac_ip_mapping(&ingress_ebpf, &egress_ebpf)?;
+    let traffic_data = collect_traffic_data(&ingress_ebpf, &egress_ebpf)?;
+
+    let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
+
     // Get current timestamp
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_millis() as u64;
 
-    let mut stats_map = mac_stats.lock().unwrap();
-    let baseline_map = baselines.lock().unwrap();
-    let rl_map = rate_limits.lock().unwrap();
+    let mut stats_map = ctx.mac_stats.lock().unwrap();
+    let baseline_map = ctx.baselines.lock().unwrap();
+    let rl_map = ctx.rate_limits.lock().unwrap();
 
     for (mac, traffic_data) in device_traffic_stats.iter() {
         let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
@@ -282,10 +283,7 @@ fn update_traffic_stats(
 
         // If first sample and there is transmit traffic, set last active time
         if stats.last_sample_ts == 0 {
-            if stats.total_tx_bytes > 0
-                || stats.local_tx_bytes > 0
-                || stats.wide_tx_bytes > 0
-            {
+            if stats.total_tx_bytes > 0 || stats.local_tx_bytes > 0 || stats.wide_tx_bytes > 0 {
                 stats.last_online_ts = now;
             }
         }
@@ -303,12 +301,12 @@ fn update_traffic_stats(
     Ok(())
 }
 
-fn update_rate_limit(
-    rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+fn apply_rate_limits(
+    ctx: &mut crate::monitor::TrafficModuleContext,
     ingress_ebpf: &mut aya::Ebpf,
     egress_ebpf: &mut aya::Ebpf,
 ) -> Result<(), anyhow::Error> {
-    let rl_map = rate_limits.lock().unwrap();
+    let rl_map = ctx.rate_limits.lock().unwrap();
 
     let mut ingress_mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
         ingress_ebpf
@@ -324,52 +322,97 @@ fn update_rate_limit(
 
     for (mac, lim) in rl_map.iter() {
         ingress_mac_rate_limits
-            .insert(
-                mac,
-                &[
-                    lim[0],
-                    lim[1],
-                ],
-                0,
-            )
+            .insert(mac, &[lim[0], lim[1]], 0)
             .unwrap();
 
         egress_mac_rate_limits
-            .insert(
-                mac,
-                &[
-                    lim[0],
-                    lim[1],
-                ],
-                0,
-            )
+            .insert(mac, &[lim[0], lim[1]], 0)
             .unwrap();
     }
 
     Ok(())
 }
 
-// Update data
-pub async fn update(
-    mac_stats: &Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-    ingress_ebpf: &mut aya::Ebpf,
-    egress_ebpf: &mut aya::Ebpf,
-    baselines: &Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
-    rate_limits: &Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+// Start traffic monitoring module (includes internal loop)
+pub async fn start(
+    ctx: &mut crate::monitor::TrafficModuleContext,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 ) -> Result<(), anyhow::Error> {
-    let mac_ip_mapping = collect_mac_ip_mapping(ingress_ebpf, egress_ebpf)?;
-    let traffic_data = collect_traffic_data(ingress_ebpf, egress_ebpf)?;
-    let device_traffic_stats = merge(&traffic_data, &mac_ip_mapping)?;
+    // Get eBPF programs
+    let (ingress_ebpf, egress_ebpf) = match (ctx.ingress_ebpf.take(), ctx.egress_ebpf.take()) {
+        (Some(ingress), Some(egress)) => (ingress, egress),
+        _ => return Err(anyhow::anyhow!("eBPF programs not initialized")),
+    };
 
-    update_traffic_stats(mac_stats, &device_traffic_stats, baselines, rate_limits)?;
+    // Put eBPF programs back into context
+    ctx.ingress_ebpf = Some(ingress_ebpf);
+    ctx.egress_ebpf = Some(egress_ebpf);
 
-    update_rate_limit(rate_limits, ingress_ebpf, egress_ebpf)?;
+    // Start internal loop
+    start_monitoring_loop(ctx, shutdown_notify).await
+}
 
-    // Only call display function in debug mode
-    // #[cfg(debug_assertions)]
-    // {
-    //     display_tui_interface(mac_stats);
-    // }
+// Traffic monitoring internal loop
+async fn start_monitoring_loop(
+    ctx: &mut crate::monitor::TrafficModuleContext,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+) -> Result<(), anyhow::Error> {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                // Get eBPF programs
+                let (mut ingress_ebpf, mut egress_ebpf) = match (ctx.ingress_ebpf.take(), ctx.egress_ebpf.take()) {
+                    (Some(ingress), Some(egress)) => (ingress, egress),
+                    _ => {
+                        log::error!("eBPF programs not initialized, skipping this monitoring cycle");
+                        continue;
+                    }
+                };
+
+                // Process traffic data
+                if let Err(e) = process_traffic_data(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
+                    log::error!("Failed to process traffic data: {}", e);
+                }
+
+                // Update rate limits
+                if let Err(e) = apply_rate_limits(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
+                    log::error!("Failed to update rate limits: {}", e);
+                }
+
+                // Put eBPF programs back into context
+                ctx.ingress_ebpf = Some(ingress_ebpf);
+                ctx.egress_ebpf = Some(egress_ebpf);
+
+                // Execute metrics persistence
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let ts_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_millis() as u64;
+                
+                let snapshot: Vec<([u8; 6], MacTrafficStats)> = {
+                    let stats = ctx.mac_stats.lock().unwrap();
+                    stats.iter().map(|(k, v)| (*k, *v)).collect()
+                };
+                
+                if let Err(e) = crate::storage::traffic::insert_metrics_batch(
+                    &ctx.options.data_dir,
+                    ts_ms,
+                    &snapshot,
+                    ctx.options.traffic_retention_seconds,
+                ) {
+                    log::error!("metrics persist error: {}", e);
+                }
+            }
+            _ = shutdown_notify.notified() => {
+                log::info!("Traffic monitoring module received shutdown signal, stopping...");
+                break;
+            }
+        }
+    }
 
     Ok(())
 }
+

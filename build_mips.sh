@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# 颜色定义
+# Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 打印带颜色的信息
+# Print colored information
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -25,104 +25,104 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 定义版本号（从Cargo.toml获取或手动指定）
+# Define version number (get from Cargo.toml or specify manually)
 VERSION=$(grep "^version" bandix/Cargo.toml | cut -d '"' -f2)
-print_info "构建版本: $VERSION"
+print_info "Build version: $VERSION"
 
-# 确保目标目录存在
+# Ensure target directory exists
 RELEASE_DIR="release/mips"
 mkdir -p $RELEASE_DIR
 
-print_info "开始构建 MIPS 系列架构..."
+print_info "Starting build for MIPS series architectures..."
 
-# 确保安装了必要的工具
-print_info "正在检查和安装必要的工具..."
+# Ensure necessary tools are installed
+print_info "Checking and installing necessary tools..."
 
-# 检查和安装 bpf-linker
+# Check and install bpf-linker
 if ! command -v bpf-linker &> /dev/null; then
-    print_info "正在安装 bpf-linker..."
+    print_info "Installing bpf-linker..."
     cargo install bpf-linker
 fi
 
-# 检查 nightly 工具链
+# Check nightly toolchain
 if ! rustup toolchain list | grep -q "nightly"; then
-    print_info "正在安装 nightly 工具链..."
+    print_info "Installing nightly toolchain..."
     rustup toolchain install nightly
 fi
 
-# 检查 rust-src 组件
+# Check rust-src component
 if ! rustup component list --toolchain nightly | grep -q "rust-src (installed)"; then
-    print_info "正在安装 rust-src 组件..."
+    print_info "Installing rust-src component..."
     rustup component add rust-src --toolchain nightly
 fi
 
-# MIPS 架构目标平台列表
+# MIPS architecture target platform list
 MIPS_TARGETS=(
-    # MIPS 32位 大端序
+    # MIPS 32-bit big-endian
     "mips-unknown-linux-gnu"
     "mips-unknown-linux-musl"
     
-    # MIPS 32位 小端序 (MIPSEL)
+    # MIPS 32-bit little-endian (MIPSEL)
     "mipsel-unknown-linux-gnu"
     "mipsel-unknown-linux-musl"
 )
 
-# 使用 cargo nightly + build-std，无需交叉编译工具链
-print_info "使用 cargo nightly + build-std 模式，无需额外交叉编译工具链..."
+# Use cargo nightly + build-std, no cross-compilation toolchain needed
+print_info "Using cargo nightly + build-std mode, no additional cross-compilation toolchain needed..."
 
-# 注意: 使用 -Z build-std 时不需要预安装目标平台
-# 标准库将从源码编译
-print_info "使用 build-std 模式，将从源码编译标准库..."
+# Note: When using -Z build-std, no need to pre-install target platforms
+# Standard library will be compiled from source
+print_info "Using build-std mode, will compile standard library from source..."
 
-# 构建统计
+# Build statistics
 SUCCESS_COUNT=0
 FAILED_COUNT=0
 FAILED_TARGETS=()
 
-print_info "开始构建所有 MIPS 架构..."
+print_info "Starting build for all MIPS architectures..."
 echo "========================================"
 
-# 为每个目标平台构建
+# Build for each target platform
 for TARGET in "${MIPS_TARGETS[@]}"; do
     echo ""
-    print_info "开始为 $TARGET 构建..."
+    print_info "Starting build for $TARGET..."
     
-    # 构建发布版本（使用 nightly 工具链和 build-std）
+    # Build release version (using nightly toolchain and build-std)
     if cargo +nightly build -Z build-std --release --target "$TARGET"; then
-        print_success "构建成功: $TARGET"
+        print_success "Build successful: $TARGET"
         
-        # 创建发布包目录
+        # Create release package directory
         TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
         mkdir -p $TARGET_DIR
         
-        # 复制二进制文件
+        # Copy binary file
         if [ -f "target/$TARGET/release/bandix" ]; then
             cp "target/$TARGET/release/bandix" $TARGET_DIR/
             
-            # 复制其他必要文件
-            cp LICENSE $TARGET_DIR/ 2>/dev/null || print_warning "LICENSE 文件不存在"
-            cp README.md $TARGET_DIR/ 2>/dev/null || print_warning "README.md 文件不存在"
+            # Copy other necessary files
+            cp LICENSE $TARGET_DIR/ 2>/dev/null || print_warning "LICENSE file does not exist"
+            cp README.md $TARGET_DIR/ 2>/dev/null || print_warning "README.md file does not exist"
             
-            # 显示二进制文件信息
-            print_info "二进制文件信息:"
+            # Display binary file information
+            print_info "Binary file information:"
             file "target/$TARGET/release/bandix" | sed 's/^/  /'
             
-            # 创建压缩包
-            print_info "创建压缩包..."
+            # Create compressed package
+            print_info "Creating compressed package..."
             tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET" > /dev/null
             
-            # 清理临时文件
+            # Clean up temporary files
             rm -rf $TARGET_DIR
             
-            print_success "完成 $TARGET 构建和打包"
+            print_success "Completed $TARGET build and packaging"
             SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
         else
-            print_error "二进制文件不存在: target/$TARGET/release/bandix"
+            print_error "Binary file does not exist: target/$TARGET/release/bandix"
             FAILED_COUNT=$((FAILED_COUNT + 1))
             FAILED_TARGETS+=("$TARGET")
         fi
     else
-        print_error "构建失败: $TARGET"
+        print_error "Build failed: $TARGET"
         FAILED_COUNT=$((FAILED_COUNT + 1))
         FAILED_TARGETS+=("$TARGET")
     fi
@@ -131,32 +131,32 @@ for TARGET in "${MIPS_TARGETS[@]}"; do
 done
 
 echo ""
-print_info "构建完成总结:"
+print_info "Build completion summary:"
 echo "========================================"
-print_success "成功构建: $SUCCESS_COUNT 个目标"
+print_success "Successfully built: $SUCCESS_COUNT targets"
 if [ $FAILED_COUNT -gt 0 ]; then
-    print_error "失败构建: $FAILED_COUNT 个目标"
-    print_info "失败的目标:"
+    print_error "Failed builds: $FAILED_COUNT targets"
+    print_info "Failed targets:"
     for target in "${FAILED_TARGETS[@]}"; do
         echo "  - $target"
     done
 fi
 
 echo ""
-print_info "发布包位于: $RELEASE_DIR 目录"
+print_info "Release packages located in: $RELEASE_DIR directory"
 if [ $SUCCESS_COUNT -gt 0 ]; then
-    print_info "生成的文件:"
-    ls -la $RELEASE_DIR/*.tar.gz 2>/dev/null | sed 's/^/  /' || print_info "没有生成压缩包"
+    print_info "Generated files:"
+    ls -la $RELEASE_DIR/*.tar.gz 2>/dev/null | sed 's/^/  /' || print_info "No compressed packages generated"
 fi
 
-# 显示磁盘使用情况
-print_info "磁盘使用情况:"
-du -sh $RELEASE_DIR 2>/dev/null | sed 's/^/  总大小: /'
+# Display disk usage
+print_info "Disk usage:"
+du -sh $RELEASE_DIR 2>/dev/null | sed 's/^/  Total size: /'
 
 if [ $FAILED_COUNT -eq 0 ]; then
-    print_success "所有 MIPS 平台构建成功！🎉"
+    print_success "All MIPS platforms built successfully! 🎉"
     exit 0
 else
-    print_warning "部分平台构建失败，请检查错误信息"
+    print_warning "Some platforms failed to build, please check error messages"
     exit 1
 fi

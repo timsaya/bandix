@@ -1,34 +1,34 @@
 #!/bin/bash
 set -e
 
-# 定义版本号（从Cargo.toml获取或手动指定）
+# Define version number (get from Cargo.toml or specify manually)
 VERSION=$(grep "^version" bandix/Cargo.toml | cut -d '"' -f2)
-echo "构建版本: $VERSION"
+echo "Build version: $VERSION"
 
-# 确保目标目录存在
+# Ensure target directory exists
 RELEASE_DIR="release"
 mkdir -p $RELEASE_DIR
 
-# 确保安装了必要的工具
-echo "正在检查和安装必要的工具..."
+# Ensure necessary tools are installed
+echo "Checking and installing necessary tools..."
 
-# 检查和安装 bpf-linker
+# Check and install bpf-linker
 if ! command -v bpf-linker &> /dev/null; then
-    echo "正在安装 bpf-linker..."
+    echo "Installing bpf-linker..."
     cargo install bpf-linker
 fi
 
-# 构建目标平台列表
+# Build target platform list
 TARGETS=(
-  # x86_64 架构
+  # x86_64 architecture
   "x86_64-unknown-linux-gnu"
   "x86_64-unknown-linux-musl"
   
-  # AArch64 (ARM64) 架构
+  # AArch64 (ARM64) architecture
   "aarch64-unknown-linux-gnu"
   "aarch64-unknown-linux-musl"
   
-  # ARM 32位架构
+  # ARM 32-bit architecture
   "armv7-unknown-linux-gnueabihf"
   "armv7-unknown-linux-musleabihf"
   "armv7-unknown-linux-musleabi"
@@ -40,54 +40,54 @@ TARGETS=(
   "arm-unknown-linux-gnueabi"
   "arm-unknown-linux-gnueabihf"
   
-  # RISC-V 架构 (新兴的开源架构)
+  # RISC-V architecture (emerging open source architecture)
   "riscv64gc-unknown-linux-gnu"
   "riscv64gc-unknown-linux-musl"
   
-  # PowerPC 架构 (部分高端路由器)
+  # PowerPC architecture (some high-end routers)
   "powerpc64-unknown-linux-gnu"
   "powerpc64le-unknown-linux-gnu"
   "powerpc64le-unknown-linux-musl"
 
 )
 
-# 安装目标平台
+# Install target platforms
 for TARGET in "${TARGETS[@]}"; do
-  echo "安装目标平台: $TARGET"
+  echo "Installing target platform: $TARGET"
   rustup target add $TARGET
 done
 
 
-# 为每个目标平台构建
+# Build for each target platform
 for TARGET in "${TARGETS[@]}"; do
-  echo "开始为 $TARGET 构建..."
+  echo "Starting build for $TARGET..."
   
-  # 构建发布版本
+  # Build release version
   if ! cargo build --release --target "$TARGET"; then
-    echo "cargo build 失败，尝试使用 cargo zigbuild ..."
+    echo "cargo build failed, trying cargo zigbuild ..."
     cargo zigbuild --release --target "$TARGET"
   fi
   
-  # 创建发布包目录
+  # Create release package directory
   TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
   mkdir -p $TARGET_DIR
   
-  # 复制二进制文件
+  # Copy binary file
   cp "target/$TARGET/release/bandix" $TARGET_DIR/
   
-  # 复制其他必要文件
+  # Copy other necessary files
   cp LICENSE $TARGET_DIR/
   cp README.md $TARGET_DIR/
   
-  # 创建压缩包
-  echo "创建压缩包..."
+  # Create compressed package
+  echo "Creating compressed package..."
   tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET"
   
-  # 清理临时文件
+  # Clean up temporary files
   rm -rf $TARGET_DIR
   
-  echo "完成 $TARGET 构建"
+  echo "Completed $TARGET build"
 done
 
-echo "所有平台构建完成！"
-echo "发布包位于 $RELEASE_DIR 目录" 
+echo "All platform builds completed!"
+echo "Release packages located in $RELEASE_DIR directory" 
