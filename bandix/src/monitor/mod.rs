@@ -22,10 +22,6 @@ impl MonitorConfig {
             enable_dns: options.enable_dns,
         }
     }
-
-    pub fn is_any_enabled(&self) -> bool {
-        self.enable_traffic || self.enable_dns
-    }
 }
 
 /// Traffic module context
@@ -89,188 +85,117 @@ impl Clone for ModuleContext {
     }
 }
 
-/// Traffic module interface
-pub trait TrafficModule: Send + Sync {
-    /// Module name
-    fn name(&self) -> &'static str;
-
-    /// Initialize module data
-    async fn init_data(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error>;
-
-    /// Mount API interfaces
-    async fn mount_apis(&self, ctx: &TrafficModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error>;
-
-    /// Start monitoring task
-    async fn start_monitoring(&self, ctx: &mut TrafficModuleContext) -> Result<(), anyhow::Error>;
-}
-
-/// DNS module interface
-pub trait DnsModule: Send + Sync {
-    /// Module name
-    fn name(&self) -> &'static str;
-
-    /// Initialize module data
-    async fn init_data(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error>;
-
-    /// Mount API interfaces
-    async fn mount_apis(&self, ctx: &DnsModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error>;
-
-    /// Start monitoring task
-    async fn start_monitoring(&self, ctx: &mut DnsModuleContext) -> Result<(), anyhow::Error>;
-}
-
-/// Traffic monitoring module
-pub struct TrafficModuleImpl;
-
-impl TrafficModule for TrafficModuleImpl {
-    fn name(&self) -> &'static str {
-        "traffic"
-    }
-
-    async fn init_data(&self, ctx: &TrafficModuleContext) -> Result<(), anyhow::Error> {
-        // Traffic module data initialization logic
-
-        // Ensure data directory and schema
-        crate::storage::traffic::ensure_schema(&ctx.options.data_dir)?;
-
-        // Load rate limits
-        let limits = crate::storage::traffic::load_all_limits(&ctx.options.data_dir)?;
-        {
-            let mut rl = ctx.rate_limits.lock().unwrap();
-            for (mac, rx, tx) in limits {
-                rl.insert(mac, [rx, tx]);
-            }
-        }
-
-        // Rebuild ring files (if needed)
-        let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
-            &ctx.options.data_dir,
-            ctx.options.traffic_retention_seconds,
-        )?;
-
-        // Load baseline data
-        let preloaded_baselines = if rebuilt {
-            Vec::new()
-        } else {
-            crate::storage::traffic::load_latest_totals(&ctx.options.data_dir)?
-        };
-
-        // Apply preloaded baseline data
-        {
-            let mut b = ctx.baselines.lock().unwrap();
-            for (mac, base) in preloaded_baselines {
-                b.insert(mac, base);
-            }
-        }
-        Ok(())
-    }
-
-    async fn mount_apis(&self, ctx: &TrafficModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
-        use crate::api::{ApiHandler, traffic::TrafficApiHandler};
-        
-        // Create traffic API handler
-        let handler = ApiHandler::Traffic(TrafficApiHandler::new(
-            Arc::clone(&ctx.mac_stats),
-            Arc::clone(&ctx.rate_limits),
-            ctx.options.clone(),
-        ));
-        
-        // Register with API router
-        api_router.register_handler(handler);
-        
-        Ok(())
-    }
-
-    async fn start_monitoring(&self, _ctx: &mut TrafficModuleContext) -> Result<(), anyhow::Error> {
-        // This method is no longer used as we directly call traffic::start in command.rs
-        log::info!("Traffic monitoring module enabled (started via direct call)");
-        Ok(())
-    }
-}
-
-/// DNS monitoring module
-pub struct DnsModuleImpl;
-
-impl DnsModule for DnsModuleImpl {
-    fn name(&self) -> &'static str {
-        "dns"
-    }
-
-    async fn init_data(&self, ctx: &DnsModuleContext) -> Result<(), anyhow::Error> {
-        // DNS module data initialization logic
-
-        // TODO: Implement DNS data storage initialization
-        // e.g.: Create DNS query log tables, configure DNS monitoring parameters, etc.
-        let dns_monitor = dns::DnsMonitor::new();
-        dns_monitor.init_data_storage(ctx).await?;
-
-        Ok(())
-    }
-
-    async fn mount_apis(&self, ctx: &DnsModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
-        use crate::api::{ApiHandler, dns::DnsApiHandler};
-        
-        // Create DNS API handler
-        let handler = ApiHandler::Dns(DnsApiHandler::new(ctx.options.clone()));
-        
-        // Register with API router
-        api_router.register_handler(handler);
-        
-        Ok(())
-    }
-
-    async fn start_monitoring(&self, _ctx: &mut DnsModuleContext) -> Result<(), anyhow::Error> {
-        // This method is no longer used as we directly call dns::DnsMonitor::start in command.rs
-        log::info!("DNS monitoring module enabled (started via direct call)");
-        Ok(())
-    }
-}
-
 /// Module type enumeration
+#[derive(Clone)]
 pub enum ModuleType {
-    Traffic(TrafficModuleImpl),
-    Dns(DnsModuleImpl),
+    Traffic,
+    Dns,
 }
 
 impl ModuleType {
-    fn name(&self) -> &'static str {
-        match self {
-            ModuleType::Traffic(module) => module.name(),
-            ModuleType::Dns(module) => module.name(),
-        }
-    }
-
     async fn init_data(&self, ctx: &ModuleContext) -> Result<(), anyhow::Error> {
         match (self, ctx) {
-            (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
-                module.init_data(traffic_ctx).await
+            (ModuleType::Traffic, ModuleContext::Traffic(traffic_ctx)) => {
+                // Traffic module data initialization logic
+                crate::storage::traffic::ensure_schema(&traffic_ctx.options.data_dir)?;
+
+                // Load rate limits
+                let limits =
+                    crate::storage::traffic::load_all_limits(&traffic_ctx.options.data_dir)?;
+                {
+                    let mut rl = traffic_ctx.rate_limits.lock().unwrap();
+                    for (mac, rx, tx) in limits {
+                        rl.insert(mac, [rx, tx]);
+                    }
+                }
+
+                // Rebuild ring files (if needed)
+                let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
+                    &traffic_ctx.options.data_dir,
+                    traffic_ctx.options.traffic_retention_seconds,
+                )?;
+
+                // Load baseline data
+                let preloaded_baselines = if rebuilt {
+                    Vec::new()
+                } else {
+                    crate::storage::traffic::load_latest_totals(&traffic_ctx.options.data_dir)?
+                };
+
+                // Apply preloaded baseline data
+                {
+                    let mut b = traffic_ctx.baselines.lock().unwrap();
+                    for (mac, base) in preloaded_baselines {
+                        b.insert(mac, base);
+                    }
+                }
+                Ok(())
             }
-            (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
-                module.init_data(dns_ctx).await
+            (ModuleType::Dns, ModuleContext::Dns(_dns_ctx)) => {
+                // DNS module data initialization logic
+                Ok(())
             }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
     }
 
-    async fn mount_apis(&self, ctx: &ModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
+    async fn mount_apis(
+        &self,
+        ctx: &ModuleContext,
+        api_router: &mut ApiRouter,
+    ) -> Result<(), anyhow::Error> {
         match (self, ctx) {
-            (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
-                module.mount_apis(traffic_ctx, api_router).await
+            (ModuleType::Traffic, ModuleContext::Traffic(traffic_ctx)) => {
+                use crate::api::{traffic::TrafficApiHandler, ApiHandler};
+
+                // Create traffic API handler
+                let handler = ApiHandler::Traffic(TrafficApiHandler::new(
+                    Arc::clone(&traffic_ctx.mac_stats),
+                    Arc::clone(&traffic_ctx.rate_limits),
+                    traffic_ctx.options.clone(),
+                ));
+
+                // Register with API router
+                api_router.register_handler(handler);
+
+                Ok(())
             }
-            (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
-                module.mount_apis(dns_ctx, api_router).await
+            (ModuleType::Dns, ModuleContext::Dns(dns_ctx)) => {
+                use crate::api::{dns::DnsApiHandler, ApiHandler};
+
+                // Create DNS API handler
+                let handler = ApiHandler::Dns(DnsApiHandler::new(dns_ctx.options.clone()));
+
+                // Register with API router
+                api_router.register_handler(handler);
+                Ok(())
             }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
     }
 
-    async fn start_monitoring(&self, ctx: &mut ModuleContext) -> Result<(), anyhow::Error> {
+    async fn start_monitoring(
+        &self,
+        ctx: ModuleContext,
+        shutdown_notify: Arc<tokio::sync::Notify>,
+    ) -> Result<(), anyhow::Error> {
         match (self, ctx) {
-            (ModuleType::Traffic(module), ModuleContext::Traffic(traffic_ctx)) => {
-                module.start_monitoring(traffic_ctx).await
+            (ModuleType::Traffic, ModuleContext::Traffic(mut traffic_ctx)) => {
+                let traffic_monitor = traffic::TrafficMonitor::new();
+                if let Err(e) = traffic_monitor
+                    .start(&mut traffic_ctx, shutdown_notify)
+                    .await
+                {
+                    log::error!("Traffic monitoring module error: {}", e);
+                }
+                Ok(())
             }
-            (ModuleType::Dns(module), ModuleContext::Dns(dns_ctx)) => {
-                module.start_monitoring(dns_ctx).await
+            (ModuleType::Dns, ModuleContext::Dns(mut dns_ctx)) => {
+                let dns_monitor = dns::DnsMonitor::new();
+                if let Err(e) = dns_monitor.start(&mut dns_ctx, shutdown_notify).await {
+                    log::error!("DNS monitoring module error: {}", e);
+                }
+                Ok(())
             }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
@@ -279,7 +204,6 @@ impl ModuleType {
 
 /// Monitor manager
 pub struct MonitorManager {
-    config: MonitorConfig,
     modules: Vec<ModuleType>,
     api_router: ApiRouter,
 }
@@ -289,15 +213,14 @@ impl MonitorManager {
         let mut modules: Vec<ModuleType> = Vec::new();
 
         if config.enable_traffic {
-            modules.push(ModuleType::Traffic(TrafficModuleImpl));
+            modules.push(ModuleType::Traffic);
         }
 
         if config.enable_dns {
-            modules.push(ModuleType::Dns(DnsModuleImpl));
+            modules.push(ModuleType::Dns);
         }
 
-        MonitorManager { 
-            config, 
+        MonitorManager {
             modules,
             api_router: ApiRouter::new(),
         }
@@ -312,24 +235,32 @@ impl MonitorManager {
         Ok(())
     }
 
-    /// Start monitoring for all enabled modules
-    pub async fn start_all_monitoring(
-        &self,
-        contexts: &mut [ModuleContext],
-    ) -> Result<(), anyhow::Error> {
-        for (module, ctx) in self.modules.iter().zip(contexts.iter_mut()) {
-            module.start_monitoring(ctx).await?;
-        }
-        Ok(())
-    }
-
-    /// Get count of enabled modules
-    pub fn enabled_modules_count(&self) -> usize {
-        self.modules.len()
-    }
-
     /// Get the API router
     pub fn get_api_router(&self) -> &ApiRouter {
         &self.api_router
+    }
+
+    /// Start all enabled modules
+    pub async fn start_modules(
+        &self,
+        contexts: Vec<ModuleContext>,
+        shutdown_notify: Arc<tokio::sync::Notify>,
+    ) -> Result<Vec<tokio::task::JoinHandle<()>>, anyhow::Error> {
+        let mut tasks = Vec::new();
+
+        // Create a vector of module types to avoid borrowing self in async tasks
+        let module_types: Vec<ModuleType> = self.modules.clone();
+
+        for (module, ctx) in module_types.into_iter().zip(contexts.into_iter()) {
+            let shutdown_notify = shutdown_notify.clone();
+            let task = tokio::spawn(async move {
+                if let Err(e) = module.start_monitoring(ctx, shutdown_notify).await {
+                    log::error!("Module start error: {}", e);
+                }
+            });
+            tasks.push(task);
+        }
+
+        Ok(tasks)
     }
 }

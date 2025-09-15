@@ -17,23 +17,6 @@ pub mod format_utils {
         }
     }
 
-    // Convert rate to human-readable format
-    pub fn format_rate(bytes_per_sec: u64) -> String {
-        const KB: u64 = 1024;
-        const MB: u64 = KB * 1024;
-        const GB: u64 = MB * 1024;
-
-        if bytes_per_sec >= GB {
-            format!("{:.2} GB/s", bytes_per_sec as f64 / GB as f64)
-        } else if bytes_per_sec >= MB {
-            format!("{:.2} MB/s", bytes_per_sec as f64 / MB as f64)
-        } else if bytes_per_sec >= KB {
-            format!("{:.2} KB/s", bytes_per_sec as f64 / KB as f64)
-        } else {
-            format!("{} B/s", bytes_per_sec)
-        }
-    }
-
     // Format IP address
     pub fn format_ip(ip: &[u8; 4]) -> String {
         format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
@@ -48,7 +31,6 @@ pub mod format_utils {
     }
 }
 
-
 pub mod network_utils {
 
     use std::net::Ipv4Addr;
@@ -58,7 +40,10 @@ pub mod network_utils {
     // Get interface IP and subnet mask
     pub fn get_interface_info(interface: &str) -> Option<([u8; 4], [u8; 4])> {
         // Primary: ip addr show <iface>
-        if let Ok(output) = Command::new("ip").args(["addr", "show", interface]).output() {
+        if let Ok(output) = Command::new("ip")
+            .args(["addr", "show", interface])
+            .output()
+        {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
                 if line.trim().starts_with("inet ") {
@@ -95,16 +80,22 @@ pub mod network_utils {
                     if let Some(pos) = line.find("inet addr:") {
                         let rest = &line[pos + "inet addr:".len()..];
                         let ip_part = rest.split_whitespace().next().unwrap_or("");
-                        if let Ok(ip) = Ipv4Addr::from_str(ip_part) { ip_opt = Some(ip.octets()); }
+                        if let Ok(ip) = Ipv4Addr::from_str(ip_part) {
+                            ip_opt = Some(ip.octets());
+                        }
                     } else {
                         // Try format 2: inet <ip>  ... netmask <mask>
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         for i in 0..parts.len() {
                             if parts[i] == "inet" && i + 1 < parts.len() {
-                                if let Ok(ip) = Ipv4Addr::from_str(parts[i + 1]) { ip_opt = Some(ip.octets()); }
+                                if let Ok(ip) = Ipv4Addr::from_str(parts[i + 1]) {
+                                    ip_opt = Some(ip.octets());
+                                }
                             }
                             if parts[i] == "netmask" && i + 1 < parts.len() {
-                                if let Ok(mask_ip) = Ipv4Addr::from_str(parts[i + 1]) { mask_opt = Some(mask_ip.octets()); }
+                                if let Ok(mask_ip) = Ipv4Addr::from_str(parts[i + 1]) {
+                                    mask_opt = Some(mask_ip.octets());
+                                }
                             }
                         }
                     }
@@ -114,7 +105,9 @@ pub mod network_utils {
                         if let Some(pos) = line.find("Mask:") {
                             let rest = &line[pos + "Mask:".len()..];
                             let mask_part = rest.split_whitespace().next().unwrap_or("");
-                            if let Ok(mask_ip) = Ipv4Addr::from_str(mask_part) { mask_opt = Some(mask_ip.octets()); }
+                            if let Ok(mask_ip) = Ipv4Addr::from_str(mask_part) {
+                                mask_opt = Some(mask_ip.octets());
+                            }
                         }
                     }
                 }

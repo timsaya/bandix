@@ -1,9 +1,9 @@
-pub mod traffic;
 pub mod dns;
+pub mod traffic;
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
-use serde::{Deserialize, Serialize};
 
 /// API response structures
 #[derive(Serialize, Deserialize)]
@@ -59,7 +59,9 @@ impl HttpResponse {
 
     pub fn error(status: u16, message: String) -> Self {
         let error_response = ApiResponse::<()>::error(message);
-        let body = serde_json::to_string(&error_response).unwrap_or_else(|_| r#"{"status":"error","message":"JSON serialization failed"}"#.to_string());
+        let body = serde_json::to_string(&error_response).unwrap_or_else(|_| {
+            r#"{"status":"error","message":"JSON serialization failed"}"#.to_string()
+        });
         Self {
             status,
             content_type: "application/json".to_string(),
@@ -98,7 +100,10 @@ impl ApiHandler {
         }
     }
 
-    pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn handle_request(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         match self {
             ApiHandler::Traffic(handler) => handler.handle_request(request).await,
             ApiHandler::Dns(handler) => handler.handle_request(request).await,
@@ -121,11 +126,15 @@ impl ApiRouter {
 
     /// Register an API handler for a module
     pub fn register_handler(&mut self, handler: ApiHandler) {
-        self.handlers.insert(handler.module_name().to_string(), handler);
+        self.handlers
+            .insert(handler.module_name().to_string(), handler);
     }
 
     /// Route a request to the appropriate handler
-    pub async fn route_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn route_request(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         // Try to find a handler that supports this route
         for handler in self.handlers.values() {
             for route in handler.supported_routes() {
@@ -137,11 +146,6 @@ impl ApiRouter {
 
         // No handler found
         Ok(HttpResponse::not_found())
-    }
-
-    /// Get all registered handlers
-    pub fn get_handlers(&self) -> &HashMap<String, ApiHandler> {
-        &self.handlers
     }
 }
 
@@ -162,10 +166,13 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
 
     let method = parts[0].to_string();
     let path_with_query = parts[1];
-    
+
     // Split path and query parameters
     let (path, query_str) = if let Some(pos) = path_with_query.find('?') {
-        (path_with_query[..pos].to_string(), Some(&path_with_query[pos + 1..]))
+        (
+            path_with_query[..pos].to_string(),
+            Some(&path_with_query[pos + 1..]),
+        )
     } else {
         (path_with_query.to_string(), None)
     };
@@ -198,7 +205,10 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
 }
 
 /// Send HTTP response to client
-pub async fn send_http_response(stream: &mut TcpStream, response: &HttpResponse) -> Result<(), anyhow::Error> {
+pub async fn send_http_response(
+    stream: &mut TcpStream,
+    response: &HttpResponse,
+) -> Result<(), anyhow::Error> {
     use tokio::io::AsyncWriteExt;
 
     let status_text = match response.status {

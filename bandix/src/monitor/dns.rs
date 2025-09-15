@@ -43,16 +43,4 @@ impl DnsMonitor {
 
         Ok(())
     }
-
-    /// Initialize DNS data storage
-    pub async fn init_data_storage(&self, _ctx: &DnsModuleContext) -> Result<()> {
-        // TODO: Initialize DNS data storage
-        Ok(())
-    }
-
-    /// Mount DNS API interfaces
-    pub async fn mount_dns_apis(&self, _ctx: &DnsModuleContext) -> Result<()> {
-        // TODO: Mount DNS-related API interfaces
-        Ok(())
-    }
 }

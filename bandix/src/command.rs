@@ -1,7 +1,7 @@
 use crate::ebpf::egress::load_egress;
 use crate::ebpf::ingress::load_ingress;
 use crate::monitor::{
-    dns, traffic, DnsModuleContext, ModuleContext, MonitorConfig, MonitorManager,
+    DnsModuleContext, ModuleContext, MonitorConfig, MonitorManager,
     TrafficModuleContext,
 };
 use crate::system::log_startup_info;
@@ -168,27 +168,8 @@ async fn run_service(
         }
     });
 
-    // Start internal loops for all modules
-    let mut tasks = Vec::new();
-    for ctx in module_contexts {
-        let shutdown_notify = shutdown_notify.clone();
-        let task = tokio::spawn(async move {
-            match ctx {
-                ModuleContext::Traffic(mut traffic_ctx) => {
-                    if let Err(e) = traffic::start(&mut traffic_ctx, shutdown_notify).await {
-                        log::error!("Traffic monitoring module error: {}", e);
-                    }
-                }
-                ModuleContext::Dns(mut dns_ctx) => {
-                    let dns_monitor = dns::DnsMonitor::new();
-                    if let Err(e) = dns_monitor.start(&mut dns_ctx, shutdown_notify).await {
-                        log::error!("DNS monitoring module error: {}", e);
-                    }
-                }
-            }
-        });
-        tasks.push(task);
-    }
+    // Start internal loops for all modules via MonitorManager
+    let tasks = monitor_manager.start_modules(module_contexts, shutdown_notify.clone()).await?;
 
     // Wait for shutdown signal
     shutdown_notify.notified().await;
