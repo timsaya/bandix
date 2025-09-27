@@ -74,6 +74,17 @@ async fn handle_connection(
         }
     };
 
+    // Log response if web_log is enabled
+    if web_log {
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let response_body_preview = if response.body.len() > 200 {
+            format!("{}...", &response.body[..200])
+        } else {
+            response.body.clone()
+        };
+        info!("[{}] Response: {} | Body: {}", timestamp, response.status, response_body_preview);
+    }
+
     // Send response
     send_http_response(&mut stream, &response).await?;
 

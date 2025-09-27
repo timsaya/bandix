@@ -219,7 +219,7 @@ pub async fn send_http_response(
     let status_text = match response.status {
         200 => "OK",
         400 => "BAD REQUEST",
-        404 => "NOT FOUND",
+        404 => "Not Found",
         500 => "INTERNAL SERVER ERROR",
         _ => "UNKNOWN",
     };

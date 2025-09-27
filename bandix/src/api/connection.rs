@@ -128,7 +128,7 @@ impl ConnectionApiHandler {
                     }
                 }
             }
-            _ => Ok(HttpResponse::error(404, "Not found".to_string())),
+            _ => Ok(HttpResponse::error(404, "Not Found".to_string())),
         }
     }
 
