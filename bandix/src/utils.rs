@@ -33,6 +33,9 @@ pub mod format_utils {
 
 pub mod network_utils {
 
+    use anyhow::Result;
+    use std::collections::HashMap;
+    use std::fs;
     use std::net::Ipv4Addr;
     use std::process::Command;
     use std::str::FromStr;
@@ -141,5 +144,175 @@ pub mod network_utils {
         }
 
         mask
+    }
+
+    /// Get IP to MAC address mapping from ARP table
+    /// Also includes local machine IP-MAC mapping
+    pub fn get_ip_mac_mapping() -> Result<HashMap<[u8; 4], [u8; 6]>> {
+        let mut mapping = HashMap::new();
+
+        // Read ARP table from /proc/net/arp
+        let content = fs::read_to_string("/proc/net/arp")?;
+
+        for line in content.lines().skip(1) {
+            // Skip header
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                // Parse IP address
+                if let Ok(ip) = parts[0].parse::<Ipv4Addr>() {
+                    let ip_bytes = ip.octets();
+
+                    // Parse MAC address
+                    if parts[3] != "00:00:00:00:00:00" && parts[3] != "<incomplete>" {
+                        if let Ok(mac) = parse_mac_address(parts[3]) {
+                            mapping.insert(ip_bytes, mac);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add local machine IP-MAC mapping for all network interfaces
+        // This ensures that connections from/to the local machine are also counted
+        if let Ok(output) = Command::new("ip")
+            .args(["addr", "show"])
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                // Look for lines with "inet " (IPv4 addresses)
+                if line.trim().starts_with("inet ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let ip_with_cidr = parts[1];
+                        let ip_cidr: Vec<&str> = ip_with_cidr.split('/').collect();
+                        if ip_cidr.len() == 2 {
+                            if let Ok(ip) = Ipv4Addr::from_str(ip_cidr[0]) {
+                                let ip_bytes = ip.octets();
+                                
+                                // Skip loopback addresses (127.x.x.x)
+                                if ip_bytes[0] != 127 {
+                                    // Get the MAC address for this interface
+                                    if let Some(mac) = get_interface_mac_from_ip_output(&output_str, ip_cidr[0]) {
+                                        mapping.insert(ip_bytes, mac);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(mapping)
+    }
+
+    /// Extract MAC address for a specific IP from ip addr show output
+    fn get_interface_mac_from_ip_output(output: &str, target_ip: &str) -> Option<[u8; 6]> {
+        let lines: Vec<&str> = output.lines().collect();
+        let mut current_interface = None;
+        
+        for line in lines {
+            // Look for interface name (e.g., "2: enp1s0: <BROADCAST,MULTICAST,UP,LOWER_UP>")
+            if line.contains(": <") && line.contains(":") {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 2 {
+                    current_interface = Some(parts[1].trim());
+                }
+            }
+            // Look for the target IP address
+            else if line.contains("inet ") && line.contains(target_ip) {
+                // Found the target IP, now look for the MAC address in the same interface block
+                if let Some(iface) = current_interface {
+                    return get_interface_mac_address(iface);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get MAC address for a specific network interface
+    fn get_interface_mac_address(interface: &str) -> Option<[u8; 6]> {
+        // Try to read from /sys/class/net/<interface>/address
+        if let Ok(content) = fs::read_to_string(format!("/sys/class/net/{}/address", interface)) {
+            if let Ok(mac) = parse_mac_address(content.trim()) {
+                return Some(mac);
+            }
+        }
+        None
+    }
+
+    /// Parse MAC address from string format (e.g., "aa:bb:cc:dd:ee:ff")
+    pub fn parse_mac_address(mac_str: &str) -> Result<[u8; 6]> {
+        let parts: Vec<&str> = mac_str.split(':').collect();
+        if parts.len() != 6 {
+            return Err(anyhow::anyhow!("Invalid MAC address format: {}", mac_str));
+        }
+
+        let mut mac = [0u8; 6];
+        for (i, part) in parts.iter().enumerate() {
+            mac[i] = u8::from_str_radix(part, 16)?;
+        }
+
+        Ok(mac)
+    }
+
+    /// Check if an IP address is in the same subnet as the given network interface
+    pub fn is_ip_in_subnet(ip: [u8; 4], interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> bool {
+        // Calculate network address for both IPs
+        let network1 = [
+            ip[0] & subnet_mask[0],
+            ip[1] & subnet_mask[1],
+            ip[2] & subnet_mask[2],
+            ip[3] & subnet_mask[3],
+        ];
+        
+        let network2 = [
+            interface_ip[0] & subnet_mask[0],
+            interface_ip[1] & subnet_mask[1],
+            interface_ip[2] & subnet_mask[2],
+            interface_ip[3] & subnet_mask[3],
+        ];
+        
+        network1 == network2
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_mac_address() {
+            let mac_str = "aa:bb:cc:dd:ee:ff";
+            let result = parse_mac_address(mac_str);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        }
+
+        #[test]
+        fn test_get_ip_mac_mapping() {
+            // This test will only work if /proc/net/arp exists
+            // and the process has permission to read it
+            if std::path::Path::new("/proc/net/arp").exists() {
+                let result = get_ip_mac_mapping();
+                assert!(result.is_ok());
+            }
+        }
+
+        #[test]
+        fn test_is_ip_in_subnet() {
+            // Test 192.168.1.0/24 subnet
+            let interface_ip = [192, 168, 1, 1];
+            let subnet_mask = [255, 255, 255, 0];
+            
+            // IPs in the same subnet
+            assert!(is_ip_in_subnet([192, 168, 1, 10], interface_ip, subnet_mask));
+            assert!(is_ip_in_subnet([192, 168, 1, 254], interface_ip, subnet_mask));
+            
+            // IPs not in the same subnet
+            assert!(!is_ip_in_subnet([192, 168, 2, 1], interface_ip, subnet_mask));
+            assert!(!is_ip_in_subnet([10, 0, 0, 1], interface_ip, subnet_mask));
+            assert!(!is_ip_in_subnet([127, 0, 0, 1], interface_ip, subnet_mask));
+        }
     }
 }

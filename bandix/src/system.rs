@@ -179,6 +179,9 @@ pub fn log_startup_info(options: &Options) {
     if options.enable_dns {
         enabled_count += 1;
     }
+    if options.enable_connection {
+        enabled_count += 1;
+    }
 
     if enabled_count == 0 {
         info!("Enabled monitoring modules: None");
@@ -194,6 +197,10 @@ pub fn log_startup_info(options: &Options) {
 
         if options.enable_dns {
             info!("  • DNS monitoring");
+        }
+
+        if options.enable_connection {
+            info!("  • Connection statistics monitoring");
         }
     }
 

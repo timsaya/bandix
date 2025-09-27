@@ -1,7 +1,7 @@
 use crate::ebpf::egress::load_egress;
 use crate::ebpf::ingress::load_ingress;
 use crate::monitor::{
-    DnsModuleContext, ModuleContext, MonitorConfig, MonitorManager,
+    ConnectionModuleContext, DnsModuleContext, ModuleContext, MonitorConfig, MonitorManager,
     TrafficModuleContext,
 };
 use crate::system::log_startup_info;
@@ -60,6 +60,13 @@ pub struct Options {
         help = "Enable DNS monitoring module (not yet implemented)"
     )]
     pub enable_dns: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable connection statistics monitoring module"
+    )]
+    pub enable_connection: bool,
 }
 
 // Validate arguments
@@ -153,6 +160,18 @@ async fn run_service(
         module_contexts.push(ModuleContext::Dns(DnsModuleContext::new(options.clone())));
     }
 
+    if monitor_config.enable_connection {
+        match ConnectionModuleContext::new(options.clone()) {
+            Ok(connection_ctx) => {
+                module_contexts.push(ModuleContext::Connection(connection_ctx));
+            }
+            Err(e) => {
+                log::error!("Failed to create connection module context: {}", e);
+                return Err(e);
+            }
+        }
+    }
+
     // Create monitor manager
     let mut monitor_manager = MonitorManager::new(monitor_config);
 
@@ -197,9 +216,9 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
         .target(env_logger::Target::Stdout)
         .init();
 
-    if !(options.enable_dns || options.enable_traffic) {
+    if !(options.enable_dns || options.enable_traffic || options.enable_connection) {
         return Err(anyhow::anyhow!(
-            "No monitoring modules enabled. Use --enable-traffic to enable traffic monitoring, or --enable-dns to enable DNS monitoring"
+            "No monitoring modules enabled. Use --enable-traffic to enable traffic monitoring, --enable-dns to enable DNS monitoring, or --enable-connection-stats to enable connection statistics monitoring"
         ));
     }
 

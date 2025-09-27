@@ -1,3 +1,4 @@
+pub mod connection;
 pub mod dns;
 pub mod traffic;
 
@@ -8,11 +9,15 @@ use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 
+// Re-export ConnectionModuleContext from connection module
+pub use connection::ConnectionModuleContext;
+
 /// Monitor module configuration
 #[derive(Debug, Clone)]
 pub struct MonitorConfig {
     pub enable_traffic: bool,
     pub enable_dns: bool,
+    pub enable_connection: bool,
 }
 
 impl MonitorConfig {
@@ -20,6 +25,7 @@ impl MonitorConfig {
         MonitorConfig {
             enable_traffic: options.enable_traffic,
             enable_dns: options.enable_dns,
+            enable_connection: options.enable_connection,
         }
     }
 }
@@ -67,6 +73,7 @@ impl DnsModuleContext {
 pub enum ModuleContext {
     Traffic(TrafficModuleContext),
     Dns(DnsModuleContext),
+    Connection(ConnectionModuleContext),
 }
 
 impl Clone for ModuleContext {
@@ -81,6 +88,7 @@ impl Clone for ModuleContext {
                 egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
             }),
             ModuleContext::Dns(ctx) => ModuleContext::Dns(ctx.clone()),
+            ModuleContext::Connection(ctx) => ModuleContext::Connection(ctx.clone()),
         }
     }
 }
@@ -90,6 +98,7 @@ impl Clone for ModuleContext {
 pub enum ModuleType {
     Traffic,
     Dns,
+    Connection,
 }
 
 impl ModuleType {
@@ -135,6 +144,10 @@ impl ModuleType {
                 // DNS module data initialization logic
                 Ok(())
             }
+            (ModuleType::Connection, ModuleContext::Connection(_connection_ctx)) => {
+                // Connection module data initialization logic
+                Ok(())
+            }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
     }
@@ -170,6 +183,18 @@ impl ModuleType {
                 api_router.register_handler(handler);
                 Ok(())
             }
+            (ModuleType::Connection, ModuleContext::Connection(connection_ctx)) => {
+                use crate::api::{connection::ConnectionApiHandler, ApiHandler};
+
+                // Create connection API handler
+                let handler = ApiHandler::Connection(ConnectionApiHandler::new(Arc::clone(
+                    &connection_ctx.device_connection_stats,
+                )));
+
+                // Register with API router
+                api_router.register_handler(handler);
+                Ok(())
+            }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
     }
@@ -197,6 +222,16 @@ impl ModuleType {
                 }
                 Ok(())
             }
+            (ModuleType::Connection, ModuleContext::Connection(mut connection_ctx)) => {
+                let connection_monitor = connection::ConnectionMonitor::new();
+                if let Err(e) = connection_monitor
+                    .start(&mut connection_ctx, shutdown_notify)
+                    .await
+                {
+                    log::error!("Connection monitoring module error: {}", e);
+                }
+                Ok(())
+            }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
     }
@@ -218,6 +253,10 @@ impl MonitorManager {
 
         if config.enable_dns {
             modules.push(ModuleType::Dns);
+        }
+
+        if config.enable_connection {
+            modules.push(ModuleType::Connection);
         }
 
         MonitorManager {

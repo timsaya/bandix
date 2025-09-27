@@ -209,7 +209,7 @@ impl TrafficApiHandler {
         // Parse JSON request body using serde
         let set_limit_request: SetLimitRequest = serde_json::from_str(body)?;
 
-        let mac = self.parse_mac_address(&set_limit_request.mac)?;
+        let mac = crate::utils::network_utils::parse_mac_address(&set_limit_request.mac)?;
 
         // Use the parsed values directly
         let wide_rx_rate_limit = set_limit_request.wide_rx_rate_limit;
@@ -307,7 +307,7 @@ impl TrafficApiHandler {
                     "all".to_string(),
                 )
             } else {
-                match self.parse_mac_address(&mac_str) {
+                match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
                         traffic::query_metrics(&self.options.data_dir, &mac, start_ms, end_ms),
                         format_mac(&mac),
@@ -364,18 +364,4 @@ impl TrafficApiHandler {
         }
     }
 
-    /// Parse MAC address string
-    fn parse_mac_address(&self, mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
-        let parts: Vec<&str> = mac_str.split(':').collect();
-        if parts.len() != 6 {
-            return Err(anyhow::anyhow!("Invalid MAC address format"));
-        }
-
-        let mut mac = [0u8; 6];
-        for (i, part) in parts.iter().enumerate() {
-            mac[i] = u8::from_str_radix(part, 16)?;
-        }
-
-        Ok(mac)
-    }
 }

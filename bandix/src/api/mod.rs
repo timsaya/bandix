@@ -1,5 +1,6 @@
 pub mod dns;
 pub mod traffic;
+pub mod connection;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,6 +84,7 @@ impl HttpResponse {
 pub enum ApiHandler {
     Traffic(crate::api::traffic::TrafficApiHandler),
     Dns(crate::api::dns::DnsApiHandler),
+    Connection(crate::api::connection::ConnectionApiHandler),
 }
 
 impl ApiHandler {
@@ -90,6 +92,7 @@ impl ApiHandler {
         match self {
             ApiHandler::Traffic(_) => "traffic",
             ApiHandler::Dns(_) => "dns",
+            ApiHandler::Connection(_) => "connection",
         }
     }
 
@@ -97,6 +100,7 @@ impl ApiHandler {
         match self {
             ApiHandler::Traffic(handler) => handler.supported_routes(),
             ApiHandler::Dns(handler) => handler.supported_routes(),
+            ApiHandler::Connection(handler) => handler.supported_routes(),
         }
     }
 
@@ -107,6 +111,7 @@ impl ApiHandler {
         match self {
             ApiHandler::Traffic(handler) => handler.handle_request(request).await,
             ApiHandler::Dns(handler) => handler.handle_request(request).await,
+            ApiHandler::Connection(handler) => handler.handle_request(request).await,
         }
     }
 }
