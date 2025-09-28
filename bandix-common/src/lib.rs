@@ -63,10 +63,12 @@ pub struct ConnectionStats {
 pub struct DeviceConnectionStats {
     pub mac_address: [u8; 6],
     pub ip_address: [u8; 4],
-    pub active_tcp: u32,      // 活跃的TCP连接 (ESTABLISHED)
-    pub active_udp: u32,      // 活跃的UDP连接
-    pub closed_tcp: u32,      // 断开的TCP连接 (TIME_WAIT, CLOSE_WAIT等)
-    pub total_connections: u32,
+    pub tcp_connections: u32,     // TCP连接总数
+    pub udp_connections: u32,     // UDP连接总数
+    pub established_tcp: u32,     // ESTABLISHED状态的TCP连接
+    pub time_wait_tcp: u32,       // TIME_WAIT状态的TCP连接
+    pub close_wait_tcp: u32,      // CLOSE_WAIT状态的TCP连接
+    pub total_connections: u32,   // 总连接数 (tcp_connections + udp_connections)
     pub last_updated: u64,
 }
 
@@ -123,9 +125,11 @@ impl Default for DeviceConnectionStats {
         Self {
             mac_address: [0, 0, 0, 0, 0, 0],
             ip_address: [0, 0, 0, 0],
-            active_tcp: 0,
-            active_udp: 0,
-            closed_tcp: 0,
+            tcp_connections: 0,
+            udp_connections: 0,
+            established_tcp: 0,
+            time_wait_tcp: 0,
+            close_wait_tcp: 0,
             total_connections: 0,
             last_updated: 0,
         }

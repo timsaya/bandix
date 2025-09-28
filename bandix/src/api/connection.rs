@@ -35,9 +35,11 @@ impl ConnectionApiHandler {
             .map(|(mac, device_stats)| DeviceConnectionInfo {
                 mac_address: format_mac(mac),
                 ip_address: format_ip(&device_stats.ip_address),
-                active_tcp: device_stats.active_tcp,
-                active_udp: device_stats.active_udp,
-                closed_tcp: device_stats.closed_tcp,
+                tcp_connections: device_stats.tcp_connections,
+                udp_connections: device_stats.udp_connections,
+                established_tcp: device_stats.established_tcp,
+                time_wait_tcp: device_stats.time_wait_tcp,
+                close_wait_tcp: device_stats.close_wait_tcp,
                 total_connections: device_stats.total_connections,
                 last_updated: device_stats.last_updated,
             })
@@ -53,7 +55,7 @@ impl ConnectionApiHandler {
 
         let total_devices = devices.len();
         Ok(DeviceConnectionStatsResponse {
-            global_stats: stats.global_stats,
+            global_stats: stats.total_stats,
             devices,
             total_devices,
             last_updated: stats.last_updated,
@@ -66,9 +68,11 @@ impl ConnectionApiHandler {
 pub struct DeviceConnectionInfo {
     pub mac_address: String,
     pub ip_address: String,
-    pub active_tcp: u32,
-    pub active_udp: u32,
-    pub closed_tcp: u32,
+    pub tcp_connections: u32,
+    pub udp_connections: u32,
+    pub established_tcp: u32,
+    pub time_wait_tcp: u32,
+    pub close_wait_tcp: u32,
     pub total_connections: u32,
     pub last_updated: u64,
 }
