@@ -134,15 +134,13 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
                             total_connection_counted = true;
                         }
                         _ => {
-                            // Other TCP states are also counted in total
-                            total_stats.tcp_connections += 1;
-                            total_connection_counted = true;
+                            // Other TCP states: skip counting
+                            log::debug!("Unknown TCP state '{}' skipped in global stats", state);
                         }
                     }
                 } else {
-                    // TCP connections without state are also counted
-                    total_stats.tcp_connections += 1;
-                    total_connection_counted = true;
+                    // TCP connections without state: skip counting
+                    log::debug!("TCP connection without state skipped in global stats");
                 }
             }
             &"udp" => {
@@ -204,33 +202,36 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
 
             match protocol {
                 &"tcp" => {
-                    device_stat.tcp_connections += 1;
                     if let Some(state) = tcp_state {
                         match state {
                             "ESTABLISHED" => {
+                                device_stat.tcp_connections += 1;
                                 device_stat.established_tcp += 1;
                                 device_connection_counted = true;
                             }
                             "TIME_WAIT" => {
+                                device_stat.tcp_connections += 1;
                                 device_stat.time_wait_tcp += 1;
                                 device_connection_counted = true;
                             }
                             "CLOSE_WAIT" => {
+                                device_stat.tcp_connections += 1;
                                 device_stat.close_wait_tcp += 1;
                                 device_connection_counted = true;
                             }
                             "FIN_WAIT_1" | "FIN_WAIT_2" | "CLOSING" | "LAST_ACK" => {
+                                device_stat.tcp_connections += 1;
                                 device_stat.time_wait_tcp += 1; // Categorized as TIME_WAIT
                                 device_connection_counted = true;
                             }
                             _ => {
-                                // Other TCP states are counted in total but not categorized
-                                device_connection_counted = true;
+                                // Other TCP states: skip counting
+                                log::debug!("Unknown TCP state '{}' skipped for device", state);
                             }
                         }
                     } else {
-                        // TCP connections without state are also counted in total
-                        device_connection_counted = true;
+                        // TCP connections without state: skip counting
+                        log::debug!("TCP connection without state skipped for device");
                     }
                 }
                 &"udp" => {
