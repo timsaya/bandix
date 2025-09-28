@@ -162,9 +162,11 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
       {
         "mac_address": "00:11:22:33:44:55",
         "ip_address": "192.168.1.100",
-        "active_tcp": 5,
-        "active_udp": 3,
-        "closed_tcp": 2,
+        "tcp_connections": 7,
+        "udp_connections": 3,
+        "established_tcp": 5,
+        "time_wait_tcp": 2,
+        "close_wait_tcp": 0,
         "total_connections": 10,
         "last_updated": 1640995200
       }
@@ -174,6 +176,30 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
   }
 }
 ```
+
+**字段说明：**
+
+**全局统计：**
+- `total_connections`: TCP 和 UDP 连接总数
+- `tcp_connections`: TCP 连接总数
+- `udp_connections`: UDP 连接总数
+- `established_tcp`: 活跃的 TCP 连接数（ESTABLISHED 状态）
+- `time_wait_tcp`: TIME_WAIT 及类似关闭状态的 TCP 连接数
+- `close_wait_tcp`: CLOSE_WAIT 状态的 TCP 连接数
+- `last_updated`: 最后更新时间（Unix 时间戳）
+
+**设备统计：**
+- `mac_address`: 设备 MAC 地址
+- `ip_address`: 设备 IP 地址
+- `tcp_connections`: 该设备发起的 TCP 连接总数
+- `udp_connections`: 该设备发起的 UDP 连接总数
+- `established_tcp`: 活跃的 TCP 连接（ESTABLISHED 状态）
+- `time_wait_tcp`: TIME_WAIT 及类似关闭状态的 TCP 连接
+- `close_wait_tcp`: CLOSE_WAIT 状态的 TCP 连接
+- `total_connections`: 该设备的总连接数（tcp_connections + udp_connections）
+- `last_updated`: 最后更新时间（Unix 时间戳）
+
+**注意：** 设备统计只计算出站连接（设备作为源地址的连接）。只包含在 ARP 表中且与指定网络接口在同一子网内的设备。
 
 ### DNS 监控 API（尚未实现）
 

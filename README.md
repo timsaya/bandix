@@ -162,9 +162,11 @@ Get connection statistics for all devices.
       {
         "mac_address": "00:11:22:33:44:55",
         "ip_address": "192.168.1.100",
-        "active_tcp": 5,
-        "active_udp": 3,
-        "closed_tcp": 2,
+        "tcp_connections": 7,
+        "udp_connections": 3,
+        "established_tcp": 5,
+        "time_wait_tcp": 2,
+        "close_wait_tcp": 0,
         "total_connections": 10,
         "last_updated": 1640995200
       }
@@ -174,6 +176,30 @@ Get connection statistics for all devices.
   }
 }
 ```
+
+**Field Descriptions:**
+
+**Global Statistics:**
+- `total_connections`: Total number of TCP and UDP connections
+- `tcp_connections`: Total number of TCP connections
+- `udp_connections`: Total number of UDP connections
+- `established_tcp`: Number of active TCP connections (ESTABLISHED state)
+- `time_wait_tcp`: Number of TCP connections in TIME_WAIT and similar closing states
+- `close_wait_tcp`: Number of TCP connections in CLOSE_WAIT state
+- `last_updated`: Unix timestamp of last update
+
+**Device Statistics:**
+- `mac_address`: Device MAC address
+- `ip_address`: Device IP address
+- `tcp_connections`: Total TCP connections initiated by this device
+- `udp_connections`: Total UDP connections initiated by this device
+- `established_tcp`: Active TCP connections (ESTABLISHED state)
+- `time_wait_tcp`: TCP connections in TIME_WAIT and similar closing states
+- `close_wait_tcp`: TCP connections in CLOSE_WAIT state
+- `total_connections`: Total connections for this device (tcp_connections + udp_connections)
+- `last_updated`: Unix timestamp of last update
+
+**Note:** Device statistics only count outgoing connections (where the device is the source). Only devices present in the ARP table and within the same subnet as the specified network interface are included.
 
 ### DNS Monitoring API (Not Yet Implemented)
 
