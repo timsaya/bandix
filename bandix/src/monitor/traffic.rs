@@ -40,6 +40,9 @@ impl TrafficMonitor {
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            ctx.options.traffic_flush_interval_seconds as u64
+        ));
 
         loop {
             tokio::select! {
@@ -67,7 +70,7 @@ impl TrafficMonitor {
                     ctx.ingress_ebpf = Some(ingress_ebpf);
                     ctx.egress_ebpf = Some(egress_ebpf);
 
-                    // Execute metrics persistence
+                    // Execute metrics persistence to memory ring
                     use std::time::{SystemTime, UNIX_EPOCH};
                     let ts_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -79,17 +82,27 @@ impl TrafficMonitor {
                         stats.iter().map(|(k, v)| (*k, *v)).collect()
                     };
 
-                    if let Err(e) = crate::storage::traffic::insert_metrics_batch(
-                        &ctx.options.data_dir,
-                        ts_ms,
-                        &snapshot,
-                        ctx.options.traffic_retention_seconds,
-                    ) {
-                        log::error!("metrics persist error: {}", e);
+                    if let Err(e) = ctx.memory_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
+                        log::error!("metrics persist to memory ring error: {}", e);
+                    }
+                }
+                _ = flush_interval.tick() => {
+                    // Flush dirty rings to disk at configured interval
+                    log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...", 
+                               ctx.options.traffic_flush_interval_seconds);
+                    if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
+                        log::error!("Failed to flush dirty rings to disk: {}", e);
+                    } else {
+                        log::debug!("Successfully flushed dirty rings to disk");
                     }
                 }
                 _ = shutdown_notify.notified() => {
                     log::info!("Traffic monitoring module received shutdown signal, stopping...");
+                    // Flush all dirty data before shutdown
+                    log::info!("Flushing all dirty rings before shutdown...");
+                    if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
+                        log::error!("Failed to flush dirty rings during shutdown: {}", e);
+                    }
                     break;
                 }
             }

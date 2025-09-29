@@ -7,11 +7,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-/// Format IP address for display
-fn format_ip(ip: &[u8; 4]) -> String {
-    format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
-}
-
 /// Convert subnet mask to CIDR notation
 fn subnet_mask_to_cidr(mask: [u8; 4]) -> u8 {
     let mut cidr = 0;
@@ -44,7 +39,10 @@ impl Default for GlobalConnectionStats {
 /// Parse connection statistics from /proc/net/nf_conntrack
 /// 1. Total stats: all TCP/UDP connections (no filtering)
 /// 2. Device stats: connections for devices in ARP table AND in same subnet as interface
-pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Result<GlobalConnectionStats> {
+pub fn parse_connection_stats(
+    interface_ip: [u8; 4],
+    subnet_mask: [u8; 4],
+) -> Result<GlobalConnectionStats> {
     let content = fs::read_to_string("/proc/net/nf_conntrack")?;
     let ip_mac_mapping = network_utils::get_ip_mac_mapping()?;
 
@@ -74,7 +72,7 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
 
         // Extract protocol
         let protocol = parts.get(2).unwrap_or(&"");
-        
+
         // Extract TCP state (only for TCP connections)
         let mut tcp_state = None;
         if protocol == &"tcp" {
@@ -91,7 +89,7 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
         // Extract source and destination IP addresses (use first occurrence only)
         let mut src_ip = None;
         let mut dst_ip = None;
-        
+
         for part in &parts {
             if part.starts_with("src=") && src_ip.is_none() {
                 let ip_str = &part[4..]; // Remove "src=" prefix
@@ -108,7 +106,7 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
 
         // ===== 1. Total connection statistics (no filtering, only TCP and UDP) =====
         let mut total_connection_counted = false;
-        
+
         match protocol {
             &"tcp" => {
                 if let Some(state) = tcp_state {
@@ -151,7 +149,7 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
                 // Ignore other protocols
             }
         }
-        
+
         if total_connection_counted {
             total_stats.total_connections += 1;
         }
@@ -159,16 +157,18 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
         // ===== 2. Local network device connection statistics (requires ARP table and same subnet) =====
         // Find all IP addresses in ARP table and in same subnet
         let mut valid_device_ips = Vec::new();
-        
+
         if let Some(ip) = src_ip {
-            if ip_mac_mapping.contains_key(&ip) && 
-               network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
+            if ip_mac_mapping.contains_key(&ip)
+                && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask)
+            {
                 valid_device_ips.push(ip);
             }
         }
         if let Some(ip) = dst_ip {
-            if ip_mac_mapping.contains_key(&ip) && 
-               network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
+            if ip_mac_mapping.contains_key(&ip)
+                && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask)
+            {
                 valid_device_ips.push(ip);
             }
         }
@@ -267,17 +267,15 @@ pub struct ConnectionModuleContext {
 
 impl ConnectionModuleContext {
     /// Create connection module context
-    pub fn new(options: Options) -> Result<Self> {
+    pub fn new(options: Options) -> Self {
         // Get network interface information
-        let (interface_ip, subnet_mask) = network_utils::get_interface_info(&options.iface)
-            .ok_or_else(|| anyhow::anyhow!("Failed to get interface info for {}", options.iface))?;
-        
-        Ok(Self {
+        let (interface_ip, subnet_mask) = network_utils::get_interface_info(&options.iface).unwrap();
+        Self {
             options,
             device_connection_stats: Arc::new(Mutex::new(GlobalConnectionStats::default())),
             interface_ip,
             subnet_mask,
-        })
+        }
     }
 }
 
@@ -323,7 +321,7 @@ impl ConnectionMonitor {
                                 "Connection stats updated: {} devices, total_connections={}, interface={}",
                                 new_stats.device_stats.len(),
                                 new_stats.total_stats.total_connections,
-                                format!("{}.{}.{}.{}/{}", 
+                                format!("{}.{}.{}.{}/{}",
                                     ctx.interface_ip[0], ctx.interface_ip[1], ctx.interface_ip[2], ctx.interface_ip[3],
                                     subnet_mask_to_cidr(ctx.subnet_mask)
                                 )
@@ -357,7 +355,6 @@ mod tests {
         assert_eq!(result.unwrap(), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
     }
 
-
     #[test]
     fn test_parse_connection_stats() {
         // This test will only work if /proc/net/nf_conntrack exists
@@ -371,4 +368,3 @@ mod tests {
         }
     }
 }
-

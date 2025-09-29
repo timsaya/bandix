@@ -1,6 +1,6 @@
 use super::{HttpRequest, HttpResponse, ApiResponse};
 use crate::command::Options;
-use crate::storage::traffic;
+use crate::storage::traffic::{self, MemoryRingManager};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
 use serde::{Deserialize, Serialize};
@@ -89,6 +89,7 @@ pub struct SetLimitRequest {
 pub struct TrafficApiHandler {
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
     rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+    memory_ring_manager: Arc<MemoryRingManager>,
     options: Options,
 }
 
@@ -96,11 +97,13 @@ impl TrafficApiHandler {
     pub fn new(
         mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
         rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+        memory_ring_manager: Arc<MemoryRingManager>,
         options: Options,
     ) -> Self {
         Self {
             mac_stats,
             rate_limits,
+            memory_ring_manager,
             options,
         }
     }
@@ -299,17 +302,13 @@ impl TrafficApiHandler {
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    traffic::query_metrics_aggregate_all_with_window(
-                        &self.options.data_dir,
-                        start_ms,
-                        end_ms,
-                    ),
+                    self.memory_ring_manager.query_metrics_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        traffic::query_metrics(&self.options.data_dir, &mac, start_ms, end_ms),
+                        self.memory_ring_manager.query_metrics(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -320,11 +319,7 @@ impl TrafficApiHandler {
         } else {
             // mac omitted => aggregate all within window
             (
-                traffic::query_metrics_aggregate_all_with_window(
-                    &self.options.data_dir,
-                    start_ms,
-                    end_ms,
-                ),
+                self.memory_ring_manager.query_metrics_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
         };

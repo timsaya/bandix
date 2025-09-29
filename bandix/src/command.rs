@@ -56,6 +56,13 @@ pub struct Options {
 
     #[clap(
         long,
+        default_value = "600",
+        help = "Traffic data flush interval (seconds), how often to persist memory ring data to disk"
+    )]
+    pub traffic_flush_interval_seconds: u32,
+
+    #[clap(
+        long,
         default_value = "false",
         help = "Enable DNS monitoring module (not yet implemented)"
     )]
@@ -87,6 +94,12 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
     if opt.traffic_retention_seconds == 0 {
         return Err(anyhow::anyhow!(
             "traffic_retention_seconds must be greater than 0"
+        ));
+    }
+
+    if opt.traffic_flush_interval_seconds == 0 {
+        return Err(anyhow::anyhow!(
+            "traffic_flush_interval_seconds must be greater than 0"
         ));
     }
 
@@ -161,15 +174,9 @@ async fn run_service(
     }
 
     if monitor_config.enable_connection {
-        match ConnectionModuleContext::new(options.clone()) {
-            Ok(connection_ctx) => {
-                module_contexts.push(ModuleContext::Connection(connection_ctx));
-            }
-            Err(e) => {
-                log::error!("Failed to create connection module context: {}", e);
-                return Err(e);
-            }
-        }
+        module_contexts.push(ModuleContext::Connection(ConnectionModuleContext::new(
+            options.clone(),
+        )));
     }
 
     // Create monitor manager
@@ -188,7 +195,9 @@ async fn run_service(
     });
 
     // Start internal loops for all modules via MonitorManager
-    let tasks = monitor_manager.start_modules(module_contexts, shutdown_notify.clone()).await?;
+    let tasks = monitor_manager
+        .start_modules(module_contexts, shutdown_notify.clone())
+        .await?;
 
     // Wait for shutdown signal
     shutdown_notify.notified().await;
@@ -218,7 +227,7 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
 
     if !(options.enable_dns || options.enable_traffic || options.enable_connection) {
         return Err(anyhow::anyhow!(
-            "No monitoring modules enabled. Use --enable-traffic to enable traffic monitoring, --enable-dns to enable DNS monitoring, or --enable-connection-stats to enable connection statistics monitoring"
+            "No monitoring modules enabled. Use --enable-traffic to enable traffic monitoring, --enable-dns to enable DNS monitoring, or --enable-connection to enable connection statistics monitoring"
         ));
     }
 

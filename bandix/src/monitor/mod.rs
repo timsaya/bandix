@@ -4,7 +4,7 @@ pub mod traffic;
 
 use crate::api::ApiRouter;
 use crate::command::Options;
-use crate::storage::traffic::BaselineTotals;
+use crate::storage::traffic::{BaselineTotals, MemoryRingManager};
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,7 @@ pub struct TrafficModuleContext {
     pub mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
     pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
     pub rate_limits: Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+    pub memory_ring_manager: Arc<MemoryRingManager>,
     pub ingress_ebpf: Option<aya::Ebpf>,
     pub egress_ebpf: Option<aya::Ebpf>,
 }
@@ -43,11 +44,24 @@ pub struct TrafficModuleContext {
 impl TrafficModuleContext {
     /// Create traffic module context
     pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
+        let memory_ring_manager = Arc::new(MemoryRingManager::new(
+            options.data_dir.clone(),
+            options.traffic_retention_seconds,
+        ));
+        
+        // Load existing ring files into memory at startup
+        if let Err(e) = memory_ring_manager.load_from_files() {
+            log::error!("Failed to load ring files into memory at startup: {}", e);
+        } else {
+            log::info!("Successfully loaded existing ring files into memory");
+        }
+        
         Self {
             options,
             mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
             baselines: Arc::new(Mutex::new(StdHashMap::new())),
             rate_limits: Arc::new(Mutex::new(StdHashMap::new())),
+            memory_ring_manager,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
         }
@@ -84,6 +98,7 @@ impl Clone for ModuleContext {
                 mac_stats: Arc::clone(&ctx.mac_stats),
                 baselines: Arc::clone(&ctx.baselines),
                 rate_limits: Arc::clone(&ctx.rate_limits),
+                memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
                 ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
                 egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
             }),
@@ -165,6 +180,7 @@ impl ModuleType {
                 let handler = ApiHandler::Traffic(TrafficApiHandler::new(
                     Arc::clone(&traffic_ctx.mac_stats),
                     Arc::clone(&traffic_ctx.rate_limits),
+                    Arc::clone(&traffic_ctx.memory_ring_manager),
                     traffic_ctx.options.clone(),
                 ));
 

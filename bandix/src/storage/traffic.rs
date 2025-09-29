@@ -1,8 +1,10 @@
 use anyhow::Context;
 use bandix_common::MacTrafficStats;
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // Local helpers to parse/format MAC addresses (for file storage interaction)
 fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
@@ -46,6 +48,294 @@ const DEFAULT_RING_CAPACITY: u32 = 3600;
 const SLOT_U64S: usize = 14;
 const SLOT_SIZE: usize = SLOT_U64S * 8;
 const HEADER_SIZE: usize = 4 /*magic*/ + 4 /*version*/ + 4 /*capacity*/;
+
+/// In-memory Ring structure
+#[derive(Debug, Clone)]
+pub struct MemoryRing {
+    pub capacity: u32,
+    pub slots: Vec<[u64; SLOT_U64S]>,
+    pub current_index: u64,
+    pub dirty: bool, // Flag indicating whether there is data not yet persisted to disk
+}
+
+impl MemoryRing {
+    pub fn new(capacity: u32) -> Self {
+        let cap = if capacity == 0 {
+            DEFAULT_RING_CAPACITY
+        } else {
+            capacity
+        };
+        
+        Self {
+            capacity: cap,
+            slots: vec![[0u64; SLOT_U64S]; cap as usize],
+            current_index: 0,
+            dirty: false,
+        }
+    }
+
+    pub fn insert(&mut self, ts_ms: u64, data: &[u64; SLOT_U64S]) {
+        let idx = calc_slot_index(ts_ms, self.capacity);
+        self.slots[idx as usize] = *data;
+        self.current_index = idx;
+        self.dirty = true;
+    }
+
+    pub fn query(&self, start_ms: u64, end_ms: u64) -> Vec<MetricsRow> {
+        let mut rows = Vec::new();
+        
+        for slot in &self.slots {
+            let ts = slot[0];
+            if ts == 0 {
+                continue;
+            }
+            if ts < start_ms || ts > end_ms {
+                continue;
+            }
+            
+            rows.push(MetricsRow {
+                ts_ms: slot[0],
+                total_rx_rate: slot[1],
+                total_tx_rate: slot[2],
+                local_rx_rate: slot[3],
+                local_tx_rate: slot[4],
+                wide_rx_rate: slot[5],
+                wide_tx_rate: slot[6],
+                total_rx_bytes: slot[7],
+                total_tx_bytes: slot[8],
+                local_rx_bytes: slot[9],
+                local_tx_bytes: slot[10],
+                wide_rx_bytes: slot[11],
+                wide_tx_bytes: slot[12],
+            });
+        }
+        
+        rows.sort_by_key(|r| r.ts_ms);
+        rows
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+}
+
+/// Memory Ring Manager
+pub struct MemoryRingManager {
+    pub rings: Arc<Mutex<HashMap<[u8; 6], MemoryRing>>>,
+    pub base_dir: String,
+    pub capacity: u32,
+}
+
+impl MemoryRingManager {
+    pub fn new(base_dir: String, capacity: u32) -> Self {
+        Self {
+            rings: Arc::new(Mutex::new(HashMap::new())),
+            base_dir,
+            capacity,
+        }
+    }
+
+    /// Insert data into memory Ring
+    pub fn insert_metrics_batch(
+        &self,
+        ts_ms: u64,
+        rows: &Vec<([u8; 6], MacTrafficStats)>,
+    ) -> Result<(), anyhow::Error> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut rings = self.rings.lock().unwrap();
+        
+        for (mac, s) in rows.iter() {
+            let ring = rings.entry(*mac).or_insert_with(|| MemoryRing::new(self.capacity));
+            
+            let rec: [u64; SLOT_U64S] = [
+                ts_ms,
+                s.total_rx_rate,
+                s.total_tx_rate,
+                s.local_rx_rate,
+                s.local_tx_rate,
+                s.wide_rx_rate,
+                s.wide_tx_rate,
+                s.total_rx_bytes,
+                s.total_tx_bytes,
+                s.local_rx_bytes,
+                s.local_tx_bytes,
+                s.wide_rx_bytes,
+                s.wide_tx_bytes,
+                s.last_online_ts,
+            ];
+            
+            ring.insert(ts_ms, &rec);
+        }
+        
+        Ok(())
+    }
+
+    /// Query data from memory Ring
+    pub fn query_metrics(
+        &self,
+        mac: &[u8; 6],
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Vec<MetricsRow>, anyhow::Error> {
+        let rings = self.rings.lock().unwrap();
+        
+        if let Some(ring) = rings.get(mac) {
+            Ok(ring.query(start_ms, end_ms))
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Aggregate query data from all devices
+    pub fn query_metrics_aggregate_all(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Vec<MetricsRow>, anyhow::Error> {
+        use std::collections::BTreeMap;
+        
+        let rings = self.rings.lock().unwrap();
+        let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S]> = BTreeMap::new();
+        
+        for (_mac, ring) in rings.iter() {
+            for slot in &ring.slots {
+                let ts = slot[0];
+                if ts == 0 {
+                    continue;
+                }
+                if ts < start_ms || ts > end_ms {
+                    continue;
+                }
+                
+                let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
+                agg[0] = ts; // keep timestamp
+                // Aggregate only metric fields (exclude last_online_ts at index 13)
+                for j in 1..13 {
+                    agg[j] = agg[j].saturating_add(slot[j]);
+                }
+            }
+        }
+
+        let rows_vec: Vec<MetricsRow> = ts_to_agg
+            .into_iter()
+            .map(|(_ts, rec)| MetricsRow {
+                ts_ms: rec[0],
+                total_rx_rate: rec[1],
+                total_tx_rate: rec[2],
+                local_rx_rate: rec[3],
+                local_tx_rate: rec[4],
+                wide_rx_rate: rec[5],
+                wide_tx_rate: rec[6],
+                total_rx_bytes: rec[7],
+                total_tx_bytes: rec[8],
+                local_rx_bytes: rec[9],
+                local_tx_bytes: rec[10],
+                wide_rx_bytes: rec[11],
+                wide_tx_bytes: rec[12],
+            })
+            .collect();
+
+        Ok(rows_vec)
+    }
+
+    /// Flush dirty data to disk
+    pub async fn flush_dirty_rings(&self) -> Result<(), anyhow::Error> {
+        let mut rings = self.rings.lock().unwrap();
+        
+        for (mac, ring) in rings.iter_mut() {
+            if ring.is_dirty() {
+                self.persist_ring_to_file(mac, ring)?;
+                ring.mark_clean();
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Persist a single Ring to file
+    fn persist_ring_to_file(&self, mac: &[u8; 6], ring: &MemoryRing) -> Result<(), anyhow::Error> {
+        let path = ring_file_path(&self.base_dir, mac);
+        let f = init_ring_file(&path, ring.capacity)?;
+        
+        for (idx, slot) in ring.slots.iter().enumerate() {
+            if slot[0] != 0 { // Only write non-empty slots
+                write_slot(&f, idx as u64, slot)?;
+            }
+        }
+        
+        f.sync_all()?;
+        Ok(())
+    }
+
+    /// Load data from files to memory at startup
+    pub fn load_from_files(&self) -> Result<(), anyhow::Error> {
+        let dir = ring_dir(&self.base_dir);
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let mut rings = self.rings.lock().unwrap();
+        
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+                continue;
+            }
+
+            // Parse MAC from filename
+            let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if fname.len() != 12 {
+                continue;
+            }
+            let mut mac = [0u8; 6];
+            let mut ok = true;
+            for i in 0..6 {
+                if let Ok(v) = u8::from_str_radix(&fname[i * 2..i * 2 + 2], 16) {
+                    mac[i] = v;
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+
+            // Load from file to memory
+            if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
+                if let Ok((ver, cap)) = read_header(&mut f) {
+                    if ver == RING_VERSION {
+                        let mut ring = MemoryRing::new(cap);
+                        
+                        for i in 0..(cap as u64) {
+                            if let Ok(slot) = read_slot(&f, i) {
+                                if slot[0] != 0 {
+                                    ring.slots[i as usize] = slot;
+                                }
+                            }
+                        }
+                        
+                        ring.mark_clean(); // Just loaded from file, mark as clean
+                        rings.insert(mac, ring);
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
 
 fn ring_dir(base: &str) -> PathBuf {
     Path::new(base).join("metrics")
