@@ -37,7 +37,7 @@ fn mac_to_filename(mac: &[u8; 6]) -> String {
 
 const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring magic
 const RING_VERSION: u32 = 2; // bump to v2: slot adds last_online_ts
-// Default capacity is 3600 (1 hour, 1 sample per second); actual capacity is determined by argument when created
+                             // Default capacity is 3600 (1 hour, 1 sample per second); actual capacity is determined by argument when created
 const DEFAULT_RING_CAPACITY: u32 = 3600;
 
 // Per-slot structure (little-endian):
@@ -65,7 +65,7 @@ impl MemoryRing {
         } else {
             capacity
         };
-        
+
         Self {
             capacity: cap,
             slots: vec![[0u64; SLOT_U64S]; cap as usize],
@@ -83,7 +83,7 @@ impl MemoryRing {
 
     pub fn query(&self, start_ms: u64, end_ms: u64) -> Vec<MetricsRow> {
         let mut rows = Vec::new();
-        
+
         for slot in &self.slots {
             let ts = slot[0];
             if ts == 0 {
@@ -92,7 +92,7 @@ impl MemoryRing {
             if ts < start_ms || ts > end_ms {
                 continue;
             }
-            
+
             rows.push(MetricsRow {
                 ts_ms: slot[0],
                 total_rx_rate: slot[1],
@@ -109,7 +109,7 @@ impl MemoryRing {
                 wide_tx_bytes: slot[12],
             });
         }
-        
+
         rows.sort_by_key(|r| r.ts_ms);
         rows
     }
@@ -150,10 +150,12 @@ impl MemoryRingManager {
         }
 
         let mut rings = self.rings.lock().unwrap();
-        
+
         for (mac, s) in rows.iter() {
-            let ring = rings.entry(*mac).or_insert_with(|| MemoryRing::new(self.capacity));
-            
+            let ring = rings
+                .entry(*mac)
+                .or_insert_with(|| MemoryRing::new(self.capacity));
+
             let rec: [u64; SLOT_U64S] = [
                 ts_ms,
                 s.total_rx_rate,
@@ -170,10 +172,10 @@ impl MemoryRingManager {
                 s.wide_tx_bytes,
                 s.last_online_ts,
             ];
-            
+
             ring.insert(ts_ms, &rec);
         }
-        
+
         Ok(())
     }
 
@@ -185,7 +187,7 @@ impl MemoryRingManager {
         end_ms: u64,
     ) -> Result<Vec<MetricsRow>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
-        
+
         if let Some(ring) = rings.get(mac) {
             Ok(ring.query(start_ms, end_ms))
         } else {
@@ -200,10 +202,10 @@ impl MemoryRingManager {
         end_ms: u64,
     ) -> Result<Vec<MetricsRow>, anyhow::Error> {
         use std::collections::BTreeMap;
-        
+
         let rings = self.rings.lock().unwrap();
         let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S]> = BTreeMap::new();
-        
+
         for (_mac, ring) in rings.iter() {
             for slot in &ring.slots {
                 let ts = slot[0];
@@ -213,10 +215,10 @@ impl MemoryRingManager {
                 if ts < start_ms || ts > end_ms {
                     continue;
                 }
-                
+
                 let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
                 agg[0] = ts; // keep timestamp
-                // Aggregate only metric fields (exclude last_online_ts at index 13)
+                             // Aggregate only metric fields (exclude last_online_ts at index 13)
                 for j in 1..13 {
                     agg[j] = agg[j].saturating_add(slot[j]);
                 }
@@ -248,14 +250,14 @@ impl MemoryRingManager {
     /// Flush dirty data to disk
     pub async fn flush_dirty_rings(&self) -> Result<(), anyhow::Error> {
         let mut rings = self.rings.lock().unwrap();
-        
+
         for (mac, ring) in rings.iter_mut() {
             if ring.is_dirty() {
                 self.persist_ring_to_file(mac, ring)?;
                 ring.mark_clean();
             }
         }
-        
+
         Ok(())
     }
 
@@ -263,13 +265,14 @@ impl MemoryRingManager {
     fn persist_ring_to_file(&self, mac: &[u8; 6], ring: &MemoryRing) -> Result<(), anyhow::Error> {
         let path = ring_file_path(&self.base_dir, mac);
         let f = init_ring_file(&path, ring.capacity)?;
-        
+
         for (idx, slot) in ring.slots.iter().enumerate() {
-            if slot[0] != 0 { // Only write non-empty slots
+            if slot[0] != 0 {
+                // Only write non-empty slots
                 write_slot(&f, idx as u64, slot)?;
             }
         }
-        
+
         f.sync_all()?;
         Ok(())
     }
@@ -282,7 +285,7 @@ impl MemoryRingManager {
         }
 
         let mut rings = self.rings.lock().unwrap();
-        
+
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -317,7 +320,7 @@ impl MemoryRingManager {
                 if let Ok((ver, cap)) = read_header(&mut f) {
                     if ver == RING_VERSION {
                         let mut ring = MemoryRing::new(cap);
-                        
+
                         for i in 0..(cap as u64) {
                             if let Ok(slot) = read_slot(&f, i) {
                                 if slot[0] != 0 {
@@ -325,14 +328,14 @@ impl MemoryRingManager {
                                 }
                             }
                         }
-                        
+
                         ring.mark_clean(); // Just loaded from file, mark as clean
                         rings.insert(mac, ring);
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -644,7 +647,7 @@ pub fn upsert_hostname_binding(
         }
     }
     let key = mac_to_filename(mac);
-    
+
     if hostname.is_empty() {
         // Remove binding if hostname is empty
         map.remove(&key);
@@ -700,43 +703,6 @@ pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, 
     Ok(out)
 }
 
-pub fn insert_metrics_batch(
-    base_dir: &str,
-    ts_ms: u64,
-    rows: &Vec<([u8; 6], MacTrafficStats)>,
-    traffic_retention_seconds: u32,
-) -> Result<(), anyhow::Error> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    for (mac, s) in rows.iter() {
-        let path = ring_file_path(base_dir, mac);
-        let mut f = init_ring_file(&path, traffic_retention_seconds)?;
-        let (_ver, cap) = read_header(&mut f)?;
-        let idx = calc_slot_index(ts_ms, cap);
-
-        let rec: [u64; SLOT_U64S] = [
-            ts_ms,
-            s.total_rx_rate,
-            s.total_tx_rate,
-            s.local_rx_rate,
-            s.local_tx_rate,
-            s.wide_rx_rate,
-            s.wide_tx_rate,
-            s.total_rx_bytes,
-            s.total_tx_bytes,
-            s.local_rx_bytes,
-            s.local_tx_bytes,
-            s.wide_rx_bytes,
-            s.wide_tx_bytes,
-            s.last_online_ts,
-        ];
-        write_slot(&f, idx, &rec)?;
-        f.sync_all()?;
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct MetricsRow {
     pub ts_ms: u64,
@@ -752,122 +718,6 @@ pub struct MetricsRow {
     pub local_tx_bytes: u64,
     pub wide_rx_bytes: u64,
     pub wide_tx_bytes: u64,
-}
-
-pub fn query_metrics(
-    base_dir: &str,
-    mac: &[u8; 6],
-    start_ms: u64,
-    end_ms: u64,
-) -> Result<Vec<MetricsRow>, anyhow::Error> {
-    let path = ring_file_path(base_dir, mac);
-    let mut rows_vec = Vec::new();
-    if !path.exists() {
-        return Ok(rows_vec);
-    }
-    let mut f = OpenOptions::new().read(true).open(&path)?;
-    let (ver, cap) = read_header(&mut f)?;
-    if ver != RING_VERSION {
-        // Skip old-version ring file
-        return Ok(rows_vec);
-    }
-    // Iterate over all slots and filter by range
-    for i in 0..(cap as u64) {
-        let rec = read_slot(&f, i)?;
-        let ts = rec[0];
-        if ts == 0 {
-            continue;
-        }
-        if ts < start_ms || ts > end_ms {
-            continue;
-        }
-        rows_vec.push(MetricsRow {
-            ts_ms: rec[0],
-            total_rx_rate: rec[1],
-            total_tx_rate: rec[2],
-            local_rx_rate: rec[3],
-            local_tx_rate: rec[4],
-            wide_rx_rate: rec[5],
-            wide_tx_rate: rec[6],
-            total_rx_bytes: rec[7],
-            total_tx_bytes: rec[8],
-            local_rx_bytes: rec[9],
-            local_tx_bytes: rec[10],
-            wide_rx_bytes: rec[11],
-            wide_tx_bytes: rec[12],
-        });
-    }
-    // Ascending order
-    rows_vec.sort_by_key(|r| r.ts_ms);
-    Ok(rows_vec)
-}
-
-
-/// Aggregate metrics for all devices by time window, returning rows sorted by timestamp in ascending order
-pub fn query_metrics_aggregate_all_with_window(
-    base_dir: &str,
-    start_ms: u64,
-    end_ms: u64,
-) -> Result<Vec<MetricsRow>, anyhow::Error> {
-    use std::collections::BTreeMap;
-
-    let dir = ring_dir(base_dir);
-    let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S]> = BTreeMap::new();
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
-            continue;
-        }
-
-        let mut f = OpenOptions::new().read(true).open(&path)?;
-        let (ver, cap) = read_header(&mut f)?;
-        if ver != RING_VERSION { continue; }
-        for i in 0..(cap as u64) {
-            let rec = read_slot(&f, i)?;
-            let ts = rec[0];
-            if ts == 0 {
-                continue;
-            }
-            if ts < start_ms || ts > end_ms {
-                continue;
-            }
-            let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
-            agg[0] = ts; // keep timestamp
-            // Aggregate only metric fields (exclude last_online_ts at index 13)
-            for j in 1..13 {
-                agg[j] = agg[j].saturating_add(rec[j]);
-            }
-        }
-    }
-
-    let rows_vec: Vec<MetricsRow> = ts_to_agg
-        .into_iter()
-        .map(|(_ts, rec)| MetricsRow {
-            ts_ms: rec[0],
-            total_rx_rate: rec[1],
-            total_tx_rate: rec[2],
-            local_rx_rate: rec[3],
-            local_tx_rate: rec[4],
-            wide_rx_rate: rec[5],
-            wide_tx_rate: rec[6],
-            total_rx_bytes: rec[7],
-            total_tx_bytes: rec[8],
-            local_rx_bytes: rec[9],
-            local_tx_bytes: rec[10],
-            wide_rx_bytes: rec[11],
-            wide_tx_bytes: rec[12],
-        })
-        .collect();
-
-    Ok(rows_vec)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -919,7 +769,9 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
 
         let mut f = OpenOptions::new().read(true).open(&path)?;
         let (ver, cap) = read_header(&mut f)?;
-        if ver != RING_VERSION { continue; }
+        if ver != RING_VERSION {
+            continue;
+        }
         let mut best: Option<[u64; SLOT_U64S]> = None;
         for i in 0..(cap as u64) {
             let rec = read_slot(&f, i)?;
