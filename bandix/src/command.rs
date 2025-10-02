@@ -160,13 +160,40 @@ async fn run_service(
 
     // Create module contexts based on enabled modules
     let mut module_contexts = Vec::new();
+    
+    // Create shared hostname bindings if any module needs it
+    let shared_hostname_bindings = if monitor_config.enable_traffic || monitor_config.enable_connection {
+        let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        
+        // Load existing hostname bindings from file
+        if let Ok(loaded_bindings) = crate::storage::traffic::load_hostname_bindings(&options.data_dir) {
+            let mut bindings_map = bindings.lock().unwrap();
+            for (mac, hostname) in loaded_bindings {
+                bindings_map.insert(mac, hostname);
+            }
+            log::info!("Loaded {} hostname bindings for shared use", bindings_map.len());
+        } else {
+            log::warn!("Failed to load hostname bindings, starting with empty bindings");
+        }
+        
+        Some(bindings)
+    } else {
+        None
+    };
 
     if monitor_config.enable_traffic {
-        module_contexts.push(ModuleContext::Traffic(TrafficModuleContext::new(
+        let mut traffic_ctx = TrafficModuleContext::new(
             options.clone(),
             ingress_ebpf,
             egress_ebpf,
-        )));
+        );
+        
+        // Replace the traffic module's hostname_bindings with the shared one
+        if let Some(ref shared_bindings) = shared_hostname_bindings {
+            traffic_ctx.hostname_bindings = std::sync::Arc::clone(shared_bindings);
+        }
+        
+        module_contexts.push(ModuleContext::Traffic(traffic_ctx));
     }
 
     if monitor_config.enable_dns {
@@ -174,8 +201,23 @@ async fn run_service(
     }
 
     if monitor_config.enable_connection {
+        let hostname_bindings = if let Some(shared_bindings) = shared_hostname_bindings {
+            shared_bindings
+        } else {
+            // Fallback: create independent bindings if traffic module is not enabled
+            let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            if let Ok(loaded_bindings) = crate::storage::traffic::load_hostname_bindings(&options.data_dir) {
+                let mut bindings_map = bindings.lock().unwrap();
+                for (mac, hostname) in loaded_bindings {
+                    bindings_map.insert(mac, hostname);
+                }
+            }
+            bindings
+        };
+        
         module_contexts.push(ModuleContext::Connection(ConnectionModuleContext::new(
             options.clone(),
+            hostname_bindings,
         )));
     }
 

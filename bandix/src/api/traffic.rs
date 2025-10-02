@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct DeviceInfo {
     pub ip: String,
     pub mac: String,
+    pub hostname: String,
     pub total_rx_bytes: u64,
     pub total_tx_bytes: u64,
     pub total_rx_rate: u64,
@@ -84,11 +85,32 @@ pub struct SetLimitRequest {
     pub wide_tx_rate_limit: u64,
 }
 
+/// Hostname binding information for API response
+#[derive(Serialize, Deserialize)]
+pub struct HostnameBinding {
+    pub mac: String,
+    pub hostname: String,
+}
+
+/// Hostname bindings response structure
+#[derive(Serialize, Deserialize)]
+pub struct HostnameBindingsResponse {
+    pub bindings: Vec<HostnameBinding>,
+}
+
+/// Set hostname binding request structure
+#[derive(Serialize, Deserialize)]
+pub struct SetHostnameBindingRequest {
+    pub mac: String,
+    pub hostname: String,
+}
+
 /// Traffic monitoring API handler
 #[derive(Clone)]
 pub struct TrafficApiHandler {
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
     rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+    hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     memory_ring_manager: Arc<MemoryRingManager>,
     options: Options,
 }
@@ -97,12 +119,14 @@ impl TrafficApiHandler {
     pub fn new(
         mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
         rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+        hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         memory_ring_manager: Arc<MemoryRingManager>,
         options: Options,
     ) -> Self {
         Self {
             mac_stats,
             rate_limits,
+            hostname_bindings,
             memory_ring_manager,
             options,
         }
@@ -115,6 +139,7 @@ impl TrafficApiHandler {
             "/api/traffic/devices",
             "/api/traffic/limits",
             "/api/traffic/metrics",
+            "/api/traffic/bindings",
         ]
     }
 
@@ -139,6 +164,13 @@ impl TrafficApiHandler {
                     _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
                 }
             }
+            "/api/traffic/bindings" => {
+                match request.method.as_str() {
+                    "GET" => self.handle_hostname_bindings().await,
+                    "POST" => self.handle_set_hostname_binding(request).await,
+                    _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+                }
+            }
             path if path.starts_with("/api/traffic/metrics") => {
                 if request.method == "GET" {
                     self.handle_metrics(request).await
@@ -155,6 +187,7 @@ impl TrafficApiHandler {
     /// Handle /api/devices endpoint
     async fn handle_devices(&self) -> Result<HttpResponse, anyhow::Error> {
         let stats_map = self.mac_stats.lock().unwrap();
+        let bindings_map = self.hostname_bindings.lock().unwrap();
 
         // Only show devices actually collected by eBPF (last_sample_ts > 0)
         let filtered: Vec<(&[u8; 6], &MacTrafficStats)> = stats_map
@@ -174,9 +207,13 @@ impl TrafficApiHandler {
                     stats.ip_address[0], stats.ip_address[1], stats.ip_address[2], stats.ip_address[3]
                 );
 
+                // Get hostname from bindings, fallback to empty string if not found
+                let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
+
                 DeviceInfo {
                     ip: ip_str,
                     mac: mac_str,
+                    hostname,
                     total_rx_bytes: stats.total_rx_bytes,
                     total_tx_bytes: stats.total_tx_bytes,
                     total_rx_rate: stats.total_rx_rate,
@@ -357,6 +394,80 @@ impl TrafficApiHandler {
             }
             Err(e) => Ok(HttpResponse::error(500, e.to_string())),
         }
+    }
+
+    /// Handle /api/traffic/bindings endpoint (GET)
+    async fn handle_hostname_bindings(&self) -> Result<HttpResponse, anyhow::Error> {
+        let bindings_map = self.hostname_bindings.lock().unwrap();
+        
+        let bindings: Vec<HostnameBinding> = bindings_map
+            .iter()
+            .map(|(mac, hostname)| {
+                let mac_str = format_mac(mac);
+                HostnameBinding {
+                    mac: mac_str,
+                    hostname: hostname.clone(),
+                }
+            })
+            .collect();
+
+        let response = HostnameBindingsResponse { bindings };
+        let api_response = ApiResponse::success(response);
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/bindings endpoint (POST)
+    async fn handle_set_hostname_binding(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request
+            .body
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+
+        // Parse JSON request body using serde
+        let set_binding_request: SetHostnameBindingRequest = serde_json::from_str(body)?;
+
+        let mac = crate::utils::network_utils::parse_mac_address(&set_binding_request.mac)?;
+
+        // Allow empty hostname (for clearing bindings)
+        let hostname = set_binding_request.hostname.trim();
+
+        // Update in-memory hostname bindings
+        {
+            let mut bindings = self.hostname_bindings.lock().unwrap();
+            if hostname.is_empty() {
+                // Remove binding if hostname is empty
+                bindings.remove(&mac);
+            } else {
+                // Set or update binding
+                bindings.insert(mac, hostname.to_string());
+            }
+        }
+
+        // Persist to file (storage layer handles empty hostname appropriately)
+        traffic::upsert_hostname_binding(
+            &self.options.data_dir,
+            &mac,
+            hostname,
+        )?;
+
+        // Log the change
+        if hostname.is_empty() {
+            log::info!(
+                "Hostname binding cleared for MAC: {}",
+                format_mac(&mac)
+            );
+        } else {
+            log::info!(
+                "Hostname binding set for MAC: {} -> {}",
+                format_mac(&mac),
+                hostname
+            );
+        }
+
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
     }
 
 }

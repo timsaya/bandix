@@ -261,18 +261,21 @@ pub fn parse_connection_stats(
 pub struct ConnectionModuleContext {
     pub options: Options,
     pub device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
+    pub hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     pub interface_ip: [u8; 4],
     pub subnet_mask: [u8; 4],
 }
 
 impl ConnectionModuleContext {
-    /// Create connection module context
-    pub fn new(options: Options) -> Self {
+    /// Create connection module context with shared hostname bindings
+    pub fn new(options: Options, hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>) -> Self {
         // Get network interface information
         let (interface_ip, subnet_mask) = network_utils::get_interface_info(&options.iface).unwrap();
+        
         Self {
             options,
             device_connection_stats: Arc::new(Mutex::new(GlobalConnectionStats::default())),
+            hostname_bindings,  // Use the shared hostname_bindings
             interface_ip,
             subnet_mask,
         }

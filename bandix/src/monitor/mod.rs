@@ -36,6 +36,7 @@ pub struct TrafficModuleContext {
     pub mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
     pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
     pub rate_limits: Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+    pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
     pub memory_ring_manager: Arc<MemoryRingManager>,
     pub ingress_ebpf: Option<aya::Ebpf>,
     pub egress_ebpf: Option<aya::Ebpf>,
@@ -56,11 +57,15 @@ impl TrafficModuleContext {
             log::info!("Successfully loaded existing ring files into memory");
         }
         
+        // Create shared hostname bindings - this will be used by both traffic and connection modules
+        let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
+        
         Self {
             options,
             mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
             baselines: Arc::new(Mutex::new(StdHashMap::new())),
             rate_limits: Arc::new(Mutex::new(StdHashMap::new())),
+            hostname_bindings,
             memory_ring_manager,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
@@ -98,6 +103,7 @@ impl Clone for ModuleContext {
                 mac_stats: Arc::clone(&ctx.mac_stats),
                 baselines: Arc::clone(&ctx.baselines),
                 rate_limits: Arc::clone(&ctx.rate_limits),
+                hostname_bindings: Arc::clone(&ctx.hostname_bindings),
                 memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
                 ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
                 egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
@@ -132,6 +138,9 @@ impl ModuleType {
                         rl.insert(mac, [rx, tx]);
                     }
                 }
+
+                // Note: hostname bindings are now loaded and shared in command.rs,
+                // so we don't need to load them here again
 
                 // Rebuild ring files (if needed)
                 let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
@@ -180,6 +189,7 @@ impl ModuleType {
                 let handler = ApiHandler::Traffic(TrafficApiHandler::new(
                     Arc::clone(&traffic_ctx.mac_stats),
                     Arc::clone(&traffic_ctx.rate_limits),
+                    Arc::clone(&traffic_ctx.hostname_bindings),
                     Arc::clone(&traffic_ctx.memory_ring_manager),
                     traffic_ctx.options.clone(),
                 ));
@@ -203,9 +213,10 @@ impl ModuleType {
                 use crate::api::{connection::ConnectionApiHandler, ApiHandler};
 
                 // Create connection API handler
-                let handler = ApiHandler::Connection(ConnectionApiHandler::new(Arc::clone(
-                    &connection_ctx.device_connection_stats,
-                )));
+                let handler = ApiHandler::Connection(ConnectionApiHandler::new(
+                    Arc::clone(&connection_ctx.device_connection_stats),
+                    Arc::clone(&connection_ctx.hostname_bindings),
+                ));
 
                 // Register with API router
                 api_router.register_handler(handler);

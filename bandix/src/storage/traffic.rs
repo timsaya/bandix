@@ -343,6 +343,9 @@ fn ring_dir(base: &str) -> PathBuf {
 fn limits_path(base: &str) -> PathBuf {
     Path::new(base).join("rate_limits.txt")
 }
+fn bindings_path(base: &str) -> PathBuf {
+    Path::new(base).join("hostname_bindings.txt")
+}
 fn ring_file_path(base: &str, mac: &[u8; 6]) -> PathBuf {
     ring_dir(base).join(format!("{}.ring", mac_to_filename(mac)))
 }
@@ -473,12 +476,16 @@ fn read_slot(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S], anyhow::Error> 
 }
 
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
-    // Create directory and empty rate limit file
+    // Create directory and empty rate limit and hostname binding files
     fs::create_dir_all(ring_dir(base_dir))
         .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
     let limits = limits_path(base_dir);
     if !limits.exists() {
         File::create(&limits)?;
+    }
+    let bindings = bindings_path(base_dir);
+    if !bindings.exists() {
+        File::create(&bindings)?;
     }
     Ok(())
 }
@@ -612,6 +619,85 @@ pub fn upsert_limit(
     }
     fs::write(&path, buf)?;
     Ok(())
+}
+
+pub fn upsert_hostname_binding(
+    base_dir: &str,
+    mac: &[u8; 6],
+    hostname: &str,
+) -> Result<(), anyhow::Error> {
+    let path = bindings_path(base_dir);
+    ensure_parent_dir(&path)?;
+    let mut map: std::collections::BTreeMap<String, String> = Default::default();
+    if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            map.insert(parts[0].to_string(), parts[1].to_string());
+        }
+    }
+    let key = mac_to_filename(mac);
+    
+    if hostname.is_empty() {
+        // Remove binding if hostname is empty
+        map.remove(&key);
+    } else {
+        // Set or update binding
+        map.insert(key.clone(), hostname.to_string());
+    }
+
+    let mut buf = String::new();
+    buf.push_str("# mac hostname\n");
+    for (k, hostname) in map {
+        buf.push_str(&format!("{} {}\n", k, hostname));
+    }
+    fs::write(&path, buf)?;
+    Ok(())
+}
+
+pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, anyhow::Error> {
+    let path = bindings_path(base_dir);
+    let mut out = Vec::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let content = fs::read_to_string(&path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let mac_str = parts[0];
+        let hostname = parts[1];
+        if mac_str.len() != 12 {
+            continue;
+        }
+        let mut mac = [0u8; 6];
+        let mut ok = true;
+        for i in 0..6 {
+            if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
+                mac[i] = v;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            out.push((mac, hostname.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 pub fn insert_metrics_batch(

@@ -3,18 +3,24 @@ use crate::monitor::connection::GlobalConnectionStats;
 use anyhow::Result;
 use bandix_common::ConnectionStats;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Connection statistics API handler
 #[derive(Clone)]
 pub struct ConnectionApiHandler {
     device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
+    hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
 }
 
 impl ConnectionApiHandler {
-    pub fn new(device_connection_stats: Arc<Mutex<GlobalConnectionStats>>) -> Self {
+    pub fn new(
+        device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
+        hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
+    ) -> Self {
         Self {
             device_connection_stats,
+            hostname_bindings,
         }
     }
 
@@ -27,21 +33,28 @@ impl ConnectionApiHandler {
     /// Get device connection statistics with formatted output
     fn get_device_connection_stats_formatted(&self) -> Result<DeviceConnectionStatsResponse> {
         let stats = self.get_device_connection_stats()?;
+        let bindings_map = self.hostname_bindings.lock().unwrap();
 
         // Format device statistics for API response and sort by IP address
         let mut devices: Vec<DeviceConnectionInfo> = stats
             .device_stats
             .iter()
-            .map(|(mac, device_stats)| DeviceConnectionInfo {
-                mac_address: format_mac(mac),
-                ip_address: format_ip(&device_stats.ip_address),
-                tcp_connections: device_stats.tcp_connections,
-                udp_connections: device_stats.udp_connections,
-                established_tcp: device_stats.established_tcp,
-                time_wait_tcp: device_stats.time_wait_tcp,
-                close_wait_tcp: device_stats.close_wait_tcp,
-                total_connections: device_stats.total_connections,
-                last_updated: device_stats.last_updated,
+            .map(|(mac, device_stats)| {
+                // Get hostname from bindings, fallback to empty string if not found
+                let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
+                
+                DeviceConnectionInfo {
+                    mac_address: format_mac(mac),
+                    ip_address: format_ip(&device_stats.ip_address),
+                    hostname,
+                    tcp_connections: device_stats.tcp_connections,
+                    udp_connections: device_stats.udp_connections,
+                    established_tcp: device_stats.established_tcp,
+                    time_wait_tcp: device_stats.time_wait_tcp,
+                    close_wait_tcp: device_stats.close_wait_tcp,
+                    total_connections: device_stats.total_connections,
+                    last_updated: device_stats.last_updated,
+                }
             })
             .collect();
 
@@ -68,6 +81,7 @@ impl ConnectionApiHandler {
 pub struct DeviceConnectionInfo {
     pub mac_address: String,
     pub ip_address: String,
+    pub hostname: String,
     pub tcp_connections: u32,
     pub udp_connections: u32,
     pub established_tcp: u32,
