@@ -58,36 +58,117 @@ for TARGET in "${TARGETS[@]}"; do
 done
 
 
+# Build statistics
+SUCCESS_COUNT=0
+FAILED_COUNT=0
+FAILED_TARGETS=()
+
+echo "Starting build for all target platforms..."
+echo "========================================"
+
 # Build for each target platform
 for TARGET in "${TARGETS[@]}"; do
+  echo ""
   echo "Starting build for $TARGET..."
   
   # Build release version
-  if ! cargo build --release --target "$TARGET"; then
-    echo "cargo build failed, trying cargo zigbuild ..."
-    cargo zigbuild --release --target "$TARGET"
+  if cargo build --release --target "$TARGET" 2>/dev/null; then
+    echo "✓ Build successful: $TARGET"
+    
+    # Create release package directory
+    TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
+    mkdir -p $TARGET_DIR
+    
+    # Copy binary file
+    if [ -f "target/$TARGET/release/bandix" ]; then
+      cp "target/$TARGET/release/bandix" $TARGET_DIR/
+      
+      # Copy other necessary files
+      cp LICENSE $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: LICENSE file does not exist"
+      cp README.md $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: README.md file does not exist"
+      
+      # Create compressed package
+      echo "Creating compressed package..."
+      tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET" > /dev/null
+      
+      # Clean up temporary files
+      rm -rf $TARGET_DIR
+      
+      echo "✓ Completed $TARGET build and packaging"
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      echo "✗ Binary file does not exist: target/$TARGET/release/bandix"
+      FAILED_COUNT=$((FAILED_COUNT + 1))
+      FAILED_TARGETS+=("$TARGET")
+    fi
+  else
+    echo "✗ cargo build failed, trying cargo zigbuild..."
+    if cargo zigbuild --release --target "$TARGET" 2>/dev/null; then
+      echo "✓ zigbuild successful: $TARGET"
+      
+      # Create release package directory
+      TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
+      mkdir -p $TARGET_DIR
+      
+      # Copy binary file
+      if [ -f "target/$TARGET/release/bandix" ]; then
+        cp "target/$TARGET/release/bandix" $TARGET_DIR/
+        
+        # Copy other necessary files
+        cp LICENSE $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: LICENSE file does not exist"
+        cp README.md $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: README.md file does not exist"
+        
+        # Create compressed package
+        echo "Creating compressed package..."
+        tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET" > /dev/null
+        
+        # Clean up temporary files
+        rm -rf $TARGET_DIR
+        
+        echo "✓ Completed $TARGET build and packaging"
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+      else
+        echo "✗ Binary file does not exist after zigbuild: target/$TARGET/release/bandix"
+        FAILED_COUNT=$((FAILED_COUNT + 1))
+        FAILED_TARGETS+=("$TARGET")
+      fi
+    else
+      echo "✗ Both cargo build and zigbuild failed: $TARGET"
+      FAILED_COUNT=$((FAILED_COUNT + 1))
+      FAILED_TARGETS+=("$TARGET")
+    fi
   fi
   
-  # Create release package directory
-  TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
-  mkdir -p $TARGET_DIR
-  
-  # Copy binary file
-  cp "target/$TARGET/release/bandix" $TARGET_DIR/
-  
-  # Copy other necessary files
-  cp LICENSE $TARGET_DIR/
-  cp README.md $TARGET_DIR/
-  
-  # Create compressed package
-  echo "Creating compressed package..."
-  tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET"
-  
-  # Clean up temporary files
-  rm -rf $TARGET_DIR
-  
-  echo "Completed $TARGET build"
+  echo "----------------------------------------"
 done
 
-echo "All platform builds completed!"
-echo "Release packages located in $RELEASE_DIR directory" 
+echo ""
+echo "Build completion summary:"
+echo "========================================"
+echo "✓ Successfully built: $SUCCESS_COUNT targets"
+if [ $FAILED_COUNT -gt 0 ]; then
+  echo "✗ Failed builds: $FAILED_COUNT targets"
+  echo "Failed targets:"
+  for target in "${FAILED_TARGETS[@]}"; do
+    echo "  - $target"
+  done
+fi
+
+echo ""
+echo "Release packages located in $RELEASE_DIR directory"
+if [ $SUCCESS_COUNT -gt 0 ]; then
+  echo "Generated files:"
+  ls -la $RELEASE_DIR/*.tar.gz 2>/dev/null | sed 's/^/  /' || echo "  No compressed packages generated"
+fi
+
+# Display disk usage
+echo "Disk usage:"
+du -sh $RELEASE_DIR 2>/dev/null | sed 's/^/  Total size: /'
+
+if [ $FAILED_COUNT -eq 0 ]; then
+  echo "🎉 All platforms built successfully!"
+  exit 0
+else
+  echo "⚠ Some platforms failed to build, please check error messages"
+  exit 1
+fi 

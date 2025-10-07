@@ -88,7 +88,8 @@ for TARGET in "${MIPS_TARGETS[@]}"; do
     print_info "Starting build for $TARGET..."
     
     # Build release version (using nightly toolchain and build-std)
-    if cargo +nightly build -Z build-std --release --target "$TARGET"; then
+    print_info "Attempting build with cargo +nightly build -Z build-std..."
+    if cargo +nightly build -Z build-std --release --target "$TARGET" 2>/dev/null; then
         print_success "Build successful: $TARGET"
         
         # Create release package directory
@@ -118,13 +119,54 @@ for TARGET in "${MIPS_TARGETS[@]}"; do
             SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
         else
             print_error "Binary file does not exist: target/$TARGET/release/bandix"
+            print_error "Build may have succeeded but binary was not generated"
             FAILED_COUNT=$((FAILED_COUNT + 1))
             FAILED_TARGETS+=("$TARGET")
         fi
     else
-        print_error "Build failed: $TARGET"
-        FAILED_COUNT=$((FAILED_COUNT + 1))
-        FAILED_TARGETS+=("$TARGET")
+        print_error "cargo +nightly build failed, trying alternative build methods..."
+        
+        # Try with regular cargo build
+        print_info "Trying regular cargo build..."
+        if cargo build --release --target "$TARGET" 2>/dev/null; then
+            print_success "Regular cargo build successful: $TARGET"
+            
+            # Create release package directory
+            TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
+            mkdir -p $TARGET_DIR
+            
+            # Copy binary file
+            if [ -f "target/$TARGET/release/bandix" ]; then
+                cp "target/$TARGET/release/bandix" $TARGET_DIR/
+                
+                # Copy other necessary files
+                cp LICENSE $TARGET_DIR/ 2>/dev/null || print_warning "LICENSE file does not exist"
+                cp README.md $TARGET_DIR/ 2>/dev/null || print_warning "README.md file does not exist"
+                
+                # Display binary file information
+                print_info "Binary file information:"
+                file "target/$TARGET/release/bandix" | sed 's/^/  /'
+                
+                # Create compressed package
+                print_info "Creating compressed package..."
+                tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET" > /dev/null
+                
+                # Clean up temporary files
+                rm -rf $TARGET_DIR
+                
+                print_success "Completed $TARGET build and packaging"
+                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+                print_error "Binary file does not exist after regular cargo build: target/$TARGET/release/bandix"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                FAILED_TARGETS+=("$TARGET")
+            fi
+        else
+            print_error "All build methods failed: $TARGET"
+            print_error "This target may not be supported or requires additional dependencies"
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+            FAILED_TARGETS+=("$TARGET")
+        fi
     fi
     
     echo "----------------------------------------"
