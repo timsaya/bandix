@@ -703,6 +703,67 @@ pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, 
     Ok(out)
 }
 
+/// Load hostname bindings from DHCP leases file
+/// File format: timestamp mac_address ip_address hostname other_info
+/// Example: 1760139608 06:c9:9d:d2:62:38 192.168.2.154 MacBookAir 01:06:c9:9d:d2:62:38
+pub fn load_dhcp_leases(dhcp_leases_path: &str) -> Result<Vec<([u8; 6], String)>, anyhow::Error> {
+    let path = std::path::Path::new(dhcp_leases_path);
+    let mut out = Vec::new();
+    
+    if !path.exists() {
+        return Ok(out);
+    }
+    
+    let content = fs::read_to_string(&path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        
+        // parts[0] = timestamp
+        // parts[1] = MAC address (format: 06:c9:9d:d2:62:38)
+        // parts[2] = IP address
+        // parts[3] = hostname
+        
+        let mac_str = parts[1];
+        let hostname = parts[3];
+        
+        // Skip if hostname is "*" (means no hostname)
+        if hostname == "*" {
+            continue;
+        }
+        
+        // Parse MAC address from format 06:c9:9d:d2:62:38
+        let mac_parts: Vec<&str> = mac_str.split(':').collect();
+        if mac_parts.len() != 6 {
+            continue;
+        }
+        
+        let mut mac = [0u8; 6];
+        let mut ok = true;
+        for i in 0..6 {
+            if let Ok(v) = u8::from_str_radix(mac_parts[i], 16) {
+                mac[i] = v;
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        
+        if ok {
+            out.push((mac, hostname.to_string()));
+        }
+    }
+    
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MetricsRow {
     pub ts_ms: u64,

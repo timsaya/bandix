@@ -165,15 +165,33 @@ async fn run_service(
     let shared_hostname_bindings = if monitor_config.enable_traffic || monitor_config.enable_connection {
         let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         
-        // Load existing hostname bindings from file
+        // Load existing hostname bindings from file (priority source)
+        let mut bindings_count = 0;
         if let Ok(loaded_bindings) = crate::storage::traffic::load_hostname_bindings(&options.data_dir) {
             let mut bindings_map = bindings.lock().unwrap();
             for (mac, hostname) in loaded_bindings {
                 bindings_map.insert(mac, hostname);
+                bindings_count += 1;
             }
-            log::info!("Loaded {} hostname bindings for shared use", bindings_map.len());
+            log::info!("Loaded {} hostname bindings from saved file", bindings_count);
         } else {
-            log::warn!("Failed to load hostname bindings, starting with empty bindings");
+            log::warn!("Failed to load hostname bindings from saved file");
+        }
+        
+        // Load additional hostname bindings from DHCP leases (fallback source)
+        if let Ok(dhcp_bindings) = crate::storage::traffic::load_dhcp_leases("/tmp/dhcp.leases") {
+            let mut bindings_map = bindings.lock().unwrap();
+            let mut dhcp_count = 0;
+            for (mac, hostname) in dhcp_bindings {
+                // Only add if MAC address doesn't already exist (saved bindings take priority)
+                if !bindings_map.contains_key(&mac) {
+                    bindings_map.insert(mac, hostname);
+                    dhcp_count += 1;
+                }
+            }
+            if dhcp_count > 0 {
+                log::info!("Loaded {} additional hostname bindings from /tmp/dhcp.leases", dhcp_count);
+            }
         }
         
         Some(bindings)
@@ -206,12 +224,25 @@ async fn run_service(
         } else {
             // Fallback: create independent bindings if traffic module is not enabled
             let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            
+            // Load from saved bindings file
             if let Ok(loaded_bindings) = crate::storage::traffic::load_hostname_bindings(&options.data_dir) {
                 let mut bindings_map = bindings.lock().unwrap();
                 for (mac, hostname) in loaded_bindings {
                     bindings_map.insert(mac, hostname);
                 }
             }
+            
+            // Load additional bindings from DHCP leases
+            if let Ok(dhcp_bindings) = crate::storage::traffic::load_dhcp_leases("/tmp/dhcp.leases") {
+                let mut bindings_map = bindings.lock().unwrap();
+                for (mac, hostname) in dhcp_bindings {
+                    if !bindings_map.contains_key(&mac) {
+                        bindings_map.insert(mac, hostname);
+                    }
+                }
+            }
+            
             bindings
         };
         
