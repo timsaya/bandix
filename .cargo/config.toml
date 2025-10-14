@@ -75,9 +75,27 @@ rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 linker = "mipsel-linux-gnu-gcc"
 rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
+# [target.mipsel-unknown-linux-musl]
+# linker = "/opt/musl/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
+# rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+
 [target.mipsel-unknown-linux-musl]
 linker = "/opt/musl/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+rustflags = [
+    "-C",
+    "target-feature=-crt-static",
+    "-C",
+    "link-arg=-dynamic",
+    "-L",
+    "/opt/musl/mipsel-linux-musl-cross/mipsel-linux-musl/lib",
+    "-L",
+    "/opt/musl/mipsel-linux-musl-cross/lib/gcc/mipsel-linux-musl/11.2.1",
+    "-C",
+    "link-arg=-Wl,--dynamic-linker=/lib/ld-musl-mipsel-sf.so.1",
+    "-C",
+    "panic=unwind",
+]
+
 
 [target.mips64el-unknown-linux-gnuabi64]
 linker = "mips64el-linux-gnuabi64-gcc"
@@ -86,4 +104,3 @@ rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 [target.mips64el-unknown-linux-muslabi64]
 linker = "mips64el-linux-muslabi64-gcc"
 rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
-
