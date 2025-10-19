@@ -64,6 +64,13 @@ pub struct Options {
     #[clap(
         long,
         default_value = "false",
+        help = "Enable traffic history data persistence to disk (disabled by default, data only stored in memory)"
+    )]
+    pub traffic_persist_history: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
         help = "Enable DNS monitoring module (not yet implemented)"
     )]
     pub enable_dns: bool,

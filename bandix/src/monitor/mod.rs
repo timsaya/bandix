@@ -50,11 +50,15 @@ impl TrafficModuleContext {
             options.traffic_retention_seconds,
         ));
         
-        // Load existing ring files into memory at startup
-        if let Err(e) = memory_ring_manager.load_from_files() {
-            log::error!("Failed to load ring files into memory at startup: {}", e);
+        // Load existing ring files into memory at startup (only if persistence is enabled)
+        if options.traffic_persist_history {
+            if let Err(e) = memory_ring_manager.load_from_files() {
+                log::error!("Failed to load ring files into memory at startup: {}", e);
+            } else {
+                log::info!("Successfully loaded existing ring files into memory");
+            }
         } else {
-            log::info!("Successfully loaded existing ring files into memory");
+            log::info!("Traffic history persistence disabled, starting with empty memory ring");
         }
         
         // Create shared hostname bindings - this will be used by both traffic and connection modules
@@ -142,24 +146,27 @@ impl ModuleType {
                 // Note: hostname bindings are now loaded and shared in command.rs,
                 // so we don't need to load them here again
 
-                // Rebuild ring files (if needed)
-                let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
-                    &traffic_ctx.options.data_dir,
-                    traffic_ctx.options.traffic_retention_seconds,
-                )?;
+                // Rebuild ring files and load baseline data (only if persistence is enabled)
+                if traffic_ctx.options.traffic_persist_history {
+                    // Rebuild ring files (if needed)
+                    let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
+                        &traffic_ctx.options.data_dir,
+                        traffic_ctx.options.traffic_retention_seconds,
+                    )?;
 
-                // Load baseline data
-                let preloaded_baselines = if rebuilt {
-                    Vec::new()
-                } else {
-                    crate::storage::traffic::load_latest_totals(&traffic_ctx.options.data_dir)?
-                };
+                    // Load baseline data
+                    let preloaded_baselines = if rebuilt {
+                        Vec::new()
+                    } else {
+                        crate::storage::traffic::load_latest_totals(&traffic_ctx.options.data_dir)?
+                    };
 
-                // Apply preloaded baseline data
-                {
-                    let mut b = traffic_ctx.baselines.lock().unwrap();
-                    for (mac, base) in preloaded_baselines {
-                        b.insert(mac, base);
+                    // Apply preloaded baseline data
+                    {
+                        let mut b = traffic_ctx.baselines.lock().unwrap();
+                        for (mac, base) in preloaded_baselines {
+                            b.insert(mac, base);
+                        }
                     }
                 }
                 Ok(())

@@ -39,7 +39,23 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        
+        // Only create flush interval if persistence is enabled
+        if ctx.options.traffic_persist_history {
+            self.start_monitoring_loop_with_persist(ctx, interval, shutdown_notify).await
+        } else {
+            self.start_monitoring_loop_memory_only(ctx, interval, shutdown_notify).await
+        }
+    }
+
+    /// Traffic monitoring loop with persistence enabled
+    async fn start_monitoring_loop_with_persist(
+        &self,
+        ctx: &mut TrafficModuleContext,
+        mut interval: tokio::time::Interval,
+        shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
         let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_secs(
             ctx.options.traffic_flush_interval_seconds as u64
         ));
@@ -47,44 +63,7 @@ impl TrafficMonitor {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Get eBPF programs
-                    let (mut ingress_ebpf, mut egress_ebpf) = match (ctx.ingress_ebpf.take(), ctx.egress_ebpf.take()) {
-                        (Some(ingress), Some(egress)) => (ingress, egress),
-                        _ => {
-                            log::error!("eBPF programs not initialized, skipping this monitoring cycle");
-                            continue;
-                        }
-                    };
-
-                    // Process traffic data
-                    if let Err(e) = self.process_traffic_data(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
-                        log::error!("Failed to process traffic data: {}", e);
-                    }
-
-                    // Update rate limits
-                    if let Err(e) = self.apply_rate_limits(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
-                        log::error!("Failed to update rate limits: {}", e);
-                    }
-
-                    // Put eBPF programs back into context
-                    ctx.ingress_ebpf = Some(ingress_ebpf);
-                    ctx.egress_ebpf = Some(egress_ebpf);
-
-                    // Execute metrics persistence to memory ring
-                    use std::time::{SystemTime, UNIX_EPOCH};
-                    let ts_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(std::time::Duration::from_secs(0))
-                        .as_millis() as u64;
-
-                    let snapshot: Vec<([u8; 6], MacTrafficStats)> = {
-                        let stats = ctx.mac_stats.lock().unwrap();
-                        stats.iter().map(|(k, v)| (*k, *v)).collect()
-                    };
-
-                    if let Err(e) = ctx.memory_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
-                        log::error!("metrics persist to memory ring error: {}", e);
-                    }
+                    self.process_monitoring_cycle(ctx).await;
                 }
                 _ = flush_interval.tick() => {
                     // Flush dirty rings to disk at configured interval
@@ -109,6 +88,70 @@ impl TrafficMonitor {
         }
 
         Ok(())
+    }
+
+    /// Traffic monitoring loop with memory-only (no persistence)
+    async fn start_monitoring_loop_memory_only(
+        &self,
+        ctx: &mut TrafficModuleContext,
+        mut interval: tokio::time::Interval,
+        shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    self.process_monitoring_cycle(ctx).await;
+                }
+                _ = shutdown_notify.notified() => {
+                    log::info!("Traffic monitoring module received shutdown signal, stopping...");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process one monitoring cycle (extract eBPF data and update stats)
+    async fn process_monitoring_cycle(&self, ctx: &mut TrafficModuleContext) {
+        // Get eBPF programs
+        let (mut ingress_ebpf, mut egress_ebpf) = match (ctx.ingress_ebpf.take(), ctx.egress_ebpf.take()) {
+            (Some(ingress), Some(egress)) => (ingress, egress),
+            _ => {
+                log::error!("eBPF programs not initialized, skipping this monitoring cycle");
+                return;
+            }
+        };
+
+        // Process traffic data
+        if let Err(e) = self.process_traffic_data(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
+            log::error!("Failed to process traffic data: {}", e);
+        }
+
+        // Update rate limits
+        if let Err(e) = self.apply_rate_limits(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
+            log::error!("Failed to update rate limits: {}", e);
+        }
+
+        // Put eBPF programs back into context
+        ctx.ingress_ebpf = Some(ingress_ebpf);
+        ctx.egress_ebpf = Some(egress_ebpf);
+
+        // Execute metrics persistence to memory ring
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::from_secs(0))
+            .as_millis() as u64;
+
+        let snapshot: Vec<([u8; 6], MacTrafficStats)> = {
+            let stats = ctx.mac_stats.lock().unwrap();
+            stats.iter().map(|(k, v)| (*k, *v)).collect()
+        };
+
+        if let Err(e) = ctx.memory_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
+            log::error!("metrics persist to memory ring error: {}", e);
+        }
     }
 }
 
