@@ -36,7 +36,7 @@ pub mod network_utils {
     use anyhow::Result;
     use std::collections::HashMap;
     use std::fs;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::process::Command;
     use std::str::FromStr;
 
@@ -277,6 +277,235 @@ pub mod network_utils {
         network1 == network2
     }
 
+    /// Get IPv6 address information for a specific interface
+    /// Returns a list of (IPv6 address, prefix length) tuples
+    pub fn get_interface_ipv6_info(interface: &str) -> Vec<([u8; 16], u8)> {
+        let mut ipv6_addresses = Vec::new();
+
+        if let Ok(output) = Command::new("ip")
+            .args(["-6", "addr", "show", interface])
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                // Look for "inet6 <addr>/<prefix_len> scope ..."
+                if line.trim().starts_with("inet6 ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let addr_with_prefix = parts[1];
+                        let addr_parts: Vec<&str> = addr_with_prefix.split('/').collect();
+                        if addr_parts.len() == 2 {
+                            if let Ok(ipv6) = Ipv6Addr::from_str(addr_parts[0]) {
+                                if let Ok(prefix_len) = addr_parts[1].parse::<u8>() {
+                                    ipv6_addresses.push((ipv6.octets(), prefix_len));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ipv6_addresses
+    }
+
+    /// Get IPv6 neighbor table (similar to ARP for IPv4)
+    /// Returns mapping from MAC address to list of IPv6 addresses
+    pub fn get_ipv6_neighbors() -> Result<HashMap<[u8; 6], Vec<[u8; 16]>>> {
+        let mut mapping: HashMap<[u8; 6], Vec<[u8; 16]>> = HashMap::new();
+
+        // Method 1: Parse ip -6 neigh show
+        if let Ok(output) = Command::new("ip")
+            .args(["-6", "neigh", "show"])
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                // Format: <ipv6> dev <iface> lladdr <mac> <state>
+                // Example: 2001:db8::1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    // Try to parse IPv6 address (first part)
+                    if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
+                        // Find "lladdr" keyword
+                        if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
+                            if lladdr_pos + 1 < parts.len() {
+                                if let Ok(mac) = parse_mac_address(parts[lladdr_pos + 1]) {
+                                    mapping.entry(mac)
+                                        .or_insert_with(Vec::new)
+                                        .push(ipv6.octets());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 2: Add local interface IPv6 addresses
+        // Get all network interfaces and their IPv6 addresses
+        if let Ok(output) = Command::new("ip")
+            .args(["-6", "addr", "show"])
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = output_str.lines().collect();
+            let mut current_interface: Option<String> = None;
+
+            for line in lines {
+                // Look for interface name line
+                if !line.starts_with(' ') && line.contains(": <") {
+                    let parts: Vec<&str> = line.split(':').collect();
+                    if parts.len() >= 2 {
+                        current_interface = Some(parts[1].trim().to_string());
+                    }
+                } else if line.trim().starts_with("inet6 ") {
+                    // Parse IPv6 address
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let addr_with_prefix = parts[1];
+                        let addr_parts: Vec<&str> = addr_with_prefix.split('/').collect();
+                        if let Ok(ipv6) = Ipv6Addr::from_str(addr_parts[0]) {
+                            // Skip loopback and link-local addresses for now
+                            // (can be included if needed)
+                            let ipv6_bytes = ipv6.octets();
+                            // Skip ::1 (loopback)
+                            if ipv6_bytes == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] {
+                                continue;
+                            }
+
+                            // Get MAC address for this interface
+                            if let Some(ref iface) = current_interface {
+                                if let Some(mac) = get_interface_mac_address(iface) {
+                                    mapping.entry(mac)
+                                        .or_insert_with(Vec::new)
+                                        .push(ipv6_bytes);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(mapping)
+    }
+
+    /// Format IPv6 address from bytes
+    pub fn format_ipv6(bytes: &[u8; 16]) -> String {
+        let ipv6 = Ipv6Addr::from(*bytes);
+        ipv6.to_string()
+    }
+
+    /// Format IPv6 address with privacy protection for public addresses
+    /// LAN addresses (ULA, Link-Local) are shown in full
+    /// WAN addresses (GUA) are partially masked with asterisks
+    pub fn format_ipv6_with_privacy(bytes: &[u8; 16]) -> String {
+        let addr_type = classify_ipv6_address(bytes);
+        let ipv6 = Ipv6Addr::from(*bytes);
+        let full_addr = ipv6.to_string();
+
+        match addr_type {
+            // For WAN addresses (Global Unicast), mask the middle part
+            Ipv6AddressType::GlobalUnicast => {
+                // Parse the address into segments
+                let segments: Vec<&str> = full_addr.split(':').collect();
+                
+                if segments.len() >= 4 {
+                    // Show first 2 segments and last 1 segment, mask the middle
+                    // Example: 2408:820c:a93d:44b0:e251:d8ff:fe11:b45c
+                    //       -> 2408:820c:****:****:****:****:****:b45c
+                    let first_part = segments[..2].join(":");
+                    let last_part = segments[segments.len()-1];
+                    format!("{}:****:****:****:****:****:{}", first_part, last_part)
+                } else {
+                    // Fallback: mask everything except first and last
+                    format!("{}:****:****", segments[0])
+                }
+            }
+            // For LAN addresses, show in full
+            _ => full_addr,
+        }
+    }
+
+    /// IPv6 address type and network classification
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Ipv6AddressType {
+        LinkLocal,      // fe80::/10 - Link-Local
+        UniqueLocal,    // fc00::/7 (fd00::/8) - ULA
+        GlobalUnicast,  // 2000::/3 - Global Unicast
+        Loopback,       // ::1/128
+        Multicast,      // ff00::/8
+        Unspecified,    // ::/128
+        Other,
+    }
+
+    impl Ipv6AddressType {
+        pub fn type_name(&self) -> &'static str {
+            match self {
+                Ipv6AddressType::LinkLocal => "Link-Local",
+                Ipv6AddressType::UniqueLocal => "ULA",
+                Ipv6AddressType::GlobalUnicast => "GUA",
+                Ipv6AddressType::Loopback => "Loopback",
+                Ipv6AddressType::Multicast => "Multicast",
+                Ipv6AddressType::Unspecified => "Unspecified",
+                Ipv6AddressType::Other => "Other",
+            }
+        }
+
+        pub fn network_scope(&self) -> &'static str {
+            match self {
+                Ipv6AddressType::LinkLocal => "LAN",
+                Ipv6AddressType::UniqueLocal => "LAN",
+                Ipv6AddressType::GlobalUnicast => "WAN",
+                Ipv6AddressType::Loopback => "Local",
+                Ipv6AddressType::Multicast => "Special",
+                Ipv6AddressType::Unspecified => "Special",
+                Ipv6AddressType::Other => "Unknown",
+            }
+        }
+    }
+
+    /// Classify IPv6 address type based on RFC standards
+    pub fn classify_ipv6_address(bytes: &[u8; 16]) -> Ipv6AddressType {
+        // Check for unspecified address ::/128
+        if bytes == &[0u8; 16] {
+            return Ipv6AddressType::Unspecified;
+        }
+
+        // Check for loopback address ::1/128
+        if bytes[0..15] == [0u8; 15] && bytes[15] == 1 {
+            return Ipv6AddressType::Loopback;
+        }
+
+        // Check for multicast ff00::/8
+        if bytes[0] == 0xff {
+            return Ipv6AddressType::Multicast;
+        }
+
+        // Check for link-local fe80::/10
+        // fe80::/10 means first 10 bits are 1111111010
+        // fe80 = 1111 1110 1000 0000
+        // feb0 = 1111 1110 1011 1111 (upper boundary)
+        if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 {
+            return Ipv6AddressType::LinkLocal;
+        }
+
+        // Check for unique local address fc00::/7 (actually fd00::/8 in practice)
+        // fc00::/7 means first 7 bits are 1111110
+        if (bytes[0] & 0xfe) == 0xfc {
+            return Ipv6AddressType::UniqueLocal;
+        }
+
+        // Check for global unicast 2000::/3
+        // 2000::/3 means first 3 bits are 001
+        if (bytes[0] & 0xe0) == 0x20 {
+            return Ipv6AddressType::GlobalUnicast;
+        }
+
+        Ipv6AddressType::Other
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -313,6 +542,66 @@ pub mod network_utils {
             assert!(!is_ip_in_subnet([192, 168, 2, 1], interface_ip, subnet_mask));
             assert!(!is_ip_in_subnet([10, 0, 0, 1], interface_ip, subnet_mask));
             assert!(!is_ip_in_subnet([127, 0, 0, 1], interface_ip, subnet_mask));
+        }
+
+        #[test]
+        fn test_classify_ipv6_address() {
+            use std::net::Ipv6Addr;
+            use std::str::FromStr;
+
+            // Test Global Unicast (GUA) - 2000::/3
+            let gua = Ipv6Addr::from_str("2408:820c:a93d:44b0::1").unwrap();
+            assert_eq!(classify_ipv6_address(&gua.octets()), Ipv6AddressType::GlobalUnicast);
+            assert_eq!(Ipv6AddressType::GlobalUnicast.network_scope(), "WAN");
+
+            // Test Unique Local (ULA) - fd00::/8
+            let ula = Ipv6Addr::from_str("fd00:1234:5678::1").unwrap();
+            assert_eq!(classify_ipv6_address(&ula.octets()), Ipv6AddressType::UniqueLocal);
+            assert_eq!(Ipv6AddressType::UniqueLocal.network_scope(), "LAN");
+
+            let ula2 = Ipv6Addr::from_str("fd76:3d06:2ad2::882").unwrap();
+            assert_eq!(classify_ipv6_address(&ula2.octets()), Ipv6AddressType::UniqueLocal);
+
+            // Test Link-Local - fe80::/10
+            let link_local = Ipv6Addr::from_str("fe80::1").unwrap();
+            assert_eq!(classify_ipv6_address(&link_local.octets()), Ipv6AddressType::LinkLocal);
+            assert_eq!(Ipv6AddressType::LinkLocal.network_scope(), "LAN");
+
+            // Test Loopback - ::1
+            let loopback = Ipv6Addr::from_str("::1").unwrap();
+            assert_eq!(classify_ipv6_address(&loopback.octets()), Ipv6AddressType::Loopback);
+
+            // Test Unspecified - ::
+            let unspecified = Ipv6Addr::from_str("::").unwrap();
+            assert_eq!(classify_ipv6_address(&unspecified.octets()), Ipv6AddressType::Unspecified);
+
+            // Test Multicast - ff00::/8
+            let multicast = Ipv6Addr::from_str("ff02::1").unwrap();
+            assert_eq!(classify_ipv6_address(&multicast.octets()), Ipv6AddressType::Multicast);
+        }
+
+        #[test]
+        fn test_format_ipv6_with_privacy() {
+            use std::net::Ipv6Addr;
+            use std::str::FromStr;
+
+            // Test WAN address (GUA) - should be masked
+            let gua = Ipv6Addr::from_str("2408:820c:a93d:44b0:e251:d8ff:fe11:b45c").unwrap();
+            let formatted = format_ipv6_with_privacy(&gua.octets());
+            assert!(formatted.contains("****"), "WAN address should contain asterisks");
+            assert!(formatted.starts_with("2408:820c:"), "Should preserve first two segments");
+            assert!(formatted.ends_with(":b45c"), "Should preserve last segment");
+            
+            // Test LAN address (ULA) - should be shown in full
+            let ula = Ipv6Addr::from_str("fd37:c22a:b039:0:e251:d8ff:fe11:b45c").unwrap();
+            let formatted_ula = format_ipv6_with_privacy(&ula.octets());
+            assert!(!formatted_ula.contains("****"), "LAN address should not contain asterisks");
+            assert!(formatted_ula.contains("fd37:c22a:b039"), "LAN address should be shown in full");
+
+            // Test Link-Local - should be shown in full
+            let link_local = Ipv6Addr::from_str("fe80::61c6:f554:bf4b:2e2d").unwrap();
+            let formatted_ll = format_ipv6_with_privacy(&link_local.octets());
+            assert!(!formatted_ll.contains("****"), "Link-Local address should not contain asterisks");
         }
     }
 }

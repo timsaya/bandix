@@ -9,7 +9,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct MacTrafficStats {
-    pub ip_address: [u8; 4], // IP address
+    pub ip_address: [u8; 4], // IPv4 address
+    
+    // IPv6 addresses (a device may have multiple IPv6 addresses)
+    // Support up to 16 IPv6 addresses (matches Linux kernel default: net.ipv6.conf.*.max_addresses = 16)
+    // Including: GUA, ULA, Link-Local, temporary/privacy addresses, etc.
+    pub ipv6_addresses: [[u8; 16]; 16],
+    pub ipv6_count: u8, // Number of valid IPv6 addresses (0-16)
 
     // Total traffic statistics
     pub total_rx_bytes: u64,      // Total receive bytes
@@ -76,6 +82,8 @@ impl Default for MacTrafficStats {
     fn default() -> Self {
         Self {
             ip_address: [0; 4],
+            ipv6_addresses: [[0; 16]; 16],
+            ipv6_count: 0,
             total_rx_bytes: 0,
             total_tx_bytes: 0,
             total_rx_packets: 0,

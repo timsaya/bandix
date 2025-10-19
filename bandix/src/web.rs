@@ -2,6 +2,7 @@ use crate::api::{parse_http_request, send_http_response, ApiRouter};
 use crate::command::Options;
 use chrono::Local;
 use log::{error, info};
+use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -9,21 +10,37 @@ use tokio::net::{TcpListener, TcpStream};
 pub async fn start_server(
     options: Options,
     api_router: ApiRouter,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 ) -> Result<(), anyhow::Error> {
     let addr = format!("0.0.0.0:{}", options.port);
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let api_router = api_router.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, api_router, options.web_log).await {
-                error!("Error handling connection: {}", e);
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let api_router = api_router.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, api_router, options.web_log).await {
+                                error!("Error handling connection: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Failed to accept connection: {}", e);
+                    }
+                }
             }
-        });
+            _ = shutdown_notify.notified() => {
+                info!("Web server received shutdown signal, stopping...");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
 
 async fn handle_connection(

@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub ip: String,
+    pub ipv6_addresses: Vec<String>,
     pub mac: String,
     pub hostname: String,
     pub total_rx_bytes: u64,
@@ -189,6 +190,9 @@ impl TrafficApiHandler {
         let stats_map = self.mac_stats.lock().unwrap();
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
+        // Get IPv6 neighbor table from system
+        let ipv6_neighbors = crate::utils::network_utils::get_ipv6_neighbors().unwrap_or_default();
+
         // Only show devices actually collected by eBPF (last_sample_ts > 0)
         let filtered: Vec<(&[u8; 6], &MacTrafficStats)> = stats_map
             .iter()
@@ -207,11 +211,42 @@ impl TrafficApiHandler {
                     stats.ip_address[0], stats.ip_address[1], stats.ip_address[2], stats.ip_address[3]
                 );
 
+                // Get IPv6 addresses for this MAC
+                // Combine addresses from both eBPF stats and system neighbor table
+                let mut ipv6_addresses_set: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
+                
+                // First, add IPv6 addresses from eBPF stats
+                for i in 0..(stats.ipv6_count as usize) {
+                    let addr = stats.ipv6_addresses[i];
+                    if addr != [0u8; 16] {
+                        ipv6_addresses_set.insert(addr);
+                    }
+                }
+                
+                // Then, add IPv6 addresses from system neighbor table
+                if let Some(addrs) = ipv6_neighbors.get(mac) {
+                    for addr in addrs {
+                        if *addr != [0u8; 16] {
+                            ipv6_addresses_set.insert(*addr);
+                        }
+                    }
+                }
+                
+                // Convert to formatted strings and sort lexicographically
+                let mut ipv6_addresses: Vec<String> = ipv6_addresses_set
+                    .iter()
+                    .map(|addr| crate::utils::network_utils::format_ipv6(addr))
+                    .collect();
+                
+                // Sort IPv6 addresses in lexicographic order
+                ipv6_addresses.sort();
+
                 // Get hostname from bindings, fallback to empty string if not found
                 let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
 
                 DeviceInfo {
                     ip: ip_str,
+                    ipv6_addresses,
                     mac: mac_str,
                     hostname,
                     total_rx_bytes: stats.total_rx_bytes,

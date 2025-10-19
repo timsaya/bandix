@@ -1,6 +1,5 @@
-use crate::utils::network_utils::is_subnet_ip;
-use crate::MAC_IP_MAPPING;
-use crate::MAC_TRAFFIC;
+use crate::utils::network_utils::{is_subnet_ip, is_subnet_ipv6};
+use crate::{MAC_IPV4_MAPPING, MAC_IPV6_MAPPING, MAC_TRAFFIC};
 
 #[inline]
 fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool, is_local: bool) {
@@ -62,13 +61,40 @@ pub fn monitor_traffic(
         // source ip is in local network, this is local network traffic
         let is_local_traffic = dst_is_local;
         update_traffic_stats(&src_mac, data_len, false, is_local_traffic);
-        let _ = MAC_IP_MAPPING.insert(&src_mac, &src_ip, 0);
+        let _ = MAC_IPV4_MAPPING.insert(&src_mac, &src_ip, 0);
     }
 
     if dst_is_local {
         // destination ip is in local network, this is local network traffic
         let is_local_traffic = src_is_local;
         update_traffic_stats(&dst_mac, data_len, true, is_local_traffic);
-        let _ = MAC_IP_MAPPING.insert(&dst_mac, &dst_ip, 0);
+        let _ = MAC_IPV4_MAPPING.insert(&dst_mac, &dst_ip, 0);
+    }
+}
+
+#[inline]
+pub fn monitor_traffic_v6(
+    src_mac: &[u8; 6],
+    dst_mac: &[u8; 6],
+    data_len: u64,
+    src_ip: &[u8; 16],
+    dst_ip: &[u8; 16],
+) {
+    // check if source ip and destination ip are in local network
+    let src_is_local = is_subnet_ipv6(&src_ip);
+    let dst_is_local = is_subnet_ipv6(&dst_ip);
+
+    if src_is_local {
+        // source ip is in local network
+        let is_local_traffic = dst_is_local;
+        update_traffic_stats(&src_mac, data_len, false, is_local_traffic);
+        let _ = MAC_IPV6_MAPPING.insert(&src_mac, &src_ip, 0);
+    }
+
+    if dst_is_local {
+        // destination ip is in local network
+        let is_local_traffic = src_is_local;
+        update_traffic_stats(&dst_mac, data_len, true, is_local_traffic);
+        let _ = MAC_IPV6_MAPPING.insert(&dst_mac, &dst_ip, 0);
     }
 }

@@ -121,26 +121,70 @@ async fn init_ebpf_programs(options: &Options) -> Result<(aya::Ebpf, aya::Ebpf),
     Ok((ingress_ebpf, egress_ebpf))
 }
 
-// Initialize subnet configuration
+// Initialize subnet configuration (IPv4 and IPv6)
 async fn init_subnet_info(
     egress_ebpf: &mut aya::Ebpf,
     ingress_ebpf: &mut aya::Ebpf,
     iface: String,
 ) -> Result<(), anyhow::Error> {
-    // Configure subnet information for eBPF maps
+    // Configure IPv4 subnet information
     let interface_info = get_interface_info(&iface);
     let (interface_ip, subnet_mask) = interface_info.unwrap_or(([0, 0, 0, 0], [0, 0, 0, 0]));
 
-    let mut subnet_info: Array<_, [u8; 4]> =
-        Array::try_from(ingress_ebpf.take_map("SUBNET_INFO").unwrap())?;
+    let mut ipv4_subnet_info: Array<_, [u8; 4]> =
+        Array::try_from(ingress_ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
 
-    subnet_info.set(0, &interface_ip, 0)?;
-    subnet_info.set(1, &subnet_mask, 0)?;
+    ipv4_subnet_info.set(0, &interface_ip, 0)?;
+    ipv4_subnet_info.set(1, &subnet_mask, 0)?;
 
-    let mut subnet_info: Array<_, [u8; 4]> =
-        Array::try_from(egress_ebpf.take_map("SUBNET_INFO").unwrap())?;
-    subnet_info.set(0, &interface_ip, 0)?;
-    subnet_info.set(1, &subnet_mask, 0)?;
+    let mut ipv4_subnet_info: Array<_, [u8; 4]> =
+        Array::try_from(egress_ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
+    ipv4_subnet_info.set(0, &interface_ip, 0)?;
+    ipv4_subnet_info.set(1, &subnet_mask, 0)?;
+
+    // Configure IPv6 subnet information
+    let ipv6_addresses = crate::utils::network_utils::get_interface_ipv6_info(&iface);
+    
+    let mut ingress_ipv6_subnet_info: Array<_, [u8; 32]> =
+        Array::try_from(ingress_ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
+    
+    let mut egress_ipv6_subnet_info: Array<_, [u8; 32]> =
+        Array::try_from(egress_ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
+
+    // Initialize all entries as disabled
+    for i in 0..16 {
+        ingress_ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
+        egress_ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
+    }
+
+    // Set up to 16 IPv6 prefixes (matches Linux kernel default max_addresses)
+    for (idx, (ipv6_addr, prefix_len)) in ipv6_addresses.iter().enumerate().take(16) {
+        let mut subnet_data = [0u8; 32];
+        
+        // Copy network prefix (16 bytes)
+        subnet_data[0..16].copy_from_slice(ipv6_addr);
+        
+        // Set prefix length
+        subnet_data[16] = *prefix_len;
+        
+        // Set enabled flag
+        subnet_data[17] = 1;
+        
+        ingress_ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
+        egress_ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
+        
+        // Classify IPv6 address type
+        let addr_type = crate::utils::network_utils::classify_ipv6_address(ipv6_addr);
+        
+        log::info!(
+            "Configured IPv6 subnet {}: {}/{} [Type: {}, Network: {}]",
+            idx,
+            crate::utils::network_utils::format_ipv6_with_privacy(ipv6_addr),
+            prefix_len,
+            addr_type.type_name(),
+            addr_type.network_scope()
+        );
+    }
 
     Ok(())
 }
@@ -268,16 +312,20 @@ async fn run_service(
     // Start web server with API router
     let api_router = monitor_manager.get_api_router().clone();
     let options_for_web = options.clone();
-    tokio::spawn(async move {
-        if let Err(e) = web::start_server(options_for_web, api_router).await {
+    let shutdown_notify_for_web = shutdown_notify.clone();
+    let web_task = tokio::spawn(async move {
+        if let Err(e) = web::start_server(options_for_web, api_router, shutdown_notify_for_web).await {
             log::error!("Web server error: {}", e);
         }
     });
 
     // Start internal loops for all modules via MonitorManager
-    let tasks = monitor_manager
+    let mut tasks = monitor_manager
         .start_modules(module_contexts, shutdown_notify.clone())
         .await?;
+
+    // Add web server task to the list
+    tasks.push(web_task);
 
     // Wait for shutdown signal
     shutdown_notify.notified().await;

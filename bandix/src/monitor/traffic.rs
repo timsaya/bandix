@@ -185,14 +185,14 @@ impl TrafficMonitor {
 
         let ingress_mac_ip_mapping = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
             ingress_ebpf
-                .map("MAC_IP_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_IP_MAPPING map"))?,
+                .map("MAC_IPV4_MAPPING")
+                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_IPV4_MAPPING map"))?,
         )?;
 
         let egress_mac_ip_mapping = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
             egress_ebpf
-                .map("MAC_IP_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find MAC_IP_MAPPING map"))?,
+                .map("MAC_IPV4_MAPPING")
+                .ok_or(anyhow::anyhow!("Cannot find MAC_IPV4_MAPPING map"))?,
         )?;
 
         for entry in ingress_mac_ip_mapping.iter() {
@@ -206,6 +206,38 @@ impl TrafficMonitor {
         }
 
         Ok(mac_ip_mapping)
+    }
+
+    fn collect_mac_ipv6_mapping(
+        &self,
+        ingress_ebpf: &aya::Ebpf,
+        egress_ebpf: &aya::Ebpf,
+    ) -> Result<StdHashMap<[u8; 6], [u8; 16]>, anyhow::Error> {
+        let mut mac_ipv6_mapping = StdHashMap::new();
+
+        let ingress_mac_ipv6_mapping = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
+            ingress_ebpf
+                .map("MAC_IPV6_MAPPING")
+                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_IPV6_MAPPING map"))?,
+        )?;
+
+        let egress_mac_ipv6_mapping = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
+            egress_ebpf
+                .map("MAC_IPV6_MAPPING")
+                .ok_or(anyhow::anyhow!("Cannot find egress MAC_IPV6_MAPPING map"))?,
+        )?;
+
+        for entry in ingress_mac_ipv6_mapping.iter() {
+            let (key, value) = entry.unwrap();
+            mac_ipv6_mapping.insert(key, value);
+        }
+
+        for entry in egress_mac_ipv6_mapping.iter() {
+            let (key, value) = entry.unwrap();
+            mac_ipv6_mapping.insert(key, value);
+        }
+
+        Ok(mac_ipv6_mapping)
     }
 
     fn collect_traffic_data(
@@ -292,6 +324,7 @@ impl TrafficMonitor {
         egress_ebpf: &mut aya::Ebpf,
     ) -> Result<(), anyhow::Error> {
         let mac_ip_mapping = self.collect_mac_ip_mapping(&ingress_ebpf, &egress_ebpf)?;
+        let mac_ipv6_mapping = self.collect_mac_ipv6_mapping(&ingress_ebpf, &egress_ebpf)?;
         let traffic_data = self.collect_traffic_data(&ingress_ebpf, &egress_ebpf)?;
 
         let device_traffic_stats = self.merge(&traffic_data, &mac_ip_mapping)?;
@@ -309,6 +342,8 @@ impl TrafficMonitor {
         for (mac, traffic_data) in device_traffic_stats.iter() {
             let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
                 ip_address: traffic_data.ip_address,
+                ipv6_addresses: [[0; 16]; 16],
+                ipv6_count: 0,
                 // Total traffic statistics
                 total_rx_bytes: 0,
                 total_tx_bytes: 0,
@@ -351,6 +386,27 @@ impl TrafficMonitor {
                 && stats.ip_address != traffic_data.ip_address
             {
                 stats.ip_address = traffic_data.ip_address;
+            }
+
+            // Update IPv6 addresses from eBPF map
+            if let Some(ipv6_addr) = mac_ipv6_mapping.get(mac) {
+                // Check if this IPv6 address is not all zeros
+                if *ipv6_addr != [0u8; 16] {
+                    // Check if this IPv6 address already exists in the array
+                    let mut found = false;
+                    for i in 0..(stats.ipv6_count as usize) {
+                        if stats.ipv6_addresses[i] == *ipv6_addr {
+                            found = true;
+                            break;
+                        }
+                    }
+                    
+                    // Add new IPv6 address if not found and we have space (up to 16)
+                    if !found && (stats.ipv6_count as usize) < 16 {
+                        stats.ipv6_addresses[stats.ipv6_count as usize] = *ipv6_addr;
+                        stats.ipv6_count += 1;
+                    }
+                }
             }
 
             // Calculate total traffic
