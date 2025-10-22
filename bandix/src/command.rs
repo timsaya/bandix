@@ -50,23 +50,37 @@ pub struct Options {
     #[clap(
         long,
         default_value = "600",
-        help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
+        help = "Main ring retention duration (seconds), one slot per second (default: 600s = 10 minutes)"
     )]
-    pub traffic_retention_seconds: u32,
+    pub traffic_main_ring_retention_seconds: u32,
 
     #[clap(
         long,
         default_value = "600",
-        help = "Traffic data flush interval (seconds), how often to persist memory ring data to disk"
+        help = "Traffic data flush interval (seconds), how often to persist ring data to disk (default: 600s)"
     )]
     pub traffic_flush_interval_seconds: u32,
 
     #[clap(
         long,
         default_value = "false",
-        help = "Enable traffic history data persistence to disk (disabled by default, data only stored in memory)"
+        help = "Enable main ring persistence to disk (default: false, memory-only)"
     )]
-    pub traffic_persist_history: bool,
+    pub traffic_persist_main_ring: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable day ring persistence to disk (default: false, memory-only, 1 day data, 1 minute sampling, WAN only)"
+    )]
+    pub traffic_persist_day_ring: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable week ring persistence to disk (default: false, memory-only, 7 days data, 5 minute sampling, WAN only)"
+    )]
+    pub traffic_persist_week_ring: bool,
 
     #[clap(
         long,
@@ -98,9 +112,9 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
         return Err(anyhow::anyhow!("Port number cannot be 0"));
     }
 
-    if opt.traffic_retention_seconds == 0 {
+    if opt.traffic_main_ring_retention_seconds == 0 {
         return Err(anyhow::anyhow!(
-            "traffic_retention_seconds must be greater than 0"
+            "traffic_main_ring_retention_seconds must be greater than 0"
         ));
     }
 

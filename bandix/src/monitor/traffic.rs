@@ -41,8 +41,12 @@ impl TrafficMonitor {
     ) -> Result<()> {
         let interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
         
-        // Only create flush interval if persistence is enabled
-        if ctx.options.traffic_persist_history {
+        // Check if any persistence is enabled
+        let any_persist = ctx.options.traffic_persist_main_ring 
+            || ctx.options.traffic_persist_day_ring 
+            || ctx.options.traffic_persist_week_ring;
+        
+        if any_persist {
             self.start_monitoring_loop_with_persist(ctx, interval, shutdown_notify).await
         } else {
             self.start_monitoring_loop_memory_only(ctx, interval, shutdown_notify).await
@@ -60,6 +64,12 @@ impl TrafficMonitor {
             ctx.options.traffic_flush_interval_seconds as u64
         ));
 
+        // Downsample interval for day ring: every 1 minute (main ring -> day ring)
+        let mut day_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // 1 minute
+        
+        // Downsample interval for week ring: every 5 minutes (day ring -> week ring)
+        let mut week_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -69,19 +79,91 @@ impl TrafficMonitor {
                     // Flush dirty rings to disk at configured interval
                     log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...", 
                                ctx.options.traffic_flush_interval_seconds);
-                    if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush dirty rings to disk: {}", e);
-                    } else {
-                        log::debug!("Successfully flushed dirty rings to disk");
+                    
+                    // Flush main ring if persistence is enabled
+                    if ctx.options.traffic_persist_main_ring {
+                        if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
+                            log::error!("Failed to flush main ring to disk: {}", e);
+                        } else {
+                            log::debug!("Successfully flushed main ring to disk");
+                        }
+                    }
+                    
+                    // Flush day ring if persistence is enabled
+                    if ctx.options.traffic_persist_day_ring {
+                        if let Some(ref day_mgr) = ctx.day_ring_manager {
+                            if let Err(e) = day_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush day ring: {}", e);
+                            } else {
+                                log::debug!("Successfully flushed day ring to disk");
+                            }
+                        }
+                    }
+                    
+                    // Flush week ring if persistence is enabled
+                    if ctx.options.traffic_persist_week_ring {
+                        if let Some(ref week_mgr) = ctx.week_ring_manager {
+                            if let Err(e) = week_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush week ring: {}", e);
+                            } else {
+                                log::debug!("Successfully flushed week ring to disk");
+                            }
+                        }
+                    }
+                }
+                _ = day_downsample_interval.tick() => {
+                    // Downsample from main ring to day ring
+                    log::debug!("Downsampling main ring to day ring (1-minute aggregation)...");
+                    if let Some(ref day_mgr) = &ctx.day_ring_manager {
+                        if let Err(e) = day_mgr.downsample_from_main(&ctx.memory_ring_manager.rings) {
+                            log::error!("Failed to downsample to day ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to day ring");
+                        }
+                    }
+                }
+                _ = week_downsample_interval.tick() => {
+                    // Downsample from day ring to week ring
+                    log::debug!("Downsampling day ring to week ring (5-minute aggregation)...");
+                    if let (Some(ref day_mgr), Some(ref week_mgr)) = 
+                        (&ctx.day_ring_manager, &ctx.week_ring_manager) {
+                        if let Err(e) = week_mgr.downsample_from_day(&day_mgr.rings) {
+                            log::error!("Failed to downsample to week ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to week ring");
+                        }
                     }
                 }
                 _ = shutdown_notify.notified() => {
                     log::info!("Traffic monitoring module received shutdown signal, stopping...");
                     // Flush all dirty data before shutdown
                     log::info!("Flushing all dirty rings before shutdown...");
-                    if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush dirty rings during shutdown: {}", e);
+                    
+                    // Flush main ring if persistence is enabled
+                    if ctx.options.traffic_persist_main_ring {
+                        if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
+                            log::error!("Failed to flush main ring during shutdown: {}", e);
+                        }
                     }
+                    
+                    // Flush day ring if persistence is enabled
+                    if ctx.options.traffic_persist_day_ring {
+                        if let Some(ref day_mgr) = ctx.day_ring_manager {
+                            if let Err(e) = day_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush day ring during shutdown: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Flush week ring if persistence is enabled
+                    if ctx.options.traffic_persist_week_ring {
+                        if let Some(ref week_mgr) = ctx.week_ring_manager {
+                            if let Err(e) = week_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush week ring during shutdown: {}", e);
+                            }
+                        }
+                    }
+                    
                     break;
                 }
             }
@@ -97,10 +179,39 @@ impl TrafficMonitor {
         mut interval: tokio::time::Interval,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
+        // Downsample interval for day ring: every 1 minute (main ring -> day ring)
+        let mut day_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // 1 minute
+        
+        // Downsample interval for week ring: every 5 minutes (day ring -> week ring)
+        let mut week_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     self.process_monitoring_cycle(ctx).await;
+                }
+                _ = day_downsample_interval.tick() => {
+                    // Downsample from main ring to day ring
+                    log::debug!("Downsampling main ring to day ring (1-minute aggregation)...");
+                    if let Some(ref day_mgr) = &ctx.day_ring_manager {
+                        if let Err(e) = day_mgr.downsample_from_main(&ctx.memory_ring_manager.rings) {
+                            log::error!("Failed to downsample to day ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to day ring");
+                        }
+                    }
+                }
+                _ = week_downsample_interval.tick() => {
+                    // Downsample from day ring to week ring
+                    log::debug!("Downsampling day ring to week ring (5-minute aggregation)...");
+                    if let (Some(ref day_mgr), Some(ref week_mgr)) = 
+                        (&ctx.day_ring_manager, &ctx.week_ring_manager) {
+                        if let Err(e) = week_mgr.downsample_from_day(&day_mgr.rings) {
+                            log::error!("Failed to downsample to week ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to week ring");
+                        }
+                    }
                 }
                 _ = shutdown_notify.notified() => {
                     log::info!("Traffic monitoring module received shutdown signal, stopping...");
@@ -152,6 +263,8 @@ impl TrafficMonitor {
         if let Err(e) = ctx.memory_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
             log::error!("metrics persist to memory ring error: {}", e);
         }
+
+        // Note: Day ring data is populated via downsampling from main ring, not direct insertion
     }
 }
 

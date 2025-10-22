@@ -156,7 +156,7 @@ pub fn log_startup_info(options: &Options) {
     }
     info!("Listening port: {}", options.port);
     info!("Data directory: {}", options.data_dir);
-    info!("Retention seconds: {}", options.traffic_retention_seconds);
+    info!("Main ring retention: {}s", options.traffic_main_ring_retention_seconds);
     info!(
         "Web request logging: {}",
         if options.web_log {
@@ -190,8 +190,8 @@ pub fn log_startup_info(options: &Options) {
 
         if options.enable_traffic {
             info!(
-                "  • Traffic monitoring (retention: {}s)",
-                options.traffic_retention_seconds
+                "  • Traffic monitoring (main ring: {}s, day ring: 1d, week ring: 7d)",
+                options.traffic_main_ring_retention_seconds
             );
         }
 

@@ -1,6 +1,7 @@
 use super::{HttpRequest, HttpResponse, ApiResponse};
 use crate::command::Options;
 use crate::storage::traffic::{self, MemoryRingManager};
+use crate::storage::tiered_ring::{DayRingManager, WeekRingManager};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
 use serde::{Deserialize, Serialize};
@@ -106,6 +107,27 @@ pub struct SetHostnameBindingRequest {
     pub hostname: String,
 }
 
+/// Tiered metrics data point (only WAN data)
+#[derive(Serialize, Deserialize)]
+pub struct TieredMetricsDataPoint {
+    pub ts_ms: u64,
+    pub wide_rx_rate_avg: u64,
+    pub wide_tx_rate_avg: u64,
+    pub wide_rx_rate_peak: u64,
+    pub wide_tx_rate_peak: u64,
+    pub wide_rx_bytes: u64,
+    pub wide_tx_bytes: u64,
+}
+
+/// Tiered metrics response structure
+#[derive(Serialize, Deserialize)]
+pub struct TieredMetricsResponse {
+    pub tier: String, // "day" or "week"
+    pub retention_seconds: u64,
+    pub mac: String,
+    pub metrics: Vec<TieredMetricsDataPoint>,
+}
+
 /// Traffic monitoring API handler
 #[derive(Clone)]
 pub struct TrafficApiHandler {
@@ -113,6 +135,8 @@ pub struct TrafficApiHandler {
     rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     memory_ring_manager: Arc<MemoryRingManager>,
+    day_ring_manager: Option<Arc<DayRingManager>>,
+    week_ring_manager: Option<Arc<WeekRingManager>>,
     options: Options,
 }
 
@@ -122,6 +146,8 @@ impl TrafficApiHandler {
         rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         memory_ring_manager: Arc<MemoryRingManager>,
+        day_ring_manager: Option<Arc<DayRingManager>>,
+        week_ring_manager: Option<Arc<WeekRingManager>>,
         options: Options,
     ) -> Self {
         Self {
@@ -129,6 +155,8 @@ impl TrafficApiHandler {
             rate_limits,
             hostname_bindings,
             memory_ring_manager,
+            day_ring_manager,
+            week_ring_manager,
             options,
         }
     }
@@ -140,6 +168,8 @@ impl TrafficApiHandler {
             "/api/traffic/devices",
             "/api/traffic/limits",
             "/api/traffic/metrics",
+            "/api/traffic/metrics/day",
+            "/api/traffic/metrics/week",
             "/api/traffic/bindings",
         ]
     }
@@ -170,6 +200,20 @@ impl TrafficApiHandler {
                     "GET" => self.handle_hostname_bindings().await,
                     "POST" => self.handle_set_hostname_binding(request).await,
                     _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+                }
+            }
+            path if path.starts_with("/api/traffic/metrics/day") => {
+                if request.method == "GET" {
+                    self.handle_tiered_metrics(request, "day").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            path if path.starts_with("/api/traffic/metrics/week") => {
+                if request.method == "GET" {
+                    self.handle_tiered_metrics(request, "week").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
             }
             path if path.starts_with("/api/traffic/metrics") => {
@@ -368,7 +412,7 @@ impl TrafficApiHandler {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
-        let start_ms = now_ms.saturating_sub(self.options.traffic_retention_seconds as u64 * 1000);
+        let start_ms = now_ms.saturating_sub(self.options.traffic_main_ring_retention_seconds as u64 * 1000);
         let end_ms = now_ms;
 
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
@@ -418,7 +462,7 @@ impl TrafficApiHandler {
                     .collect();
 
                 let response = MetricsResponse {
-                    retention_seconds: self.options.traffic_retention_seconds as u64,
+                    retention_seconds: self.options.traffic_main_ring_retention_seconds as u64,
                     mac: mac_label,
                     metrics,
                 };
@@ -501,6 +545,113 @@ impl TrafficApiHandler {
         }
 
         let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/metrics/day and /api/traffic/metrics/week endpoints
+    async fn handle_tiered_metrics(&self, request: &HttpRequest, tier: &str) -> Result<HttpResponse, anyhow::Error> {
+        // Day and week rings are always enabled, no need to check
+
+        let mac_opt = request.query_params.get("mac").cloned();
+        let start_ms_opt = request.query_params.get("start_ms")
+            .and_then(|s| s.parse::<u64>().ok());
+        let end_ms_opt = request.query_params.get("end_ms")
+            .and_then(|s| s.parse::<u64>().ok());
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        // Default time range based on tier
+        let default_range = match tier {
+            "day" => 24 * 60 * 60 * 1000, // 1 day
+            "week" => 7 * 24 * 60 * 60 * 1000, // 7 days
+            _ => return Ok(HttpResponse::error(400, "Invalid tier".to_string())),
+        };
+
+        let start_ms = start_ms_opt.unwrap_or_else(|| now_ms.saturating_sub(default_range));
+        let end_ms = end_ms_opt.unwrap_or(now_ms);
+
+        // Query data based on tier
+        let (slots, mac_label) = match tier {
+            "day" => {
+                let manager = self.day_ring_manager.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Day ring manager not initialized"))?;
+                
+                let (result, label) = if let Some(mac_str) = mac_opt {
+                    if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                        (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                    } else {
+                        match crate::utils::network_utils::parse_mac_address(&mac_str) {
+                            Ok(mac) => (manager.query(&mac, start_ms, end_ms), format_mac(&mac)),
+                            Err(e) => return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e))),
+                        }
+                    }
+                } else {
+                    (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                };
+                
+                match result {
+                    Ok(slots) => (slots, label),
+                    Err(e) => return Ok(HttpResponse::error(500, format!("Query error: {}", e))),
+                }
+            }
+            "week" => {
+                let manager = self.week_ring_manager.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Week ring manager not initialized"))?;
+                
+                let (result, label) = if let Some(mac_str) = mac_opt {
+                    if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                        (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                    } else {
+                        match crate::utils::network_utils::parse_mac_address(&mac_str) {
+                            Ok(mac) => (manager.query(&mac, start_ms, end_ms), format_mac(&mac)),
+                            Err(e) => return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e))),
+                        }
+                    }
+                } else {
+                    (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                };
+                
+                match result {
+                    Ok(slots) => (slots, label),
+                    Err(e) => return Ok(HttpResponse::error(500, format!("Query error: {}", e))),
+                }
+            }
+            _ => return Ok(HttpResponse::error(400, "Invalid tier".to_string())),
+        };
+
+        // Convert to API response format
+        let metrics: Vec<TieredMetricsDataPoint> = slots
+            .into_iter()
+            .map(|slot| TieredMetricsDataPoint {
+                ts_ms: slot.ts_ms,
+                wide_rx_rate_avg: slot.wide_rx_rate_avg,
+                wide_tx_rate_avg: slot.wide_tx_rate_avg,
+                wide_rx_rate_peak: slot.wide_rx_rate_peak,
+                wide_tx_rate_peak: slot.wide_tx_rate_peak,
+                wide_rx_bytes: slot.wide_rx_bytes,
+                wide_tx_bytes: slot.wide_tx_bytes,
+            })
+            .collect();
+
+        // Set retention_seconds based on tier
+        let retention_seconds = match tier {
+            "day" => 86400,  // 1 day = 24 * 60 * 60
+            "week" => 604800, // 7 days = 7 * 24 * 60 * 60
+            _ => 0,
+        };
+
+        let response = TieredMetricsResponse {
+            tier: tier.to_string(),
+            retention_seconds,
+            mac: mac_label,
+            metrics,
+        };
+
+        let api_response = ApiResponse::success(response);
         let body = serde_json::to_string(&api_response)?;
         Ok(HttpResponse::ok(body))
     }

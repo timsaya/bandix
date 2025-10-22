@@ -5,6 +5,7 @@ pub mod traffic;
 use crate::api::ApiRouter;
 use crate::command::Options;
 use crate::storage::traffic::{BaselineTotals, MemoryRingManager};
+use crate::storage::tiered_ring::{DayRingManager, WeekRingManager};
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,8 @@ pub struct TrafficModuleContext {
     pub rate_limits: Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
     pub memory_ring_manager: Arc<MemoryRingManager>,
+    pub day_ring_manager: Option<Arc<DayRingManager>>,
+    pub week_ring_manager: Option<Arc<WeekRingManager>>,
     pub ingress_ebpf: Option<aya::Ebpf>,
     pub egress_ebpf: Option<aya::Ebpf>,
 }
@@ -47,19 +50,49 @@ impl TrafficModuleContext {
     pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
         let memory_ring_manager = Arc::new(MemoryRingManager::new(
             options.data_dir.clone(),
-            options.traffic_retention_seconds,
+            options.traffic_main_ring_retention_seconds,
         ));
         
         // Load existing ring files into memory at startup (only if persistence is enabled)
-        if options.traffic_persist_history {
+        if options.traffic_persist_main_ring {
             if let Err(e) = memory_ring_manager.load_from_files() {
-                log::error!("Failed to load ring files into memory at startup: {}", e);
+                log::error!("Failed to load main ring files into memory at startup: {}", e);
             } else {
-                log::info!("Successfully loaded existing ring files into memory");
+                log::info!("Successfully loaded main ring files into memory");
             }
         } else {
-            log::info!("Traffic history persistence disabled, starting with empty memory ring");
+            log::info!("Main ring initialized (memory-only mode)");
         }
+        
+        // Initialize day ring (always enabled)
+        let day_mgr = Arc::new(DayRingManager::new(options.data_dir.clone()));
+        
+        // Only load from files if persistence is enabled
+        if options.traffic_persist_day_ring {
+            if let Err(e) = day_mgr.load_from_files() {
+                log::error!("Failed to load day ring files: {}", e);
+            } else {
+                log::info!("Successfully loaded day ring files");
+            }
+        } else {
+            log::info!("Day ring initialized (memory-only mode)");
+        }
+        let day_ring_manager = Some(day_mgr);
+        
+        // Initialize week ring (always enabled)
+        let week_mgr = Arc::new(WeekRingManager::new(options.data_dir.clone()));
+        
+        // Only load from files if persistence is enabled
+        if options.traffic_persist_week_ring {
+            if let Err(e) = week_mgr.load_from_files() {
+                log::error!("Failed to load week ring files: {}", e);
+            } else {
+                log::info!("Successfully loaded week ring files");
+            }
+        } else {
+            log::info!("Week ring initialized (memory-only mode)");
+        }
+        let week_ring_manager = Some(week_mgr);
         
         // Create shared hostname bindings - this will be used by both traffic and connection modules
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
@@ -71,6 +104,8 @@ impl TrafficModuleContext {
             rate_limits: Arc::new(Mutex::new(StdHashMap::new())),
             hostname_bindings,
             memory_ring_manager,
+            day_ring_manager,
+            week_ring_manager,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
         }
@@ -109,6 +144,8 @@ impl Clone for ModuleContext {
                 rate_limits: Arc::clone(&ctx.rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
                 memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
+                day_ring_manager: ctx.day_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
+                week_ring_manager: ctx.week_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
                 ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
                 egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
             }),
@@ -133,6 +170,9 @@ impl ModuleType {
                 // Traffic module data initialization logic
                 crate::storage::traffic::ensure_schema(&traffic_ctx.options.data_dir)?;
 
+                // Initialize tiered storage schema (always enabled)
+                crate::storage::tiered_ring::ensure_tiered_schema(&traffic_ctx.options.data_dir)?;
+
                 // Load rate limits
                 let limits =
                     crate::storage::traffic::load_all_limits(&traffic_ctx.options.data_dir)?;
@@ -147,11 +187,11 @@ impl ModuleType {
                 // so we don't need to load them here again
 
                 // Rebuild ring files and load baseline data (only if persistence is enabled)
-                if traffic_ctx.options.traffic_persist_history {
+                if traffic_ctx.options.traffic_persist_main_ring {
                     // Rebuild ring files (if needed)
                     let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
                         &traffic_ctx.options.data_dir,
-                        traffic_ctx.options.traffic_retention_seconds,
+                        traffic_ctx.options.traffic_main_ring_retention_seconds,
                     )?;
 
                     // Load baseline data
@@ -198,6 +238,8 @@ impl ModuleType {
                     Arc::clone(&traffic_ctx.rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
                     Arc::clone(&traffic_ctx.memory_ring_manager),
+                    traffic_ctx.day_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
+                    traffic_ctx.week_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
                     traffic_ctx.options.clone(),
                 ));
 

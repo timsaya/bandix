@@ -292,11 +292,24 @@ impl MemoryRingManager {
             if !path.is_file() {
                 continue;
             }
-            if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+            
+            // Get filename (e.g. "aabbccddeeff.ring")
+            let filename = match path.file_name().and_then(|s| s.to_str()) {
+                Some(name) => name,
+                None => continue,
+            };
+            
+            // Skip tiered ring files (.day.ring, .week.ring)
+            if filename.contains(".day.ring") || filename.contains(".week.ring") {
+                continue;
+            }
+            
+            // Only process main ring files (must end with .ring)
+            if !filename.ends_with(".ring") {
                 continue;
             }
 
-            // Parse MAC from filename
+            // Parse MAC from filename (should be exactly 12 hex chars + .ring)
             let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             if fname.len() != 12 {
                 continue;
@@ -513,9 +526,19 @@ pub fn rebuild_all_ring_files_if_mismatch(
         if !path.is_file() {
             continue;
         }
-        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+        
+        // Get filename and skip tiered ring files
+        let filename = match path.file_name().and_then(|s| s.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if filename.contains(".day.ring") || filename.contains(".week.ring") {
             continue;
         }
+        if !filename.ends_with(".ring") {
+            continue;
+        }
+        
         let mut f = OpenOptions::new().read(true).open(&path)?;
         let (_ver, cap) = read_header(&mut f)?;
         if cap != traffic_retention_seconds {
@@ -535,7 +558,16 @@ pub fn rebuild_all_ring_files_if_mismatch(
         if !path.is_file() {
             continue;
         }
-        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+        
+        // Get filename and skip tiered ring files
+        let filename = match path.file_name().and_then(|s| s.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if filename.contains(".day.ring") || filename.contains(".week.ring") {
+            continue;
+        }
+        if !filename.ends_with(".ring") {
             continue;
         }
         // Force rebuild
@@ -805,7 +837,16 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
         if !path.is_file() {
             continue;
         }
-        if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+        
+        // Get filename and skip tiered ring files
+        let filename = match path.file_name().and_then(|s| s.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if filename.contains(".day.ring") || filename.contains(".week.ring") {
+            continue;
+        }
+        if !filename.ends_with(".ring") {
             continue;
         }
 
