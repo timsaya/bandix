@@ -70,6 +70,12 @@ impl TrafficMonitor {
         // Downsample interval for week ring: every 5 minutes (day ring -> week ring)
         let mut week_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
 
+        // Downsample interval for month ring: every 15 minutes (week ring -> month ring)
+        let mut month_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(900)); // 15 minutes
+
+        // Downsample interval for year ring: every 1 hour (month ring -> year ring)  
+        let mut year_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // 1 hour
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -110,6 +116,28 @@ impl TrafficMonitor {
                             }
                         }
                     }
+
+                    // Flush month ring if persistence is enabled
+                    if ctx.options.traffic_persist_month_ring {
+                        if let Some(ref month_mgr) = ctx.month_ring_manager {
+                            if let Err(e) = month_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush month ring: {}", e);
+                            } else {
+                                log::debug!("Successfully flushed month ring to disk");
+                            }
+                        }
+                    }
+
+                    // Flush year ring if persistence is enabled
+                    if ctx.options.traffic_persist_year_ring {
+                        if let Some(ref year_mgr) = ctx.year_ring_manager {
+                            if let Err(e) = year_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush year ring: {}", e);
+                            } else {
+                                log::debug!("Successfully flushed year ring to disk");
+                            }
+                        }
+                    }
                 }
                 _ = day_downsample_interval.tick() => {
                     // Downsample from main ring to day ring
@@ -131,6 +159,30 @@ impl TrafficMonitor {
                             log::error!("Failed to downsample to week ring: {}", e);
                         } else {
                             log::debug!("Successfully downsampled to week ring");
+                        }
+                    }
+                }
+                _ = month_downsample_interval.tick() => {
+                    // Downsample from week ring to month ring
+                    log::debug!("Downsampling week ring to month ring (15-minute aggregation)...");
+                    if let (Some(ref week_mgr), Some(ref month_mgr)) = 
+                        (&ctx.week_ring_manager, &ctx.month_ring_manager) {
+                        if let Err(e) = month_mgr.downsample_from_week(&week_mgr.rings) {
+                            log::error!("Failed to downsample to month ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to month ring");
+                        }
+                    }
+                }
+                _ = year_downsample_interval.tick() => {
+                    // Downsample from month ring to year ring
+                    log::debug!("Downsampling month ring to year ring (1-hour aggregation)...");
+                    if let (Some(ref month_mgr), Some(ref year_mgr)) = 
+                        (&ctx.month_ring_manager, &ctx.year_ring_manager) {
+                        if let Err(e) = year_mgr.downsample_from_month(&month_mgr.rings) {
+                            log::error!("Failed to downsample to year ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to year ring");
                         }
                     }
                 }
@@ -164,6 +216,24 @@ impl TrafficMonitor {
                         }
                     }
                     
+                    // Flush month ring if persistence is enabled
+                    if ctx.options.traffic_persist_month_ring {
+                        if let Some(ref month_mgr) = ctx.month_ring_manager {
+                            if let Err(e) = month_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush month ring during shutdown: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Flush year ring if persistence is enabled
+                    if ctx.options.traffic_persist_year_ring {
+                        if let Some(ref year_mgr) = ctx.year_ring_manager {
+                            if let Err(e) = year_mgr.flush_dirty_rings() {
+                                log::error!("Failed to flush year ring during shutdown: {}", e);
+                            }
+                        }
+                    }
+                    
                     break;
                 }
             }
@@ -184,6 +254,12 @@ impl TrafficMonitor {
         
         // Downsample interval for week ring: every 5 minutes (day ring -> week ring)
         let mut week_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
+
+        // Downsample interval for month ring: every 15 minutes (week ring -> month ring)
+        let mut month_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(900)); // 15 minutes
+
+        // Downsample interval for year ring: every 1 hour (month ring -> year ring)  
+        let mut year_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // 1 hour
 
         loop {
             tokio::select! {
@@ -210,6 +286,30 @@ impl TrafficMonitor {
                             log::error!("Failed to downsample to week ring: {}", e);
                         } else {
                             log::debug!("Successfully downsampled to week ring");
+                        }
+                    }
+                }
+                _ = month_downsample_interval.tick() => {
+                    // Downsample from week ring to month ring
+                    log::debug!("Downsampling week ring to month ring (15-minute aggregation)...");
+                    if let (Some(ref week_mgr), Some(ref month_mgr)) = 
+                        (&ctx.week_ring_manager, &ctx.month_ring_manager) {
+                        if let Err(e) = month_mgr.downsample_from_week(&week_mgr.rings) {
+                            log::error!("Failed to downsample to month ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to month ring");
+                        }
+                    }
+                }
+                _ = year_downsample_interval.tick() => {
+                    // Downsample from month ring to year ring
+                    log::debug!("Downsampling month ring to year ring (1-hour aggregation)...");
+                    if let (Some(ref month_mgr), Some(ref year_mgr)) = 
+                        (&ctx.month_ring_manager, &ctx.year_ring_manager) {
+                        if let Err(e) = year_mgr.downsample_from_month(&month_mgr.rings) {
+                            log::error!("Failed to downsample to year ring: {}", e);
+                        } else {
+                            log::debug!("Successfully downsampled to year ring");
                         }
                     }
                 }

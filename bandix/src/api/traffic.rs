@@ -1,7 +1,7 @@
 use super::{HttpRequest, HttpResponse, ApiResponse};
 use crate::command::Options;
 use crate::storage::traffic::{self, MemoryRingManager};
-use crate::storage::tiered_ring::{DayRingManager, WeekRingManager};
+use crate::storage::tiered_ring::{DayRingManager, WeekRingManager, MonthRingManager, YearRingManager};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,8 @@ pub struct TrafficApiHandler {
     memory_ring_manager: Arc<MemoryRingManager>,
     day_ring_manager: Option<Arc<DayRingManager>>,
     week_ring_manager: Option<Arc<WeekRingManager>>,
+    month_ring_manager: Option<Arc<MonthRingManager>>,
+    year_ring_manager: Option<Arc<YearRingManager>>,
     options: Options,
 }
 
@@ -148,6 +150,8 @@ impl TrafficApiHandler {
         memory_ring_manager: Arc<MemoryRingManager>,
         day_ring_manager: Option<Arc<DayRingManager>>,
         week_ring_manager: Option<Arc<WeekRingManager>>,
+        month_ring_manager: Option<Arc<MonthRingManager>>,
+        year_ring_manager: Option<Arc<YearRingManager>>,
         options: Options,
     ) -> Self {
         Self {
@@ -157,6 +161,8 @@ impl TrafficApiHandler {
             memory_ring_manager,
             day_ring_manager,
             week_ring_manager,
+            month_ring_manager,
+            year_ring_manager,
             options,
         }
     }
@@ -170,6 +176,8 @@ impl TrafficApiHandler {
             "/api/traffic/metrics",
             "/api/traffic/metrics/day",
             "/api/traffic/metrics/week",
+            "/api/traffic/metrics/month",
+            "/api/traffic/metrics/year",
             "/api/traffic/bindings",
         ]
     }
@@ -212,6 +220,20 @@ impl TrafficApiHandler {
             path if path.starts_with("/api/traffic/metrics/week") => {
                 if request.method == "GET" {
                     self.handle_tiered_metrics(request, "week").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            path if path.starts_with("/api/traffic/metrics/month") => {
+                if request.method == "GET" {
+                    self.handle_tiered_metrics(request, "month").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            path if path.starts_with("/api/traffic/metrics/year") => {
+                if request.method == "GET" {
+                    self.handle_tiered_metrics(request, "year").await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
@@ -568,6 +590,8 @@ impl TrafficApiHandler {
         let default_range = match tier {
             "day" => 24 * 60 * 60 * 1000, // 1 day
             "week" => 7 * 24 * 60 * 60 * 1000, // 7 days
+            "month" => 30 * 24 * 60 * 60 * 1000, // 30 days
+            "year" => 365 * 24 * 60 * 60 * 1000, // 365 days
             _ => return Ok(HttpResponse::error(400, "Invalid tier".to_string())),
         };
 
@@ -620,6 +644,50 @@ impl TrafficApiHandler {
                     Err(e) => return Ok(HttpResponse::error(500, format!("Query error: {}", e))),
                 }
             }
+            "month" => {
+                let manager = self.month_ring_manager.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Month ring manager not initialized"))?;
+                
+                let (result, label) = if let Some(mac_str) = mac_opt {
+                    if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                        (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                    } else {
+                        match crate::utils::network_utils::parse_mac_address(&mac_str) {
+                            Ok(mac) => (manager.query(&mac, start_ms, end_ms), format_mac(&mac)),
+                            Err(e) => return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e))),
+                        }
+                    }
+                } else {
+                    (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                };
+                
+                match result {
+                    Ok(slots) => (slots, label),
+                    Err(e) => return Ok(HttpResponse::error(500, format!("Query error: {}", e))),
+                }
+            }
+            "year" => {
+                let manager = self.year_ring_manager.as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Year ring manager not initialized"))?;
+                
+                let (result, label) = if let Some(mac_str) = mac_opt {
+                    if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                        (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                    } else {
+                        match crate::utils::network_utils::parse_mac_address(&mac_str) {
+                            Ok(mac) => (manager.query(&mac, start_ms, end_ms), format_mac(&mac)),
+                            Err(e) => return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e))),
+                        }
+                    }
+                } else {
+                    (manager.query_aggregate_all(start_ms, end_ms), "all".to_string())
+                };
+                
+                match result {
+                    Ok(slots) => (slots, label),
+                    Err(e) => return Ok(HttpResponse::error(500, format!("Query error: {}", e))),
+                }
+            }
             _ => return Ok(HttpResponse::error(400, "Invalid tier".to_string())),
         };
 
@@ -641,6 +709,8 @@ impl TrafficApiHandler {
         let retention_seconds = match tier {
             "day" => 86400,  // 1 day = 24 * 60 * 60
             "week" => 604800, // 7 days = 7 * 24 * 60 * 60
+            "month" => 2592000, // 30 days = 30 * 24 * 60 * 60
+            "year" => 31536000, // 365 days = 365 * 24 * 60 * 60
             _ => 0,
         };
 

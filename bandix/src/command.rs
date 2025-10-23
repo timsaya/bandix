@@ -85,6 +85,20 @@ pub struct Options {
     #[clap(
         long,
         default_value = "false",
+        help = "Enable month ring persistence to disk (default: false, memory-only, 30 days data, 15 minute sampling, WAN only)"
+    )]
+    pub traffic_persist_month_ring: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable year ring persistence to disk (default: false, memory-only, 365 days data, 1 hour sampling, WAN only)"
+    )]
+    pub traffic_persist_year_ring: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
         help = "Enable DNS monitoring module (not yet implemented)"
     )]
     pub enable_dns: bool,

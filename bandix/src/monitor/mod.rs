@@ -5,7 +5,7 @@ pub mod traffic;
 use crate::api::ApiRouter;
 use crate::command::Options;
 use crate::storage::traffic::{BaselineTotals, MemoryRingManager};
-use crate::storage::tiered_ring::{DayRingManager, WeekRingManager};
+use crate::storage::tiered_ring::{DayRingManager, WeekRingManager, MonthRingManager, YearRingManager};
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
@@ -41,6 +41,8 @@ pub struct TrafficModuleContext {
     pub memory_ring_manager: Arc<MemoryRingManager>,
     pub day_ring_manager: Option<Arc<DayRingManager>>,
     pub week_ring_manager: Option<Arc<WeekRingManager>>,
+    pub month_ring_manager: Option<Arc<MonthRingManager>>,
+    pub year_ring_manager: Option<Arc<YearRingManager>>,
     pub ingress_ebpf: Option<aya::Ebpf>,
     pub egress_ebpf: Option<aya::Ebpf>,
 }
@@ -94,6 +96,36 @@ impl TrafficModuleContext {
         }
         let week_ring_manager = Some(week_mgr);
         
+        // Initialize month ring (always enabled)
+        let month_mgr = Arc::new(MonthRingManager::new(options.data_dir.clone()));
+        
+        // Only load from files if persistence is enabled
+        if options.traffic_persist_month_ring {
+            if let Err(e) = month_mgr.load_from_files() {
+                log::error!("Failed to load month ring files: {}", e);
+            } else {
+                log::info!("Successfully loaded month ring files");
+            }
+        } else {
+            log::info!("Month ring initialized (memory-only mode)");
+        }
+        let month_ring_manager = Some(month_mgr);
+        
+        // Initialize year ring (always enabled)
+        let year_mgr = Arc::new(YearRingManager::new(options.data_dir.clone()));
+        
+        // Only load from files if persistence is enabled
+        if options.traffic_persist_year_ring {
+            if let Err(e) = year_mgr.load_from_files() {
+                log::error!("Failed to load year ring files: {}", e);
+            } else {
+                log::info!("Successfully loaded year ring files");
+            }
+        } else {
+            log::info!("Year ring initialized (memory-only mode)");
+        }
+        let year_ring_manager = Some(year_mgr);
+        
         // Create shared hostname bindings - this will be used by both traffic and connection modules
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
         
@@ -106,6 +138,8 @@ impl TrafficModuleContext {
             memory_ring_manager,
             day_ring_manager,
             week_ring_manager,
+            month_ring_manager,
+            year_ring_manager,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
         }
@@ -146,6 +180,8 @@ impl Clone for ModuleContext {
                 memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
                 day_ring_manager: ctx.day_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
                 week_ring_manager: ctx.week_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
+                month_ring_manager: ctx.month_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
+                year_ring_manager: ctx.year_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
                 ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
                 egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
             }),
@@ -240,6 +276,8 @@ impl ModuleType {
                     Arc::clone(&traffic_ctx.memory_ring_manager),
                     traffic_ctx.day_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
                     traffic_ctx.week_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
+                    traffic_ctx.month_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
+                    traffic_ctx.year_ring_manager.as_ref().map(|mgr| Arc::clone(mgr)),
                     traffic_ctx.options.clone(),
                 ));
 
