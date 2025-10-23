@@ -73,8 +73,8 @@ impl TrafficMonitor {
         // Downsample interval for month ring: every 15 minutes (week ring -> month ring)
         let mut month_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(900)); // 15 minutes
 
-        // Downsample interval for year ring: every 1 hour (month ring -> year ring)  
-        let mut year_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // 1 hour
+        // Downsample interval for year ring: every 30 minutes (month ring -> year ring)  
+        let mut year_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(1800)); // 30 minutes
 
         loop {
             tokio::select! {
@@ -176,7 +176,7 @@ impl TrafficMonitor {
                 }
                 _ = year_downsample_interval.tick() => {
                     // Downsample from month ring to year ring
-                    log::debug!("Downsampling month ring to year ring (1-hour aggregation)...");
+                    log::debug!("Downsampling month ring to year ring (30-minute aggregation)...");
                     if let (Some(ref month_mgr), Some(ref year_mgr)) = 
                         (&ctx.month_ring_manager, &ctx.year_ring_manager) {
                         if let Err(e) = year_mgr.downsample_from_month(&month_mgr.rings) {
@@ -258,8 +258,8 @@ impl TrafficMonitor {
         // Downsample interval for month ring: every 15 minutes (week ring -> month ring)
         let mut month_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(900)); // 15 minutes
 
-        // Downsample interval for year ring: every 1 hour (month ring -> year ring)  
-        let mut year_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // 1 hour
+        // Downsample interval for year ring: every 30 minutes (month ring -> year ring)  
+        let mut year_downsample_interval = tokio::time::interval(tokio::time::Duration::from_secs(1800)); // 30 minutes
 
         loop {
             tokio::select! {
@@ -303,7 +303,7 @@ impl TrafficMonitor {
                 }
                 _ = year_downsample_interval.tick() => {
                     // Downsample from month ring to year ring
-                    log::debug!("Downsampling month ring to year ring (1-hour aggregation)...");
+                    log::debug!("Downsampling month ring to year ring (30-minute aggregation)...");
                     if let (Some(ref month_mgr), Some(ref year_mgr)) = 
                         (&ctx.month_ring_manager, &ctx.year_ring_manager) {
                         if let Err(e) = year_mgr.downsample_from_month(&month_mgr.rings) {

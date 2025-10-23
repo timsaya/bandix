@@ -21,32 +21,32 @@ fi
 # Build target platform list
 TARGETS=(
   # x86_64 architecture
-  "x86_64-unknown-linux-gnu"
+  # "x86_64-unknown-linux-gnu"
   "x86_64-unknown-linux-musl"
   
   # AArch64 (ARM64) architecture
-  "aarch64-unknown-linux-gnu"
+  # "aarch64-unknown-linux-gnu"
   "aarch64-unknown-linux-musl"
   
   # ARM 32-bit architecture
-  "armv7-unknown-linux-gnueabihf"
+  # "armv7-unknown-linux-gnueabihf"
   "armv7-unknown-linux-musleabihf"
   "armv7-unknown-linux-musleabi"
-  "armv7-unknown-linux-gnueabi"
-  "armv5te-unknown-linux-gnueabi"
+  # "armv7-unknown-linux-gnueabi"
+  # "armv5te-unknown-linux-gnueabi"
   "armv5te-unknown-linux-musleabi"
   "arm-unknown-linux-musleabi"
   "arm-unknown-linux-musleabihf"
-  "arm-unknown-linux-gnueabi"
-  "arm-unknown-linux-gnueabihf"
+  # "arm-unknown-linux-gnueabi"
+  # "arm-unknown-linux-gnueabihf"
   
   # RISC-V architecture (emerging open source architecture)
-  "riscv64gc-unknown-linux-gnu"
+  # "riscv64gc-unknown-linux-gnu"
   "riscv64gc-unknown-linux-musl"
   
   # PowerPC architecture (some high-end routers)
-  "powerpc64-unknown-linux-gnu"
-  "powerpc64le-unknown-linux-gnu"
+  # "powerpc64-unknown-linux-gnu"
+  # "powerpc64le-unknown-linux-gnu"
   "powerpc64le-unknown-linux-musl"
 
 )

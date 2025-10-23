@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 // 1. 日环（Day Ring）：1天数据，1分钟采样，仅存储WAN数据
 // 2. 周环（Week Ring）：1周数据，5分钟采样，仅存储WAN数据
 // 3. 月环（Month Ring）：30天数据，15分钟采样，仅存储WAN数据
-// 4. 年环（Year Ring）：365天数据，1小时采样，仅存储WAN数据
+// 4. 年环（Year Ring）：365天数据，30分钟采样，仅存储WAN数据
 
 // 文件扩展名
 const DAY_RING_EXT: &str = "day.ring";
@@ -37,7 +37,7 @@ const TIERED_HEADER_SIZE: usize = 4 /*magic*/ + 4 /*version*/ + 4 /*capacity*/;
 const DAY_RING_CAPACITY: u32 = 24 * 60; // 1440 slots (1天，1分钟一个样本)
 const WEEK_RING_CAPACITY: u32 = 7 * 24 * 12; // 2016 slots (1周，5分钟一个样本)
 const MONTH_RING_CAPACITY: u32 = 30 * 24 * 4; // 2880 slots (30天，15分钟一个样本)
-const YEAR_RING_CAPACITY: u32 = 365 * 24; // 8760 slots (365天，1小时一个样本)
+const YEAR_RING_CAPACITY: u32 = 365 * 24 * 2; // 17520 slots (365天，30分钟一个样本)
 
 /// 分层槽位数据
 #[derive(Debug, Clone, Copy)]
@@ -788,23 +788,23 @@ impl YearRingManager {
         }
     }
 
-    /// 插入数据（从月环数据中每1小时取一个样本）
+    /// 插入数据（从月环数据中每30分钟取一个样本）
     pub fn insert(&self, ts_ms: u64, mac: &[u8; 6], slot: TieredSlot) -> Result<(), anyhow::Error> {
-        // 只在1小时边界插入
-        if (ts_ms / 1000) % (60 * 60) != 0 {
+        // 只在30分钟边界插入
+        if (ts_ms / 1000) % (30 * 60) != 0 {
             return Ok(());
         }
 
         let mut rings = self.rings.lock().unwrap();
         let ring = rings
             .entry(*mac)
-            .or_insert_with(|| TieredMemoryRing::new(YEAR_RING_CAPACITY, 60 * 60 * 1000)); // 1小时采样
+            .or_insert_with(|| TieredMemoryRing::new(YEAR_RING_CAPACITY, 30 * 60 * 1000)); // 30分钟采样
 
         ring.insert(ts_ms, &slot.to_array());
         Ok(())
     }
 
-    /// 从月环降采样到年环（每1小时聚合一次）
+    /// 从月环降采样到年环（每30分钟聚合一次）
     pub fn downsample_from_month(
         &self,
         month_rings: &Arc<Mutex<HashMap<[u8; 6], TieredMemoryRing>>>,
@@ -815,7 +815,7 @@ impl YearRingManager {
         let mut all_tiered_slots: Vec<(u64, [u8; 6], TieredSlot)> = Vec::new();
 
         for (mac, month_ring) in month_rings_lock.iter() {
-            // 遍历月环，每1小时聚合一次
+            // 遍历月环，每30分钟聚合一次
             let mut aggregates: HashMap<u64, Vec<[u64; TIERED_SLOT_U64S]>> = HashMap::new();
 
             for slot in &month_ring.slots {
@@ -824,8 +824,8 @@ impl YearRingManager {
                 }
 
                 let ts = slot[0];
-                // 计算1小时边界
-                let bucket_ts = (ts / (60 * 60 * 1000)) * (60 * 60 * 1000);
+                // 计算30分钟边界
+                let bucket_ts = (ts / (30 * 60 * 1000)) * (30 * 60 * 1000);
                 aggregates.entry(bucket_ts).or_insert_with(Vec::new).push(*slot);
             }
 
@@ -1182,7 +1182,7 @@ fn load_tiered_ring(path: &Path, expected_capacity: u32) -> Result<TieredMemoryR
     } else if cap == MONTH_RING_CAPACITY {
         15 * 60 * 1000 // 月环：15分钟
     } else if cap == YEAR_RING_CAPACITY {
-        60 * 60 * 1000 // 年环：1小时
+        30 * 60 * 1000 // 年环：30分钟
     } else {
         60 * 1000 // 默认为日环
     };
