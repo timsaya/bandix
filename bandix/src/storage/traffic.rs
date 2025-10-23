@@ -299,8 +299,9 @@ impl MemoryRingManager {
                 None => continue,
             };
             
-            // Skip tiered ring files (.day.ring, .week.ring)
-            if filename.contains(".day.ring") || filename.contains(".week.ring") {
+            // Skip tiered ring files (.day.ring, .week.ring, .month.ring, .year.ring)
+            if filename.contains(".day.ring") || filename.contains(".week.ring") 
+                || filename.contains(".month.ring") || filename.contains(".year.ring") {
                 continue;
             }
             
@@ -532,7 +533,8 @@ pub fn rebuild_all_ring_files_if_mismatch(
             Some(name) => name,
             None => continue,
         };
-        if filename.contains(".day.ring") || filename.contains(".week.ring") {
+        if filename.contains(".day.ring") || filename.contains(".week.ring") 
+            || filename.contains(".month.ring") || filename.contains(".year.ring") {
             continue;
         }
         if !filename.ends_with(".ring") {
@@ -564,7 +566,8 @@ pub fn rebuild_all_ring_files_if_mismatch(
             Some(name) => name,
             None => continue,
         };
-        if filename.contains(".day.ring") || filename.contains(".week.ring") {
+        if filename.contains(".day.ring") || filename.contains(".week.ring") 
+            || filename.contains(".month.ring") || filename.contains(".year.ring") {
             continue;
         }
         if !filename.ends_with(".ring") {
@@ -843,7 +846,8 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
             Some(name) => name,
             None => continue,
         };
-        if filename.contains(".day.ring") || filename.contains(".week.ring") {
+        if filename.contains(".day.ring") || filename.contains(".week.ring") 
+            || filename.contains(".month.ring") || filename.contains(".year.ring") {
             continue;
         }
         if !filename.ends_with(".ring") {
