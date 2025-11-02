@@ -229,19 +229,19 @@ async fn run_service(
             log::warn!("Failed to load hostname bindings from saved file");
         }
         
-        // Load additional hostname bindings from DHCP leases (fallback source)
-        if let Ok(dhcp_bindings) = crate::storage::traffic::load_dhcp_leases("/tmp/dhcp.leases") {
+        // Load additional hostname bindings from ubus (fallback source)
+        if let Ok(ubus_bindings) = crate::storage::traffic::load_hostname_from_ubus() {
             let mut bindings_map = bindings.lock().unwrap();
-            let mut dhcp_count = 0;
-            for (mac, hostname) in dhcp_bindings {
+            let mut ubus_count = 0;
+            for (mac, hostname) in ubus_bindings {
                 // Only add if MAC address doesn't already exist (saved bindings take priority)
                 if !bindings_map.contains_key(&mac) {
                     bindings_map.insert(mac, hostname);
-                    dhcp_count += 1;
+                    ubus_count += 1;
                 }
             }
-            if dhcp_count > 0 {
-                log::info!("Loaded {} additional hostname bindings from /tmp/dhcp.leases", dhcp_count);
+            if ubus_count > 0 {
+                log::info!("Loaded {} additional hostname bindings from ubus", ubus_count);
             }
         }
         
@@ -270,8 +270,8 @@ async fn run_service(
     }
 
     if monitor_config.enable_connection {
-        let hostname_bindings = if let Some(shared_bindings) = shared_hostname_bindings {
-            shared_bindings
+        let hostname_bindings = if let Some(ref shared_bindings) = shared_hostname_bindings {
+            std::sync::Arc::clone(shared_bindings)
         } else {
             // Fallback: create independent bindings if traffic module is not enabled
             let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -284,10 +284,10 @@ async fn run_service(
                 }
             }
             
-            // Load additional bindings from DHCP leases
-            if let Ok(dhcp_bindings) = crate::storage::traffic::load_dhcp_leases("/tmp/dhcp.leases") {
+            // Load additional bindings from ubus
+            if let Ok(ubus_bindings) = crate::storage::traffic::load_hostname_from_ubus() {
                 let mut bindings_map = bindings.lock().unwrap();
-                for (mac, hostname) in dhcp_bindings {
+                for (mac, hostname) in ubus_bindings {
                     if !bindings_map.contains_key(&mac) {
                         bindings_map.insert(mac, hostname);
                     }
@@ -319,6 +319,60 @@ async fn run_service(
         }
     });
 
+    // Start hostname refresh task (every 5 seconds)
+    let hostname_refresh_task = if let Some(ref bindings) = shared_hostname_bindings {
+        let bindings_clone = std::sync::Arc::clone(bindings);
+        let shutdown_notify_clone = shutdown_notify.clone();
+        let options_clone = options.clone();
+        
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Load hostname bindings from ubus (silently fails if ubus not available)
+                        if let Ok(ubus_bindings) = crate::storage::traffic::load_hostname_from_ubus() {
+                            let mut bindings_map = bindings_clone.lock().unwrap();
+                            let mut updated_count = 0;
+                            
+                            // Load saved bindings to check priority
+                            let saved_bindings = crate::storage::traffic::load_hostname_bindings(&options_clone.data_dir)
+                                .unwrap_or_default();
+                            let saved_macs: std::collections::HashSet<[u8; 6]> = 
+                                saved_bindings.iter().map(|(mac, _)| *mac).collect();
+                            
+                            for (mac, hostname) in ubus_bindings {
+                                // Only update if not manually set (not in saved bindings)
+                                if !saved_macs.contains(&mac) {
+                                    if let Some(existing) = bindings_map.get(&mac) {
+                                        if existing != &hostname {
+                                            bindings_map.insert(mac, hostname);
+                                            updated_count += 1;
+                                        }
+                                    } else {
+                                        bindings_map.insert(mac, hostname);
+                                        updated_count += 1;
+                                    }
+                                }
+                            }
+                            
+                            if updated_count > 0 {
+                                log::debug!("Updated {} hostname bindings from ubus", updated_count);
+                            }
+                        }
+                    }
+                    _ = shutdown_notify_clone.notified() => {
+                        log::info!("Hostname refresh task received shutdown signal, stopping...");
+                        break;
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     // Start internal loops for all modules via MonitorManager
     let mut tasks = monitor_manager
         .start_modules(module_contexts, shutdown_notify.clone())
@@ -326,6 +380,11 @@ async fn run_service(
 
     // Add web server task to the list
     tasks.push(web_task);
+    
+    // Add hostname refresh task to the list
+    if let Some(task) = hostname_refresh_task {
+        tasks.push(task);
+    }
 
     // Wait for shutdown signal
     shutdown_notify.notified().await;
