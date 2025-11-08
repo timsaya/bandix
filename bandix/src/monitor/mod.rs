@@ -12,24 +12,6 @@ use std::sync::{Arc, Mutex};
 // Re-export ConnectionModuleContext from connection module
 pub use connection::ConnectionModuleContext;
 
-/// Monitor module configuration
-#[derive(Debug, Clone)]
-pub struct MonitorConfig {
-    pub enable_traffic: bool,
-    pub enable_dns: bool,
-    pub enable_connection: bool,
-}
-
-impl MonitorConfig {
-    pub fn from_options(options: &Options) -> Self {
-        MonitorConfig {
-            enable_traffic: options.enable_traffic,
-            enable_dns: options.enable_dns,
-            enable_connection: options.enable_connection,
-        }
-    }
-}
-
 /// Traffic module context
 pub struct TrafficModuleContext {
     pub options: Options,
@@ -46,12 +28,12 @@ impl TrafficModuleContext {
     /// Create traffic module context
     pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
         let memory_ring_manager = Arc::new(MemoryRingManager::new(
-            options.data_dir.clone(),
-            options.traffic_retention_seconds,
+            options.data_dir().to_string(),
+            options.traffic_retention_seconds(),
         ));
         
         // Load existing ring files into memory at startup (only if persistence is enabled)
-        if options.traffic_persist_history {
+        if options.traffic_persist_history() {
             if let Err(e) = memory_ring_manager.load_from_files() {
                 log::error!("Failed to load ring files into memory at startup: {}", e);
             } else {
@@ -78,17 +60,22 @@ impl TrafficModuleContext {
 }
 
 /// DNS module context
-#[derive(Clone)]
 pub struct DnsModuleContext {
     pub options: Options,
+    pub ingress_ebpf: Option<aya::Ebpf>,
+    pub egress_ebpf: Option<aya::Ebpf>,
     // DNS module specific context fields
     // e.g.: DNS query logs, DNS statistics, etc.
 }
 
 impl DnsModuleContext {
     /// Create DNS module context
-    pub fn new(options: Options) -> Self {
-        Self { options }
+    pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
+        Self {
+            options,
+            ingress_ebpf: Some(ingress_ebpf),
+            egress_ebpf: Some(egress_ebpf),
+        }
     }
 }
 
@@ -112,7 +99,11 @@ impl Clone for ModuleContext {
                 ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
                 egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
             }),
-            ModuleContext::Dns(ctx) => ModuleContext::Dns(ctx.clone()),
+            ModuleContext::Dns(ctx) => ModuleContext::Dns(DnsModuleContext {
+                options: ctx.options.clone(),
+                ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
+                egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
+            }),
             ModuleContext::Connection(ctx) => ModuleContext::Connection(ctx.clone()),
         }
     }
@@ -131,11 +122,11 @@ impl ModuleType {
         match (self, ctx) {
             (ModuleType::Traffic, ModuleContext::Traffic(traffic_ctx)) => {
                 // Traffic module data initialization logic
-                crate::storage::traffic::ensure_schema(&traffic_ctx.options.data_dir)?;
+                crate::storage::traffic::ensure_schema(traffic_ctx.options.data_dir())?;
 
                 // Load rate limits
                 let limits =
-                    crate::storage::traffic::load_all_limits(&traffic_ctx.options.data_dir)?;
+                    crate::storage::traffic::load_all_limits(traffic_ctx.options.data_dir())?;
                 {
                     let mut rl = traffic_ctx.rate_limits.lock().unwrap();
                     for (mac, rx, tx) in limits {
@@ -147,18 +138,18 @@ impl ModuleType {
                 // so we don't need to load them here again
 
                 // Rebuild ring files and load baseline data (only if persistence is enabled)
-                if traffic_ctx.options.traffic_persist_history {
+                if traffic_ctx.options.traffic_persist_history() {
                     // Rebuild ring files (if needed)
                     let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
-                        &traffic_ctx.options.data_dir,
-                        traffic_ctx.options.traffic_retention_seconds,
+                        traffic_ctx.options.data_dir(),
+                        traffic_ctx.options.traffic_retention_seconds(),
                     )?;
 
                     // Load baseline data
                     let preloaded_baselines = if rebuilt {
                         Vec::new()
                     } else {
-                        crate::storage::traffic::load_latest_totals(&traffic_ctx.options.data_dir)?
+                        crate::storage::traffic::load_latest_totals(traffic_ctx.options.data_dir())?
                     };
 
                     // Apply preloaded baseline data
@@ -278,20 +269,16 @@ pub struct MonitorManager {
 }
 
 impl MonitorManager {
-    pub fn new(config: MonitorConfig) -> Self {
-        let mut modules: Vec<ModuleType> = Vec::new();
-
-        if config.enable_traffic {
-            modules.push(ModuleType::Traffic);
-        }
-
-        if config.enable_dns {
-            modules.push(ModuleType::Dns);
-        }
-
-        if config.enable_connection {
-            modules.push(ModuleType::Connection);
-        }
+    /// Create a new MonitorManager from module contexts (modules are inferred from contexts)
+    pub fn from_contexts(contexts: &[ModuleContext]) -> Self {
+        let modules: Vec<ModuleType> = contexts
+            .iter()
+            .map(|ctx| match ctx {
+                ModuleContext::Traffic(_) => ModuleType::Traffic,
+                ModuleContext::Dns(_) => ModuleType::Dns,
+                ModuleContext::Connection(_) => ModuleType::Connection,
+            })
+            .collect();
 
         MonitorManager {
             modules,

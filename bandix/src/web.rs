@@ -12,9 +12,18 @@ pub async fn start_server(
     api_router: ApiRouter,
     shutdown_notify: Arc<tokio::sync::Notify>,
 ) -> Result<(), anyhow::Error> {
-    let addr = format!("0.0.0.0:{}", options.port);
+    // In release mode, only listen on localhost for security
+    // In debug mode, listen on all interfaces for easier development
+    let host = if cfg!(debug_assertions) {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    };
+    let addr = format!("{}:{}", host, options.port());
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
+    
+    let web_log = options.web_log();
 
     loop {
         tokio::select! {
@@ -23,7 +32,7 @@ pub async fn start_server(
                     Ok((stream, _)) => {
                         let api_router = api_router.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, api_router, options.web_log).await {
+                            if let Err(e) = handle_connection(stream, api_router, web_log).await {
                                 error!("Error handling connection: {}", e);
                             }
                         });

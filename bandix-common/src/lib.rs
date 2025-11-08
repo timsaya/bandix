@@ -6,6 +6,21 @@ extern crate serde;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+/// Packet header for eBPF to userspace communication
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PacketHeader {
+    pub timestamp: u64,   // 时间戳（纳秒）
+    pub packet_len: u32,  // 数据包总长度（字节）
+    pub captured_len: u32,// 实际拷贝到 ringbuf 的字节数（一般等于 packet_len）
+    pub ifindex: u32,     // 网络接口索引（TC 场景可能为 0）
+    pub direction: u32,   // 方向：0=Ingress（入口），1=Egress（出口）
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PacketHeader {}
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct MacTrafficStats {

@@ -307,7 +307,7 @@ impl TrafficApiHandler {
 
         // Persist to files
         traffic::upsert_limit(
-            &self.options.data_dir,
+            self.options.data_dir(),
             &mac,
             wide_rx_rate_limit,
             wide_tx_rate_limit,
@@ -368,7 +368,7 @@ impl TrafficApiHandler {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
-        let start_ms = now_ms.saturating_sub(self.options.traffic_retention_seconds as u64 * 1000);
+        let start_ms = now_ms.saturating_sub(self.options.traffic_retention_seconds() as u64 * 1000);
         let end_ms = now_ms;
 
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
@@ -418,7 +418,7 @@ impl TrafficApiHandler {
                     .collect();
 
                 let response = MetricsResponse {
-                    retention_seconds: self.options.traffic_retention_seconds as u64,
+                    retention_seconds: self.options.traffic_retention_seconds() as u64,
                     mac: mac_label,
                     metrics,
                 };
@@ -481,7 +481,7 @@ impl TrafficApiHandler {
 
         // Persist to file (storage layer handles empty hostname appropriately)
         traffic::upsert_hostname_binding(
-            &self.options.data_dir,
+            self.options.data_dir(),
             &mac,
             hostname,
         )?;

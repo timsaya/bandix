@@ -42,7 +42,7 @@ impl TrafficMonitor {
         let interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
         
         // Only create flush interval if persistence is enabled
-        if ctx.options.traffic_persist_history {
+        if ctx.options.traffic_persist_history() {
             self.start_monitoring_loop_with_persist(ctx, interval, shutdown_notify).await
         } else {
             self.start_monitoring_loop_memory_only(ctx, interval, shutdown_notify).await
@@ -57,7 +57,7 @@ impl TrafficMonitor {
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            ctx.options.traffic_flush_interval_seconds as u64
+            ctx.options.traffic_flush_interval_seconds() as u64
         ));
 
         loop {
@@ -68,7 +68,7 @@ impl TrafficMonitor {
                 _ = flush_interval.tick() => {
                     // Flush dirty rings to disk at configured interval
                     log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...", 
-                               ctx.options.traffic_flush_interval_seconds);
+                               ctx.options.traffic_flush_interval_seconds());
                     if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
                         log::error!("Failed to flush dirty rings to disk: {}", e);
                     } else {

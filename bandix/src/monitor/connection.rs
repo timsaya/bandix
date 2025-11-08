@@ -267,15 +267,17 @@ pub struct ConnectionModuleContext {
 }
 
 impl ConnectionModuleContext {
-    /// Create connection module context with shared hostname bindings
-    pub fn new(options: Options, hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>) -> Self {
-        // Get network interface information
-        let (interface_ip, subnet_mask) = network_utils::get_interface_info(&options.iface).unwrap();
-        
+    /// Create connection module context with shared hostname bindings and subnet info
+    pub fn new(
+        options: Options,
+        hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
+        interface_ip: [u8; 4],
+        subnet_mask: [u8; 4],
+    ) -> Self {
         Self {
             options,
             device_connection_stats: Arc::new(Mutex::new(GlobalConnectionStats::default())),
-            hostname_bindings,  // Use the shared hostname_bindings
+            hostname_bindings, // Use the shared hostname_bindings
             interface_ip,
             subnet_mask,
         }

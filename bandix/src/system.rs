@@ -128,7 +128,7 @@ pub fn log_startup_info(options: &Options) {
     let arch = std::env::consts::ARCH;
 
     // Network info
-    let iface_info = get_interface_info(options.iface.as_str());
+    let iface_info = get_interface_info(options.iface());
     let (ip_str, mask_str) = if let Some((ip, mask)) = iface_info {
         (format_ip(&ip), format_ip(&mask))
     } else {
@@ -154,12 +154,12 @@ pub fn log_startup_info(options: &Options) {
     if uid != 0 {
         warn!("It is recommended to run as root to enable eBPF capabilities");
     }
-    info!("Listening port: {}", options.port);
-    info!("Data directory: {}", options.data_dir);
-    info!("Retention seconds: {}", options.traffic_retention_seconds);
+    info!("Listening port: {}", options.port());
+    info!("Data directory: {}", options.data_dir());
+    info!("Retention seconds: {}", options.traffic_retention_seconds());
     info!(
         "Web request logging: {}",
-        if options.web_log {
+        if options.web_log() {
             "enabled"
         } else {
             "disabled"
@@ -167,19 +167,19 @@ pub fn log_startup_info(options: &Options) {
     );
     info!(
         "Interface: {} (IP: {}, Mask: {})",
-        options.iface, ip_str, mask_str
+        options.iface(), ip_str, mask_str
     );
 
     // Display enabled monitoring modules with their configurations
     let mut enabled_count = 0;
 
-    if options.enable_traffic {
+    if options.enable_traffic() {
         enabled_count += 1;
     }
-    if options.enable_dns {
+    if options.enable_dns() {
         enabled_count += 1;
     }
-    if options.enable_connection {
+    if options.enable_connection() {
         enabled_count += 1;
     }
 
@@ -188,18 +188,18 @@ pub fn log_startup_info(options: &Options) {
     } else {
         info!("Enabled monitoring modules ({}):", enabled_count);
 
-        if options.enable_traffic {
+        if options.enable_traffic() {
             info!(
                 "  • Traffic monitoring (retention: {}s)",
-                options.traffic_retention_seconds
+                options.traffic_retention_seconds()
             );
         }
 
-        if options.enable_dns {
+        if options.enable_dns() {
             info!("  • DNS monitoring");
         }
 
-        if options.enable_connection {
+        if options.enable_connection() {
             info!("  • Connection statistics monitoring");
         }
     }
@@ -210,10 +210,10 @@ pub fn log_startup_info(options: &Options) {
             info!("{}=\"{}\"", k, v);
         }
     }
-    if !Path::new(&options.data_dir).exists() {
+    if !Path::new(options.data_dir()).exists() {
         warn!(
             "Data directory does not exist and will be created during runtime: {}",
-            options.data_dir
+            options.data_dir()
         );
     }
 }
