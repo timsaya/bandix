@@ -14,7 +14,7 @@ pub struct DnsQueryInfo {
     pub domain: String,
     pub query_type: String,
     pub response_code: String,
-    pub response_time_ms: u64,
+    pub response_time_ms: Option<u64>, // Response time in milliseconds, None for queries, Some(value) for responses
     pub source_ip: String,
     pub destination_ip: String,
     pub source_port: u16,
@@ -253,6 +253,7 @@ impl DnsApiHandler {
     /// - domain: Filter by domain name (substring match)
     /// - device: Filter by device MAC or hostname (substring match)
     /// - is_query: Filter by query type (true=query, false=response)
+    /// - dns_server: Filter by DNS server IP address (destination_ip for queries, source_ip for responses)
     /// - page: Page number (default: 1)
     /// - page_size: Number of records per page (default: 20, max: 1000)
     /// - limit: (deprecated, use page_size) Maximum number of records to return
@@ -262,6 +263,7 @@ impl DnsApiHandler {
         let device_filter = request.query_params.get("device").cloned();
         let is_query_filter = request.query_params.get("is_query")
             .and_then(|s| s.parse::<bool>().ok());
+        let dns_server_filter = request.query_params.get("dns_server").cloned();
         
         // Pagination parameters
         let page = request
@@ -311,6 +313,24 @@ impl DnsApiHandler {
                 if let Some(is_query) = is_query_filter {
                     if q.is_query != is_query {
                         return false;
+                    }
+                }
+                
+                // Filter by DNS server IP address
+                // For queries: DNS server is destination_ip (port 53)
+                // For responses: DNS server is source_ip (port 53)
+                if let Some(dns_server) = &dns_server_filter {
+                    let dns_server_lower = dns_server.to_lowercase();
+                    if q.is_query {
+                        // Query: DNS server is destination
+                        if !q.destination_ip.to_lowercase().contains(&dns_server_lower) {
+                            return false;
+                        }
+                    } else {
+                        // Response: DNS server is source
+                        if !q.source_ip.to_lowercase().contains(&dns_server_lower) {
+                            return false;
+                        }
                     }
                 }
                 
@@ -388,9 +408,6 @@ impl DnsApiHandler {
         let query_infos: Vec<DnsQueryInfo> = paginated_queries
             .into_iter()
             .map(|q| {
-                // Use stored response time if available, otherwise 0
-                let response_time_ms = q.response_time_ms.unwrap_or(0);
-                
                 // Convert monotonic timestamp to Unix timestamp
                 let unix_timestamp_ms = self.convert_to_unix_timestamp(q.timestamp);
                 
@@ -419,7 +436,7 @@ impl DnsApiHandler {
                     domain: q.domain,
                     query_type: q.query_type,
                     response_code: q.response_code,
-                    response_time_ms,
+                    response_time_ms: q.response_time_ms,  // Queries are None, responses may have value
                     source_ip: q.source_ip,
                     destination_ip: q.destination_ip,
                     source_port: q.source_port,

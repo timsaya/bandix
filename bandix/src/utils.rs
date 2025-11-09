@@ -39,6 +39,26 @@ pub mod network_utils {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::process::Command;
     use std::str::FromStr;
+    use std::sync::Mutex;
+    use std::time::{Duration, SystemTime};
+    
+    // Cache for IP-MAC mapping with expiration
+    struct IpMacMappingCache {
+        mapping: HashMap<[u8; 4], [u8; 6]>,
+        expires_at: SystemTime,
+    }
+    
+    // Cache for IPv6 neighbor table with expiration
+    struct Ipv6NeighborsCache {
+        mapping: HashMap<[u8; 6], Vec<[u8; 16]>>,
+        expires_at: SystemTime,
+    }
+    
+    static IP_MAC_MAPPING_CACHE: Mutex<Option<IpMacMappingCache>> = Mutex::new(None);
+    static IPV6_NEIGHBORS_CACHE: Mutex<Option<Ipv6NeighborsCache>> = Mutex::new(None);
+    
+    // Cache expiration time: 5 seconds
+    const CACHE_TTL_SECONDS: u64 = 5;
 
     // Get interface IP and subnet mask
     pub fn get_interface_info(interface: &str) -> Option<([u8; 4], [u8; 4])> {
@@ -146,9 +166,42 @@ pub mod network_utils {
         mask
     }
 
-    /// Get IP to MAC address mapping from ARP table
+    /// Get IP to MAC address mapping from ARP table (with caching)
     /// Also includes local machine IP-MAC mapping
+    /// Results are cached for 5 seconds to reduce system calls
     pub fn get_ip_mac_mapping() -> Result<HashMap<[u8; 4], [u8; 6]>> {
+        let now = SystemTime::now();
+        
+        // Check cache
+        {
+            let cache_guard = IP_MAC_MAPPING_CACHE.lock().unwrap();
+            if let Some(ref cache) = *cache_guard {
+                if now < cache.expires_at {
+                    // Cache is valid, return cached data
+                    return Ok(cache.mapping.clone());
+                }
+            }
+        }
+        
+        // Cache expired or doesn't exist, fetch fresh data
+        let mapping = get_ip_mac_mapping_uncached()?;
+        
+        // Update cache
+        {
+            let expires_at = now + Duration::from_secs(CACHE_TTL_SECONDS);
+            let mut cache_guard = IP_MAC_MAPPING_CACHE.lock().unwrap();
+            *cache_guard = Some(IpMacMappingCache {
+                mapping: mapping.clone(),
+                expires_at,
+            });
+        }
+        
+        Ok(mapping)
+    }
+    
+    /// Get IP to MAC address mapping from ARP table (uncached, internal implementation)
+    /// Also includes local machine IP-MAC mapping
+    fn get_ip_mac_mapping_uncached() -> Result<HashMap<[u8; 4], [u8; 6]>> {
         let mut mapping = HashMap::new();
 
         // Read ARP table from /proc/net/arp
@@ -309,9 +362,42 @@ pub mod network_utils {
         ipv6_addresses
     }
 
-    /// Get IPv6 neighbor table (similar to ARP for IPv4)
+    /// Get IPv6 neighbor table (similar to ARP for IPv4) (with caching)
     /// Returns mapping from MAC address to list of IPv6 addresses
+    /// Results are cached for 5 seconds to reduce system calls
     pub fn get_ipv6_neighbors() -> Result<HashMap<[u8; 6], Vec<[u8; 16]>>> {
+        let now = SystemTime::now();
+        
+        // Check cache
+        {
+            let cache_guard = IPV6_NEIGHBORS_CACHE.lock().unwrap();
+            if let Some(ref cache) = *cache_guard {
+                if now < cache.expires_at {
+                    // Cache is valid, return cached data
+                    return Ok(cache.mapping.clone());
+                }
+            }
+        }
+        
+        // Cache expired or doesn't exist, fetch fresh data
+        let mapping = get_ipv6_neighbors_uncached()?;
+        
+        // Update cache
+        {
+            let expires_at = now + Duration::from_secs(CACHE_TTL_SECONDS);
+            let mut cache_guard = IPV6_NEIGHBORS_CACHE.lock().unwrap();
+            *cache_guard = Some(Ipv6NeighborsCache {
+                mapping: mapping.clone(),
+                expires_at,
+            });
+        }
+        
+        Ok(mapping)
+    }
+    
+    /// Get IPv6 neighbor table (uncached, internal implementation)
+    /// Returns mapping from MAC address to list of IPv6 addresses
+    fn get_ipv6_neighbors_uncached() -> Result<HashMap<[u8; 6], Vec<[u8; 16]>>> {
         let mut mapping: HashMap<[u8; 6], Vec<[u8; 16]>> = HashMap::new();
 
         // Method 1: Parse ip -6 neigh show

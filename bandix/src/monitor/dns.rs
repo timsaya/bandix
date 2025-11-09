@@ -368,41 +368,84 @@ impl DnsMonitor {
     }
     
     /// Get device information (MAC and hostname) from IP address
+    /// Supports both IPv4 and IPv6 addresses
     fn get_device_info(&self, ip: &str, ctx: &DnsModuleContext) -> (String, String) {
         use crate::utils::network_utils;
         
-        // Try to get MAC address from ARP table
-        let ip_mac_mapping = match network_utils::get_ip_mac_mapping() {
-            Ok(mapping) => mapping,
-            Err(_) => return ("".to_string(), "".to_string()),
-        };
+        // Try IPv4 first
+        if let Ok(ipv4_addr) = ip.parse::<std::net::Ipv4Addr>() {
+            let ip_bytes = ipv4_addr.octets();
+            
+            // Try to get MAC address from ARP table
+            let ip_mac_mapping = match network_utils::get_ip_mac_mapping() {
+                Ok(mapping) => mapping,
+                Err(_) => return ("".to_string(), "".to_string()),
+            };
+            
+            // Get MAC address
+            let mac = match ip_mac_mapping.get(&ip_bytes) {
+                Some(mac) => *mac,
+                None => return ("".to_string(), "".to_string()),
+            };
+            
+            // Format MAC address
+            let mac_str = format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            );
+            
+            // Get hostname from bindings
+            let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
+                bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
+            } else {
+                "".to_string()
+            };
+            
+            return (mac_str, hostname);
+        }
         
-        // Parse IP address
-        let ip_addr = match ip.parse::<std::net::Ipv4Addr>() {
-            Ok(addr) => addr.octets(),
-            Err(_) => return ("".to_string(), "".to_string()),
-        };
+        // Try IPv6
+        if let Ok(ipv6_addr) = ip.parse::<std::net::Ipv6Addr>() {
+            let ipv6_bytes = ipv6_addr.octets();
+            
+            // Try to get MAC address from IPv6 neighbor table
+            let ipv6_neighbors = match network_utils::get_ipv6_neighbors() {
+                Ok(mapping) => mapping,
+                Err(_) => return ("".to_string(), "".to_string()),
+            };
+            
+            // Find MAC address by searching for matching IPv6 address
+            let mut mac: Option<[u8; 6]> = None;
+            for (mac_addr, ipv6_list) in ipv6_neighbors.iter() {
+                if ipv6_list.iter().any(|&addr| addr == ipv6_bytes) {
+                    mac = Some(*mac_addr);
+                    break;
+                }
+            }
+            
+            let mac = match mac {
+                Some(mac) => mac,
+                None => return ("".to_string(), "".to_string()),
+            };
+            
+            // Format MAC address
+            let mac_str = format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            );
+            
+            // Get hostname from bindings
+            let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
+                bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
+            } else {
+                "".to_string()
+            };
+            
+            return (mac_str, hostname);
+        }
         
-        // Get MAC address
-        let mac = match ip_mac_mapping.get(&ip_addr) {
-            Some(mac) => *mac,
-            None => return ("".to_string(), "".to_string()),
-        };
-        
-        // Format MAC address
-        let mac_str = format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-        );
-        
-        // Get hostname from bindings
-        let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
-            bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
-        } else {
-            "".to_string()
-        };
-        
-        (mac_str, hostname)
+        // Neither IPv4 nor IPv6, return empty
+        ("".to_string(), "".to_string())
     }
 
     /// Parse DNS packet (using trust-dns-proto library)
@@ -579,7 +622,7 @@ impl DnsMonitor {
                         q.query_type == query_type &&
                         // 5. It's a query (not a response)
                         q.is_query &&
-                        // 6. Response time hasn't been set yet
+                        // 6. Response time hasn't been set yet (not needed anymore, but keep for consistency)
                         q.response_time_ms.is_none() &&
                         // 7. Response timestamp is after query timestamp
                         timestamp > q.timestamp
@@ -597,10 +640,8 @@ impl DnsMonitor {
                             diff_ns / 1_000_000
                         };
                         
-                        // Update the matching query record with response time
-                        queries[matching_query_idx].response_time_ms = Some(response_time_ms);
-                        
-                        // Also set response time for this response record (for consistency)
+                        // Don't update the query record's response_time_ms - queries should never have response time
+                        // Only set response time for this response record
                         record.response_time_ms = Some(response_time_ms);
                         
                         log::debug!(
