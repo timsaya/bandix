@@ -17,7 +17,7 @@ pub async fn start_server(
     let host = if cfg!(debug_assertions) {
         "0.0.0.0"
     } else {
-        "0.0.0.0"
+        "127.0.0.1"
     };
     let addr = format!("{}:{}", host, options.port());
     let listener = TcpListener::bind(&addr).await?;
