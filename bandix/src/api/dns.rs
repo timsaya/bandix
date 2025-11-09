@@ -84,9 +84,9 @@ pub struct DnsStatsInfo {
     
     // Top statistics
     pub top_domains: Vec<TopItem>,               // Most queried domains (top 10)
-    pub top_query_types: Vec<TopItem>,           // Most used query types (A, AAAA, etc.)
+    pub top_query_types: Vec<TopItem>,           // Most used query types (top 10)
     pub top_devices: Vec<TopItem>,               // Most active devices (top 10)
-    pub top_dns_servers: Vec<TopItem>,           // Most used DNS servers (top 5)
+    pub top_dns_servers: Vec<TopItem>,           // Most used DNS servers (top 10)
     
     // Device statistics
     pub unique_devices: usize,                   // Number of unique devices
@@ -525,7 +525,10 @@ impl DnsApiHandler {
                 },
             })
             .collect();
-        response_codes.sort_by(|a, b| b.count.cmp(&a.count));
+        // Sort by count (descending), then by code name (ascending)
+        response_codes.sort_by(|a, b| {
+            b.count.cmp(&a.count).then_with(|| a.code.cmp(&b.code))
+        });
         
         // Top domains
         let mut domain_map: HashMap<String, usize> = HashMap::new();
@@ -536,7 +539,10 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        top_domains.sort_by(|a, b| b.count.cmp(&a.count));
+        // Sort by count (descending), then by name (ascending)
+        top_domains.sort_by(|a, b| {
+            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+        });
         top_domains.truncate(10);
         
         // Top query types
@@ -548,7 +554,11 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        top_query_types.sort_by(|a, b| b.count.cmp(&a.count));
+        // Sort by count (descending), then by name (ascending)
+        top_query_types.sort_by(|a, b| {
+            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+        });
+        top_query_types.truncate(10);
         
         // Top devices (by MAC or name)
         let mut device_map: HashMap<String, usize> = HashMap::new();
@@ -566,7 +576,10 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        top_devices.sort_by(|a, b| b.count.cmp(&a.count));
+        // Sort by count (descending), then by name (ascending)
+        top_devices.sort_by(|a, b| {
+            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+        });
         top_devices.truncate(10);
         
         // Top DNS servers (destination IP for queries)
@@ -578,8 +591,11 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        top_dns_servers.sort_by(|a, b| b.count.cmp(&a.count));
-        top_dns_servers.truncate(5);
+        // Sort by count (descending), then by name (ascending)
+        top_dns_servers.sort_by(|a, b| {
+            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+        });
+        top_dns_servers.truncate(10);
         
         // Unique devices
         let unique_devices: std::collections::HashSet<String> = queries.iter()
