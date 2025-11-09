@@ -1,32 +1,100 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
+use crate::monitor::DnsQueryRecord;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::{Local, TimeZone};
 
 /// DNS query information for API response
 #[derive(Serialize, Deserialize)]
 pub struct DnsQueryInfo {
-    pub timestamp: u64,
+    pub timestamp: u64,              // Unix timestamp in milliseconds
+    pub timestamp_formatted: String, // Formatted time string (e.g., "2024-01-01 12:00:00")
     pub domain: String,
     pub query_type: String,
     pub response_code: String,
     pub response_time_ms: u64,
     pub source_ip: String,
+    pub destination_ip: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub transaction_id: u16,
+    pub is_query: bool,
+    pub response_ips: Vec<String>,
+    pub response_records: Vec<String>, // All response records (A, AAAA, CNAME, HTTPS, etc.)
+    pub device_mac: String,            // Device MAC address
+    pub device_name: String,           // Device hostname
 }
 
 /// DNS queries response structure
 #[derive(Serialize, Deserialize)]
 pub struct DnsQueriesResponse {
     pub queries: Vec<DnsQueryInfo>,
+    pub total: usize,           // Total number of records (before pagination)
+    pub page: usize,            // Current page number
+    pub page_size: usize,       // Page size
+    pub total_pages: usize,     // Total number of pages
+}
+
+/// Top item with count (for top domains, devices, etc.)
+#[derive(Serialize, Deserialize)]
+pub struct TopItem {
+    pub name: String,
+    pub count: usize,
+}
+
+/// Response time percentiles
+#[derive(Serialize, Deserialize)]
+pub struct ResponseTimePercentiles {
+    pub p50: u64,  // Median (50th percentile) in milliseconds
+    pub p90: u64,  // 90th percentile in milliseconds
+    pub p95: u64,  // 95th percentile in milliseconds
+    pub p99: u64,  // 99th percentile in milliseconds
+}
+
+/// Response code statistics
+#[derive(Serialize, Deserialize)]
+pub struct ResponseCodeStats {
+    pub code: String,
+    pub count: usize,
+    pub percentage: f64,
 }
 
 /// DNS statistics for API response
 #[derive(Serialize, Deserialize)]
 pub struct DnsStatsInfo {
-    pub total_queries: u64,
-    pub cache_hits: u64,
-    pub cache_misses: u64,
-    pub error_rate: f64,
-    pub top_domains: Vec<String>,
+    // Basic counts
+    pub total_queries: usize,                    // Total number of DNS queries
+    pub total_responses: usize,                  // Total number of DNS responses
+    pub queries_with_response: usize,            // Queries that got a response
+    pub queries_without_response: usize,         // Queries without response (timeout/lost)
+    
+    // Performance metrics
+    pub avg_response_time_ms: f64,               // Average response time in milliseconds
+    pub min_response_time_ms: u64,               // Fastest response time
+    pub max_response_time_ms: u64,               // Slowest response time
+    pub response_time_percentiles: ResponseTimePercentiles,
+    
+    // Success/failure metrics
+    pub success_count: usize,                    // Successful responses (NoError)
+    pub failure_count: usize,                    // Failed responses (any error)
+    pub success_rate: f64,                       // Success rate (0.0 - 1.0)
+    pub response_codes: Vec<ResponseCodeStats>,  // Breakdown by response code
+    
+    // Top statistics
+    pub top_domains: Vec<TopItem>,               // Most queried domains (top 10)
+    pub top_query_types: Vec<TopItem>,           // Most used query types (A, AAAA, etc.)
+    pub top_devices: Vec<TopItem>,               // Most active devices (top 10)
+    pub top_dns_servers: Vec<TopItem>,           // Most used DNS servers (top 5)
+    
+    // Device statistics
+    pub unique_devices: usize,                   // Number of unique devices
+    
+    // Time range
+    pub time_range_start: u64,                   // Earliest record timestamp (ms)
+    pub time_range_end: u64,                     // Latest record timestamp (ms)
+    pub time_range_duration_minutes: u64,        // Duration in minutes
 }
 
 /// DNS statistics response structure
@@ -50,24 +118,86 @@ pub struct DnsConfigResponse {
     pub config: DnsConfigInfo,
 }
 
-/// DNS configuration update request
-#[derive(Serialize, Deserialize)]
-pub struct DnsConfigUpdateRequest {
-    pub enabled: Option<bool>,
-    pub monitored_interfaces: Option<Vec<String>>,
-    pub log_level: Option<String>,
-    pub retention_days: Option<u64>,
-}
-
 /// DNS monitoring API handler
 #[derive(Clone)]
 pub struct DnsApiHandler {
+    #[allow(dead_code)]
     options: Options,
+    dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>,
+    boot_time_offset_ns: u64, // Offset to convert monotonic time to Unix timestamp
 }
 
 impl DnsApiHandler {
-    pub fn new(options: Options) -> Self {
-        Self { options }
+    pub fn new(options: Options, dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>) -> Self {
+        // Calculate boot time offset: Unix time - monotonic time
+        // We'll use the first DNS record's timestamp as reference if available,
+        // otherwise calculate from current time
+        let boot_time_offset_ns = Self::calculate_boot_time_offset();
+        
+        Self {
+            options,
+            dns_queries,
+            boot_time_offset_ns,
+        }
+    }
+    
+    /// Calculate boot time offset to convert monotonic time to Unix timestamp
+    /// This reads /proc/uptime to get system uptime, then calculates boot time
+    fn calculate_boot_time_offset() -> u64 {
+        // Method 1: Read /proc/uptime
+        if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
+            if let Some(uptime_secs_str) = content.split_whitespace().next() {
+                if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
+                    let uptime_ns = (uptime_secs * 1_000_000_000.0) as u64;
+                    let now_unix_ns = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
+                    // Boot time = current Unix time - uptime
+                    let boot_time_unix_ns = now_unix_ns.saturating_sub(uptime_ns);
+                    // Offset = boot time (we'll add this to monotonic timestamps)
+                    // Actually, we need: unix_time = monotonic_time + offset
+                    // So: offset = unix_time - monotonic_time
+                    // But we don't have monotonic time here, so we use:
+                    // offset = boot_time_unix_ns (since monotonic time starts at 0 at boot)
+                    return boot_time_unix_ns;
+                }
+            }
+        }
+        
+        // Fallback: Use current time as approximation
+        // This is less accurate but works if /proc/uptime is not available
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    }
+    
+    /// Convert monotonic timestamp (nanoseconds) to Unix timestamp (milliseconds)
+    fn convert_to_unix_timestamp(&self, monotonic_ns: u64) -> u64 {
+        // Unix timestamp = monotonic timestamp + boot time offset
+        let unix_ns = monotonic_ns.saturating_add(self.boot_time_offset_ns);
+        unix_ns / 1_000_000 // Convert to milliseconds
+    }
+    
+    /// Format Unix timestamp (milliseconds) to readable string (local time)
+    fn format_timestamp(timestamp_ms: u64) -> String {
+        let secs = (timestamp_ms / 1000) as i64;
+        let nanos = ((timestamp_ms % 1000) * 1_000_000) as u32;
+        
+        // Convert to local time
+        match Local.timestamp_opt(secs, nanos) {
+            chrono::LocalResult::Single(dt) => {
+                dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+            }
+            chrono::LocalResult::None => {
+                "Invalid timestamp".to_string()
+            }
+            chrono::LocalResult::Ambiguous(dt1, _dt2) => {
+                // In case of ambiguous time (DST transition), use the first option
+                dt1.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+            }
+        }
     }
 }
 
@@ -107,11 +237,176 @@ impl DnsApiHandler {
 
 impl DnsApiHandler {
     /// Handle /api/dns/queries endpoint
-    async fn handle_queries(&self, _request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        // TODO: Implement DNS queries endpoint
-        // This would return recent DNS queries with filtering options
+    /// 
+    /// Query parameters:
+    /// - domain: Filter by domain name (substring match)
+    /// - device: Filter by device MAC or hostname (substring match)
+    /// - is_query: Filter by query type (true=query, false=response)
+    /// - page: Page number (default: 1)
+    /// - page_size: Number of records per page (default: 20, max: 1000)
+    /// - limit: (deprecated, use page_size) Maximum number of records to return
+    async fn handle_queries(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        // Get query parameters
+        let domain_filter = request.query_params.get("domain").cloned();
+        let device_filter = request.query_params.get("device").cloned();
+        let is_query_filter = request.query_params.get("is_query")
+            .and_then(|s| s.parse::<bool>().ok());
+        
+        // Pagination parameters
+        let page = request
+            .query_params
+            .get("page")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1); // Minimum page is 1
+        
+        let page_size = request
+            .query_params
+            .get("page_size")
+            .or(request.query_params.get("limit")) // Support legacy 'limit' parameter
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(20)
+            .min(1000); // Maximum 1000 records per page
 
-        let response = DnsQueriesResponse { queries: vec![] };
+        // Get DNS queries from storage
+        let queries = if let Ok(queries) = self.dns_queries.lock() {
+            queries.clone()
+        } else {
+            vec![]
+        };
+
+        // Apply filters
+        let filtered_queries: Vec<DnsQueryRecord> = queries
+            .into_iter()
+            .filter(|q| {
+                // Filter by domain (case-insensitive substring match)
+                if let Some(domain) = &domain_filter {
+                    if !q.domain.to_lowercase().contains(&domain.to_lowercase()) {
+                        return false;
+                    }
+                }
+                
+                // Filter by device (MAC or hostname, case-insensitive substring match)
+                if let Some(device) = &device_filter {
+                    let device_lower = device.to_lowercase();
+                    let mac_match = q.device_mac.to_lowercase().contains(&device_lower);
+                    let name_match = q.device_name.to_lowercase().contains(&device_lower);
+                    if !mac_match && !name_match {
+                        return false;
+                    }
+                }
+                
+                // Filter by query type
+                if let Some(is_query) = is_query_filter {
+                    if q.is_query != is_query {
+                        return false;
+                    }
+                }
+                
+                true
+            })
+            .collect();
+
+        // Group by transaction and sort
+        // Strategy: Group records by transaction_id + domain + source/dest IP pair
+        // Each group represents a query-response pair (or standalone query/response)
+        // Sort groups by the latest timestamp in each group (newest first)
+        // Within each group, sort by timestamp (query before response)
+        
+        use std::collections::HashMap;
+        
+        // Create groups: key = (transaction_id, domain, ip_pair_key)
+        let mut groups: HashMap<(u16, String, String), Vec<DnsQueryRecord>> = HashMap::new();
+        
+        for record in filtered_queries {
+            // Create a normalized IP pair key (order-independent)
+            // This ensures query and response with swapped IPs are grouped together
+            let ip_pair_key = {
+                let mut ips = vec![record.source_ip.clone(), record.destination_ip.clone()];
+                ips.sort();
+                ips.join("_")
+            };
+            
+            let key = (record.transaction_id, record.domain.clone(), ip_pair_key);
+            groups.entry(key).or_insert_with(Vec::new).push(record);
+        }
+        
+        // Convert groups to sorted list
+        let mut sorted_groups: Vec<Vec<DnsQueryRecord>> = groups.into_values().collect();
+        
+        // Sort groups by the latest timestamp in each group (newest first)
+        sorted_groups.sort_by(|group_a, group_b| {
+            let max_time_a = group_a.iter().map(|r| r.timestamp).max().unwrap_or(0);
+            let max_time_b = group_b.iter().map(|r| r.timestamp).max().unwrap_or(0);
+            max_time_b.cmp(&max_time_a)
+        });
+        
+        // Sort records within each group by timestamp (newest first)
+        // Since responses typically come after queries, this means response will be first
+        for group in &mut sorted_groups {
+            group.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        }
+        
+        // Flatten groups back to a single list
+        let sorted_queries: Vec<DnsQueryRecord> = sorted_groups
+            .into_iter()
+            .flat_map(|group| group.into_iter())
+            .collect();
+        
+        // Calculate pagination
+        let total = sorted_queries.len();
+        let total_pages = (total + page_size - 1) / page_size; // Ceiling division
+        let start_idx = (page - 1) * page_size;
+        let end_idx = (start_idx + page_size).min(total);
+        
+        // Apply pagination
+        let paginated_queries = if start_idx < total {
+            sorted_queries[start_idx..end_idx].to_vec()
+        } else {
+            vec![] // Page out of range
+        };
+
+        // Convert to API response format
+        let query_infos: Vec<DnsQueryInfo> = paginated_queries
+            .into_iter()
+            .map(|q| {
+                // Use stored response time if available, otherwise 0
+                let response_time_ms = q.response_time_ms.unwrap_or(0);
+                
+                // Convert monotonic timestamp to Unix timestamp
+                let unix_timestamp_ms = self.convert_to_unix_timestamp(q.timestamp);
+                
+                // Format timestamp
+                let timestamp_formatted = Self::format_timestamp(unix_timestamp_ms);
+
+                DnsQueryInfo {
+                    timestamp: unix_timestamp_ms,
+                    timestamp_formatted,
+                    domain: q.domain,
+                    query_type: q.query_type,
+                    response_code: q.response_code,
+                    response_time_ms,
+                    source_ip: q.source_ip,
+                    destination_ip: q.destination_ip,
+                    source_port: q.source_port,
+                    destination_port: q.destination_port,
+                    transaction_id: q.transaction_id,
+                    is_query: q.is_query,
+                    response_ips: q.response_ips,
+                    response_records: q.response_records,
+                    device_mac: q.device_mac,
+                    device_name: q.device_name,
+                }
+            })
+            .collect();
+
+        let response = DnsQueriesResponse {
+            queries: query_infos,
+            total,
+            page,
+            page_size,
+            total_pages,
+        };
 
         let api_response = ApiResponse::success(response);
         let body = serde_json::to_string(&api_response)?;
@@ -120,15 +415,209 @@ impl DnsApiHandler {
 
     /// Handle /api/dns/stats endpoint
     async fn handle_stats(&self) -> Result<HttpResponse, anyhow::Error> {
-        // TODO: Implement DNS statistics endpoint
-        // This would return DNS query statistics, cache hit rates, etc.
+        use std::collections::HashMap;
+        
+        // Get all DNS queries
+        let queries = if let Ok(queries) = self.dns_queries.lock() {
+            queries.clone()
+        } else {
+            vec![]
+        };
+        
+        if queries.is_empty() {
+            // Return empty stats if no data
+            let stats = DnsStatsInfo {
+                total_queries: 0,
+                total_responses: 0,
+                queries_with_response: 0,
+                queries_without_response: 0,
+                avg_response_time_ms: 0.0,
+                min_response_time_ms: 0,
+                max_response_time_ms: 0,
+                response_time_percentiles: ResponseTimePercentiles {
+                    p50: 0,
+                    p90: 0,
+                    p95: 0,
+                    p99: 0,
+                },
+                success_count: 0,
+                failure_count: 0,
+                success_rate: 0.0,
+                response_codes: vec![],
+                top_domains: vec![],
+                top_query_types: vec![],
+                top_devices: vec![],
+                top_dns_servers: vec![],
+                unique_devices: 0,
+                time_range_start: 0,
+                time_range_end: 0,
+                time_range_duration_minutes: 0,
+            };
+            
+            let response = DnsStatsResponse { stats };
+            let api_response = ApiResponse::success(response);
+            let body = serde_json::to_string(&api_response)?;
+            return Ok(HttpResponse::ok(body));
+        }
+        
+        // Calculate basic counts
+        let total_queries = queries.iter().filter(|q| q.is_query).count();
+        let total_responses = queries.iter().filter(|q| !q.is_query).count();
+        let queries_with_response = queries.iter()
+            .filter(|q| q.is_query && q.response_time_ms.is_some())
+            .count();
+        let queries_without_response = total_queries - queries_with_response;
+        
+        // Calculate response time statistics
+        let response_times: Vec<u64> = queries.iter()
+            .filter_map(|q| q.response_time_ms)
+            .filter(|&t| t > 0)
+            .collect();
+        
+        let (avg_response_time_ms, min_response_time_ms, max_response_time_ms, response_time_percentiles) = 
+            if !response_times.is_empty() {
+                let sum: u64 = response_times.iter().sum();
+                let avg = sum as f64 / response_times.len() as f64;
+                let min = *response_times.iter().min().unwrap();
+                let max = *response_times.iter().max().unwrap();
+                
+                // Calculate percentiles
+                let mut sorted_times = response_times.clone();
+                sorted_times.sort();
+                let len = sorted_times.len();
+                let p50 = sorted_times[len * 50 / 100];
+                let p90 = sorted_times[len * 90 / 100];
+                let p95 = sorted_times[len * 95 / 100];
+                let p99 = sorted_times[len * 99 / 100];
+                
+                (avg, min, max, ResponseTimePercentiles { p50, p90, p95, p99 })
+            } else {
+                (0.0, 0, 0, ResponseTimePercentiles { p50: 0, p90: 0, p95: 0, p99: 0 })
+            };
+        
+        // Calculate success/failure metrics
+        let success_count = queries.iter()
+            .filter(|q| !q.is_query && q.response_code == "Success")
+            .count();
+        let failure_count = queries.iter()
+            .filter(|q| !q.is_query && !q.response_code.is_empty() && q.response_code != "Success")
+            .count();
+        let success_rate = if total_responses > 0 {
+            success_count as f64 / total_responses as f64
+        } else {
+            0.0
+        };
+        
+        // Response code breakdown
+        let mut response_code_map: HashMap<String, usize> = HashMap::new();
+        for query in queries.iter().filter(|q| !q.is_query && !q.response_code.is_empty()) {
+            *response_code_map.entry(query.response_code.clone()).or_insert(0) += 1;
+        }
+        let mut response_codes: Vec<ResponseCodeStats> = response_code_map
+            .into_iter()
+            .map(|(code, count)| ResponseCodeStats {
+                code,
+                count,
+                percentage: if total_responses > 0 {
+                    count as f64 / total_responses as f64
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+        response_codes.sort_by(|a, b| b.count.cmp(&a.count));
+        
+        // Top domains
+        let mut domain_map: HashMap<String, usize> = HashMap::new();
+        for query in queries.iter().filter(|q| q.is_query) {
+            *domain_map.entry(query.domain.clone()).or_insert(0) += 1;
+        }
+        let mut top_domains: Vec<TopItem> = domain_map
+            .into_iter()
+            .map(|(name, count)| TopItem { name, count })
+            .collect();
+        top_domains.sort_by(|a, b| b.count.cmp(&a.count));
+        top_domains.truncate(10);
+        
+        // Top query types
+        let mut query_type_map: HashMap<String, usize> = HashMap::new();
+        for query in queries.iter().filter(|q| q.is_query) {
+            *query_type_map.entry(query.query_type.clone()).or_insert(0) += 1;
+        }
+        let mut top_query_types: Vec<TopItem> = query_type_map
+            .into_iter()
+            .map(|(name, count)| TopItem { name, count })
+            .collect();
+        top_query_types.sort_by(|a, b| b.count.cmp(&a.count));
+        
+        // Top devices (by MAC or name)
+        let mut device_map: HashMap<String, usize> = HashMap::new();
+        for query in queries.iter().filter(|q| q.is_query) {
+            let device_key = if !query.device_name.is_empty() {
+                query.device_name.clone()
+            } else if !query.device_mac.is_empty() {
+                query.device_mac.clone()
+            } else {
+                continue;
+            };
+            *device_map.entry(device_key).or_insert(0) += 1;
+        }
+        let mut top_devices: Vec<TopItem> = device_map
+            .into_iter()
+            .map(|(name, count)| TopItem { name, count })
+            .collect();
+        top_devices.sort_by(|a, b| b.count.cmp(&a.count));
+        top_devices.truncate(10);
+        
+        // Top DNS servers (destination IP for queries)
+        let mut dns_server_map: HashMap<String, usize> = HashMap::new();
+        for query in queries.iter().filter(|q| q.is_query) {
+            *dns_server_map.entry(query.destination_ip.clone()).or_insert(0) += 1;
+        }
+        let mut top_dns_servers: Vec<TopItem> = dns_server_map
+            .into_iter()
+            .map(|(name, count)| TopItem { name, count })
+            .collect();
+        top_dns_servers.sort_by(|a, b| b.count.cmp(&a.count));
+        top_dns_servers.truncate(5);
+        
+        // Unique devices
+        let unique_devices: std::collections::HashSet<String> = queries.iter()
+            .filter(|q| q.is_query && !q.device_mac.is_empty())
+            .map(|q| q.device_mac.clone())
+            .collect();
+        let unique_devices_count = unique_devices.len();
+        
+        // Time range
+        let time_range_start = queries.iter().map(|q| q.timestamp).min().unwrap_or(0);
+        let time_range_end = queries.iter().map(|q| q.timestamp).max().unwrap_or(0);
+        let time_range_duration_minutes = if time_range_end > time_range_start {
+            (time_range_end - time_range_start) / 1_000_000_000 / 60
+        } else {
+            0
+        };
 
         let stats = DnsStatsInfo {
-            total_queries: 0,
-            cache_hits: 0,
-            cache_misses: 0,
-            error_rate: 0.0,
-            top_domains: vec![],
+            total_queries,
+            total_responses,
+            queries_with_response,
+            queries_without_response,
+            avg_response_time_ms,
+            min_response_time_ms,
+            max_response_time_ms,
+            response_time_percentiles,
+            success_count,
+            failure_count,
+            success_rate,
+            response_codes,
+            top_domains,
+            top_query_types,
+            top_devices,
+            top_dns_servers,
+            unique_devices: unique_devices_count,
+            time_range_start: self.convert_to_unix_timestamp(time_range_start),
+            time_range_end: self.convert_to_unix_timestamp(time_range_end),
+            time_range_duration_minutes,
         };
 
         let response = DnsStatsResponse { stats };

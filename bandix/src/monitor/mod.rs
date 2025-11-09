@@ -20,13 +20,15 @@ pub struct TrafficModuleContext {
     pub rate_limits: Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
     pub memory_ring_manager: Arc<MemoryRingManager>,
-    pub ingress_ebpf: Option<aya::Ebpf>,
-    pub egress_ebpf: Option<aya::Ebpf>,
+    pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
+    pub egress_ebpf: Option<Arc<aya::Ebpf>>,
 }
 
 impl TrafficModuleContext {
     /// Create traffic module context
-    pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
+    /// Both ingress_ebpf and egress_ebpf are Arc references to the same eBPF object
+    /// This ensures both programs share the same maps (MAC_TRAFFIC, MAC_RATE_LIMITS, etc.)
+    pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>) -> Self {
         let memory_ring_manager = Arc::new(MemoryRingManager::new(
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
@@ -37,10 +39,10 @@ impl TrafficModuleContext {
             if let Err(e) = memory_ring_manager.load_from_files() {
                 log::error!("Failed to load ring files into memory at startup: {}", e);
             } else {
-                log::info!("Successfully loaded existing ring files into memory");
+                log::debug!("Successfully loaded existing ring files into memory");
             }
         } else {
-            log::info!("Traffic history persistence disabled, starting with empty memory ring");
+            log::debug!("Traffic history persistence disabled, starting with empty memory ring");
         }
         
         // Create shared hostname bindings - this will be used by both traffic and connection modules
@@ -59,22 +61,53 @@ impl TrafficModuleContext {
     }
 }
 
+/// DNS query record
+#[derive(Debug, Clone)]
+pub struct DnsQueryRecord {
+    pub timestamp: u64,
+    pub domain: String,
+    pub query_type: String,
+    pub response_code: String,
+    pub source_ip: String,
+    pub destination_ip: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub transaction_id: u16,
+    pub is_query: bool,
+    pub response_ips: Vec<String>,
+    pub response_records: Vec<String>, // All response records (A, AAAA, CNAME, HTTPS, etc.)
+    pub response_time_ms: Option<u64>, // Response time in milliseconds, None if no response matched
+    pub device_mac: String,            // Device MAC address (from source IP)
+    pub device_name: String,           // Device hostname (from hostname bindings)
+}
+
 /// DNS module context
 pub struct DnsModuleContext {
     pub options: Options,
-    pub ingress_ebpf: Option<aya::Ebpf>,
-    pub egress_ebpf: Option<aya::Ebpf>,
-    // DNS module specific context fields
-    // e.g.: DNS query logs, DNS statistics, etc.
+    pub ingress_ebpf: Option<std::sync::Arc<aya::Ebpf>>,
+    pub egress_ebpf: Option<std::sync::Arc<aya::Ebpf>>,
+    pub dns_map: Option<aya::maps::Map>,
+    pub dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>,
+    pub hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
 }
 
 impl DnsModuleContext {
-    /// Create DNS module context
-    pub fn new(options: Options, ingress_ebpf: aya::Ebpf, egress_ebpf: aya::Ebpf) -> Self {
+    /// Create DNS module context with pre-acquired RingBuf map
+    /// This is used when DNS module shares eBPF object with other modules (e.g., traffic)
+    pub fn new_with_map(
+        options: Options, 
+        ingress_ebpf: std::sync::Arc<aya::Ebpf>, 
+        egress_ebpf: std::sync::Arc<aya::Ebpf>,
+        dns_map: aya::maps::Map,
+        hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
+    ) -> Self {
         Self {
             options,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
+            dns_map: Some(dns_map),
+            dns_queries: Arc::new(Mutex::new(Vec::new())),
+            hostname_bindings,
         }
     }
 }
@@ -96,13 +129,16 @@ impl Clone for ModuleContext {
                 rate_limits: Arc::clone(&ctx.rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
                 memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
-                ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
-                egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
+                ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
+                egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
             }),
             ModuleContext::Dns(ctx) => ModuleContext::Dns(DnsModuleContext {
                 options: ctx.options.clone(),
-                ingress_ebpf: None, // eBPF programs cannot be cloned, set to None
-                egress_ebpf: None,  // eBPF programs cannot be cloned, set to None
+                ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| std::sync::Arc::clone(e)),
+                egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| std::sync::Arc::clone(e)),
+                dns_map: None, // Don't clone the map, it should be taken only once
+                dns_queries: Arc::clone(&ctx.dns_queries),
+                hostname_bindings: Arc::clone(&ctx.hostname_bindings),
             }),
             ModuleContext::Connection(ctx) => ModuleContext::Connection(ctx.clone()),
         }
@@ -201,7 +237,10 @@ impl ModuleType {
                 use crate::api::{dns::DnsApiHandler, ApiHandler};
 
                 // Create DNS API handler
-                let handler = ApiHandler::Dns(DnsApiHandler::new(dns_ctx.options.clone()));
+                let handler = ApiHandler::Dns(DnsApiHandler::new(
+                    dns_ctx.options.clone(),
+                    Arc::clone(&dns_ctx.dns_queries),
+                ));
 
                 // Register with API router
                 api_router.register_handler(handler);

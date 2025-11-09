@@ -1,5 +1,4 @@
-pub mod traffic;
-pub mod dns;
+pub mod shared;
 use log::debug;
 
 // Remove memory limits

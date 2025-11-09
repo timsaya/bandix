@@ -40,7 +40,7 @@ sudo ./bandix --iface <网络接口名称> [选项]
 - **--web-log**: 启用每个请求的 Web 日志记录。默认值：`false`
 - **--enable-traffic**: 启用流量监控模块。默认值：`false`
 - **--traffic-retention-seconds**: 保留时长（秒），即环形文件容量（每秒一个槽位）。默认值：`600`
-- **--enable-dns**: 启用 DNS 监控模块（尚未实现）。默认值：`false`
+- **--enable-dns**: 启用 DNS 监控模块。默认值：`false`
 - **--enable-connection**: 启用连接统计监控模块。默认值：`false`
 
 ### 使用示例
@@ -52,8 +52,14 @@ sudo ./bandix --iface br-lan --enable-traffic
 # 同时启用流量和连接监控
 sudo ./bandix --iface br-lan --enable-traffic --enable-connection
 
+# 启用 DNS 监控
+sudo ./bandix --iface br-lan --enable-dns
+
+# 启用所有监控模块
+sudo ./bandix --iface br-lan --enable-traffic --enable-connection --enable-dns
+
 # 自定义端口和数据目录
-sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection
+sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection --enable-dns
 ```
 
 ## API 接口
@@ -201,19 +207,206 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
 
 **注意：** 设备统计只计算出站连接（设备作为源地址的连接）。只包含在 ARP 表中且与指定网络接口在同一子网内的设备。
 
-### DNS 监控 API（尚未实现）
+### DNS 监控 API
 
 #### GET /api/dns/queries
-获取最近的 DNS 查询记录。
+获取 DNS 查询记录，支持过滤和分页。
+
+**查询参数：**
+- `domain`（可选）：按域名过滤（不区分大小写的子串匹配）
+- `device`（可选）：按设备 MAC 地址或主机名过滤（不区分大小写的子串匹配）
+- `is_query`（可选）：按查询类型过滤 - `true` 仅查询，`false` 仅响应
+- `page`（可选）：页码，默认值：`1`
+- `page_size`（可选）：每页记录数，默认值：`20`，最大值：`1000`
+
+**响应：**
+```json
+{
+  "status": "success",
+  "data": {
+    "queries": [
+      {
+        "timestamp": 1762676738185,
+        "timestamp_formatted": "2025-11-09 16:25:38.185",
+        "domain": "www.baidu.com.",
+        "query_type": "A",
+        "response_code": "Success",
+        "response_time_ms": 15,
+        "source_ip": "192.168.2.154",
+        "destination_ip": "8.8.8.8",
+        "source_port": 53569,
+        "destination_port": 53,
+        "transaction_id": 62111,
+        "is_query": true,
+        "response_ips": [],
+        "response_records": [],
+        "device_mac": "aa:bb:cc:dd:ee:ff",
+        "device_name": "MacBook-Pro"
+      }
+    ],
+    "total": 156,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 8
+  }
+}
+```
+
+**字段说明：**
+- `timestamp`：Unix 时间戳（毫秒）
+- `timestamp_formatted`：可读的本地时间字符串
+- `domain`：查询的域名
+- `query_type`：DNS 查询类型（A、AAAA、CNAME、HTTPS 等）
+- `response_code`：响应状态码（"Success"、"Domain not found" 等）
+- `response_time_ms`：响应时间（毫秒），如果没有匹配的响应则为 0
+- `source_ip`：源 IP 地址
+- `destination_ip`：目标 IP 地址
+- `source_port`：源端口
+- `destination_port`：目标端口
+- `transaction_id`：DNS 事务 ID
+- `is_query`：`true` 表示查询，`false` 表示响应
+- `response_ips`：响应中返回的 IP 地址（用于 A/AAAA 记录）
+- `response_records`：响应中的所有 DNS 记录（A、AAAA、CNAME、HTTPS 等）
+- `device_mac`：设备 MAC 地址（来自查询源或响应目标）
+- `device_name`：设备主机名（如果可用）
+
+**使用示例：**
+```bash
+# 获取最新的 20 条 DNS 记录
+GET /api/dns/queries
+
+# 按域名过滤
+GET /api/dns/queries?domain=baidu.com
+
+# 按设备过滤
+GET /api/dns/queries?device=MacBook
+
+# 仅获取查询记录（不包括响应）
+GET /api/dns/queries?is_query=true
+
+# 分页查询，每页 50 条记录
+GET /api/dns/queries?page=2&page_size=50
+
+# 组合过滤
+GET /api/dns/queries?domain=google&device=iPhone&page=1&page_size=100
+```
+
+**注意：** 记录按事务分组（查询和响应配对），并按最新时间排序。在每个组内，响应在查询之前显示。
 
 #### GET /api/dns/stats
-获取 DNS 查询统计信息。
+获取全面的 DNS 统计信息。
+
+**响应：**
+```json
+{
+  "status": "success",
+  "data": {
+    "stats": {
+      "total_queries": 1250,
+      "total_responses": 1200,
+      "queries_with_response": 1200,
+      "queries_without_response": 50,
+      
+      "avg_response_time_ms": 15.5,
+      "min_response_time_ms": 1,
+      "max_response_time_ms": 250,
+      "response_time_percentiles": {
+        "p50": 12,
+        "p90": 28,
+        "p95": 45,
+        "p99": 120
+      },
+      
+      "success_count": 1150,
+      "failure_count": 50,
+      "success_rate": 0.958,
+      "response_codes": [
+        {
+          "code": "Success",
+          "count": 1150,
+          "percentage": 0.958
+        },
+        {
+          "code": "Domain not found",
+          "count": 30,
+          "percentage": 0.025
+        }
+      ],
+      
+      "top_domains": [
+        { "name": "www.baidu.com.", "count": 156 },
+        { "name": "www.google.com.", "count": 98 }
+      ],
+      
+      "top_query_types": [
+        { "name": "A", "count": 650 },
+        { "name": "AAAA", "count": 400 },
+        { "name": "HTTPS", "count": 200 }
+      ],
+      
+      "top_devices": [
+        { "name": "MacBook-Pro", "count": 456 },
+        { "name": "iPhone-12", "count": 234 }
+      ],
+      
+      "top_dns_servers": [
+        { "name": "8.8.8.8", "count": 800 },
+        { "name": "192.168.2.1", "count": 450 }
+      ],
+      
+      "unique_devices": 15,
+      
+      "time_range_start": 1762676738100,
+      "time_range_end": 1762680338100,
+      "time_range_duration_minutes": 60
+    }
+  }
+}
+```
+
+**统计分类：**
+
+**基础计数：**
+- `total_queries`：DNS 查询总数
+- `total_responses`：DNS 响应总数
+- `queries_with_response`：收到响应的查询数
+- `queries_without_response`：无响应的查询数（超时/丢失）
+
+**性能指标：**
+- `avg_response_time_ms`：平均响应时间（毫秒）
+- `min_response_time_ms`：最快响应时间
+- `max_response_time_ms`：最慢响应时间
+- `response_time_percentiles`：响应时间分布
+  - `p50`：中位数（第 50 百分位）
+  - `p90`：第 90 百分位
+  - `p95`：第 95 百分位
+  - `p99`：第 99 百分位
+
+**成功/失败指标：**
+- `success_count`：成功响应数（NoError）
+- `failure_count`：失败响应数（错误）
+- `success_rate`：成功率（0.0 - 1.0）
+- `response_codes`：按响应码分类的统计（包含数量和百分比）
+
+**Top 排行：**
+- `top_domains`：最常查询的域名（前 10）
+- `top_query_types`：最常用的查询类型（A、AAAA、HTTPS 等）
+- `top_devices`：最活跃的设备（前 10，按主机名或 MAC）
+- `top_dns_servers`：最常用的 DNS 服务器（前 5）
+
+**设备统计：**
+- `unique_devices`：进行 DNS 查询的唯一设备数
+
+**时间范围：**
+- `time_range_start`：最早记录时间戳（毫秒）
+- `time_range_end`：最新记录时间戳（毫秒）
+- `time_range_duration_minutes`：时间跨度（分钟）
 
 #### GET /api/dns/config
-获取 DNS 监控配置。
+获取 DNS 监控配置（尚未完全实现）。
 
 #### POST /api/dns/config
-更新 DNS 监控配置。
+更新 DNS 监控配置（尚未实现）。
 
 ## 字段说明
 

@@ -1,5 +1,4 @@
-use crate::ebpf::dns::load_dns;
-use crate::ebpf::traffic::load_traffic;
+use crate::ebpf::shared::load_shared;
 use crate::monitor::{
     ConnectionModuleContext, DnsModuleContext, ModuleContext, MonitorManager, TrafficModuleContext,
 };
@@ -31,10 +30,10 @@ pub struct CommonArgs {
 
     #[clap(
         long,
-        default_value = "false",
-        help = "Enable web request logging (per-HTTP-request line)"
+        default_value = "info",
+        help = "Log level: trace, debug, info, warn, error (default: info). Web and DNS logs are always at DEBUG level."
     )]
-    pub web_log: bool,
+    pub log_level: String,
 }
 
 /// Traffic module arguments
@@ -43,8 +42,8 @@ pub struct CommonArgs {
 pub struct TrafficArgs {
     #[clap(
         long,
-        default_value = "true",
-        help = "Enable traffic monitoring module (enabled by default)"
+        default_value = "false",
+        help = "Enable traffic monitoring module"
     )]
     pub enable_traffic: bool,
 
@@ -123,9 +122,9 @@ impl Options {
         &self.common.data_dir
     }
 
-    /// Get web_log from common args
-    pub fn web_log(&self) -> bool {
-        self.common.web_log
+    /// Get log_level from common args
+    pub fn log_level(&self) -> &str {
+        &self.common.log_level
     }
 
     /// Get enable_traffic from traffic args
@@ -236,78 +235,11 @@ fn load_hostname_bindings(
     bindings
 }
 
-// Initialize eBPF programs for traffic module
-async fn init_traffic_ebpf(options: &Options) -> Result<(aya::Ebpf, aya::Ebpf), anyhow::Error> {
-    load_traffic(options.iface().to_string()).await
+// Initialize shared eBPF programs (used by both traffic and DNS modules)
+async fn init_shared_ebpf(options: &Options) -> Result<aya::Ebpf, anyhow::Error> {
+    load_shared(options.iface().to_string()).await
 }
 
-// Initialize eBPF programs for DNS module
-async fn init_dns_ebpf(options: &Options) -> Result<(aya::Ebpf, aya::Ebpf), anyhow::Error> {
-    load_dns(options.iface().to_string()).await
-}
-
-// Initialize subnet configuration (IPv4 and IPv6) in eBPF maps (for traffic module)
-async fn init_traffic_subnet_info(
-    egress_ebpf: &mut aya::Ebpf,
-    ingress_ebpf: &mut aya::Ebpf,
-    subnet_info: &SubnetInfo,
-) -> Result<(), anyhow::Error> {
-    // Configure IPv4 subnet information
-    let mut ipv4_subnet_info: Array<_, [u8; 4]> =
-        Array::try_from(ingress_ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
-
-    ipv4_subnet_info.set(0, &subnet_info.interface_ip, 0)?;
-    ipv4_subnet_info.set(1, &subnet_info.subnet_mask, 0)?;
-
-    let mut ipv4_subnet_info: Array<_, [u8; 4]> =
-        Array::try_from(egress_ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
-    ipv4_subnet_info.set(0, &subnet_info.interface_ip, 0)?;
-    ipv4_subnet_info.set(1, &subnet_info.subnet_mask, 0)?;
-
-    // Configure IPv6 subnet information
-    let mut ingress_ipv6_subnet_info: Array<_, [u8; 32]> =
-        Array::try_from(ingress_ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
-
-    let mut egress_ipv6_subnet_info: Array<_, [u8; 32]> =
-        Array::try_from(egress_ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
-
-    // Initialize all entries as disabled
-    for i in 0..16 {
-        ingress_ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
-        egress_ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
-    }
-
-    // Set up to 16 IPv6 prefixes (matches Linux kernel default max_addresses)
-    for (idx, (ipv6_addr, prefix_len)) in subnet_info.ipv6_addresses.iter().enumerate().take(16) {
-        let mut subnet_data = [0u8; 32];
-
-        // Copy network prefix (16 bytes)
-        subnet_data[0..16].copy_from_slice(ipv6_addr);
-
-        // Set prefix length
-        subnet_data[16] = *prefix_len;
-
-        // Set enabled flag
-        subnet_data[17] = 1;
-
-        ingress_ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
-        egress_ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
-
-        // Classify IPv6 address type
-        let addr_type = crate::utils::network_utils::classify_ipv6_address(ipv6_addr);
-
-        log::info!(
-            "Configured IPv6 subnet {}: {}/{} [Type: {}, Network: {}]",
-            idx,
-            crate::utils::network_utils::format_ipv6_with_privacy(ipv6_addr),
-            prefix_len,
-            addr_type.type_name(),
-            addr_type.network_scope()
-        );
-    }
-
-    Ok(())
-}
 
 // Subnet information structure (shared across modules)
 #[derive(Debug, Clone)]
@@ -346,13 +278,99 @@ async fn create_module_contexts(
 ) -> Result<Vec<ModuleContext>, anyhow::Error> {
     let mut module_contexts = Vec::new();
 
+    // Load shared eBPF programs if traffic or DNS module is enabled
+    // Both modules share the same ingress and egress hooks
+    let shared_ebpf = if options.enable_traffic() || options.enable_dns() {
+        log::info!("Loading shared eBPF programs (ingress and egress)...");
+        let mut ebpf = init_shared_ebpf(options).await?;
+        
+        // Configure subnet info maps if traffic module is enabled
+        if options.enable_traffic() {
+            log::info!("Configuring subnet info maps for traffic module...");
+            
+            // Configure IPv4 subnet info maps
+            let mut ipv4_subnet_info: Array<_, [u8; 4]> =
+                Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
+            ipv4_subnet_info.set(0, &subnet_info.interface_ip, 0)?;
+            ipv4_subnet_info.set(1, &subnet_info.subnet_mask, 0)?;
+
+            // Configure IPv6 subnet info maps
+            let mut ipv6_subnet_info: Array<_, [u8; 32]> =
+                Array::try_from(ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
+
+            for i in 0..16 {
+                ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
+            }
+
+            for (idx, (ipv6_addr, prefix_len)) in subnet_info.ipv6_addresses.iter().enumerate().take(16) {
+                let mut subnet_data = [0u8; 32];
+                subnet_data[0..16].copy_from_slice(ipv6_addr);
+                subnet_data[16] = *prefix_len;
+                subnet_data[17] = 1;
+                ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
+
+                let addr_type = crate::utils::network_utils::classify_ipv6_address(ipv6_addr);
+                log::info!(
+                    "Configured IPv6 subnet {}: {}/{} [Type: {}, Network: {}]",
+                    idx,
+                    crate::utils::network_utils::format_ipv6_with_privacy(ipv6_addr),
+                    prefix_len,
+                    addr_type.type_name(),
+                    addr_type.network_scope()
+                );
+            }
+        }
+        
+        Some(ebpf)
+    } else {
+        None
+    };
+
+    // Configure module enable flags and get DNS map if needed
+    // This requires exclusive access to the eBPF object, so we do it before creating contexts
+    let (shared_ebpf_arc, dns_map) = if let Some(mut ebpf) = shared_ebpf {
+        // Configure module enable flags
+        log::info!("Configuring module enable flags...");
+        let mut module_flags: Array<_, u8> = Array::try_from(
+            ebpf.take_map("MODULE_ENABLE_FLAGS")
+                .ok_or_else(|| anyhow::anyhow!("Cannot find MODULE_ENABLE_FLAGS map"))?,
+        )?;
+        
+        // Set traffic module flag (index 0)
+        let traffic_flag = if options.enable_traffic() { 1u8 } else { 0u8 };
+        module_flags.set(0, &traffic_flag, 0)?;
+        log::info!("Traffic module enabled: {}", traffic_flag != 0);
+        
+        // Set DNS module flag (index 1)
+        let dns_flag = if options.enable_dns() { 1u8 } else { 0u8 };
+        module_flags.set(1, &dns_flag, 0)?;
+        log::info!("DNS module enabled: {}", dns_flag != 0);
+        
+        let dns_map = if options.enable_dns() {
+            // Get DNS_DATA RingBuf map before wrapping in Arc
+            // This is necessary because take_map requires exclusive access
+            log::info!("Acquiring DNS RingBuf map...");
+            Some(ebpf.take_map("DNS_DATA").ok_or_else(|| {
+                anyhow::anyhow!("Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly.")
+            })?)
+        } else {
+            None
+        };
+        
+        // Now wrap in Arc so both modules can share it
+        (Arc::new(ebpf), dns_map)
+    } else {
+        // This should not happen if we reach here, but handle it gracefully
+        return Err(anyhow::anyhow!("Shared eBPF object not available"));
+    };
+
     // Initialize traffic module
     if options.enable_traffic() {
         log::info!("Initializing traffic module...");
-
-        // Load and configure eBPF programs
-        let (mut ingress, mut egress) = init_traffic_ebpf(options).await?;
-        init_traffic_subnet_info(&mut ingress, &mut egress, subnet_info).await?;
+        
+        // Create references to the shared eBPF object
+        let ingress = Arc::clone(&shared_ebpf_arc);
+        let egress = Arc::clone(&shared_ebpf_arc);
 
         // Create traffic module context
         let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress);
@@ -364,12 +382,19 @@ async fn create_module_contexts(
     // Initialize DNS module
     if options.enable_dns() {
         log::info!("Initializing DNS module...");
+        
+        // Create references to the shared eBPF object
+        let ingress = Arc::clone(&shared_ebpf_arc);
+        let egress = Arc::clone(&shared_ebpf_arc);
 
-        // Load eBPF programs
-        let (ingress, egress) = init_dns_ebpf(options).await?;
-
-        // Create DNS module context
-        let dns_ctx = DnsModuleContext::new(options.clone(), ingress, egress);
+        // Create DNS module context with the pre-acquired map
+        let dns_ctx = DnsModuleContext::new_with_map(
+            options.clone(), 
+            ingress, 
+            egress,
+            dns_map.unwrap(),
+            std::sync::Arc::clone(shared_hostname_bindings),
+        );
         module_contexts.push(ModuleContext::Dns(dns_ctx));
     }
 
@@ -523,9 +548,25 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
     // Validate arguments
     validate_arguments(&options)?;
 
+    // Parse log level
+    let log_level = match options.log_level().to_lowercase().as_str() {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "warn" => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Invalid log level: {}. Valid values: trace, debug, info, warn, error",
+                options.log_level()
+            ));
+        }
+    };
+
     // Set up logging
     env_logger::Builder::new()
-        .filter(None, LevelFilter::Info)
+        .filter(None, log_level)
+        .filter_module("aya::bpf", LevelFilter::Error) // Filter out aya::bpf warnings (BTF related)
         .target(env_logger::Target::Stdout)
         .init();
 
@@ -535,7 +576,7 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
     // Check if at least one module is enabled
     if !options.enable_traffic() && !options.enable_dns() && !options.enable_connection() {
         return Err(anyhow::anyhow!(
-            "No monitoring modules enabled. At least one module must be enabled: --enable-traffic (default), --enable-dns, or --enable-connection"
+            "No monitoring modules enabled. At least one module must be enabled: --enable-traffic, --enable-dns, or --enable-connection"
         ));
     }
 

@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PacketHeader {
-    pub timestamp: u64,   // 时间戳（纳秒）
-    pub packet_len: u32,  // 数据包总长度（字节）
-    pub captured_len: u32,// 实际拷贝到 ringbuf 的字节数（一般等于 packet_len）
-    pub ifindex: u32,     // 网络接口索引（TC 场景可能为 0）
-    pub direction: u32,   // 方向：0=Ingress（入口），1=Egress（出口）
+    pub timestamp: u64,   // Timestamp (nanoseconds)
+    pub packet_len: u32,  // Total packet length (bytes)
+    pub captured_len: u32,// Actual bytes copied to ringbuf (usually equals packet_len)
+    pub ifindex: u32,     // Network interface index (may be 0 in TC scenario)
+    pub direction: u32,   // Direction: 0=Ingress, 1=Egress
 }
 
 #[cfg(feature = "user")]
@@ -84,12 +84,12 @@ pub struct ConnectionStats {
 pub struct DeviceConnectionStats {
     pub mac_address: [u8; 6],
     pub ip_address: [u8; 4],
-    pub tcp_connections: u32,     // TCP连接总数
-    pub udp_connections: u32,     // UDP连接总数
-    pub established_tcp: u32,     // ESTABLISHED状态的TCP连接
-    pub time_wait_tcp: u32,       // TIME_WAIT状态的TCP连接
-    pub close_wait_tcp: u32,      // CLOSE_WAIT状态的TCP连接
-    pub total_connections: u32,   // 总连接数 (tcp_connections + udp_connections)
+    pub tcp_connections: u32,     // Total TCP connections
+    pub udp_connections: u32,     // Total UDP connections
+    pub established_tcp: u32,     // TCP connections in ESTABLISHED state
+    pub time_wait_tcp: u32,       // TCP connections in TIME_WAIT state
+    pub close_wait_tcp: u32,      // TCP connections in CLOSE_WAIT state
+    pub total_connections: u32,   // Total connections (tcp_connections + udp_connections)
     pub last_updated: u64,
 }
 

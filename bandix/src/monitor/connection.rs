@@ -259,7 +259,6 @@ pub fn parse_connection_stats(
 /// Connection statistics module context
 #[derive(Clone)]
 pub struct ConnectionModuleContext {
-    pub options: Options,
     pub device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
     pub hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     pub interface_ip: [u8; 4],
@@ -269,13 +268,12 @@ pub struct ConnectionModuleContext {
 impl ConnectionModuleContext {
     /// Create connection module context with shared hostname bindings and subnet info
     pub fn new(
-        options: Options,
+        _options: Options,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         interface_ip: [u8; 4],
         subnet_mask: [u8; 4],
     ) -> Self {
         Self {
-            options,
             device_connection_stats: Arc::new(Mutex::new(GlobalConnectionStats::default())),
             hostname_bindings, // Use the shared hostname_bindings
             interface_ip,

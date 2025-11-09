@@ -5,6 +5,7 @@ use aya::maps::HashMap;
 use aya::maps::MapData;
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 struct TrafficData {
@@ -76,9 +77,9 @@ impl TrafficMonitor {
                     }
                 }
                 _ = shutdown_notify.notified() => {
-                    log::info!("Traffic monitoring module received shutdown signal, stopping...");
+                    log::debug!("Traffic monitoring module received shutdown signal, stopping...");
                     // Flush all dirty data before shutdown
-                    log::info!("Flushing all dirty rings before shutdown...");
+                    log::debug!("Flushing all dirty rings before shutdown...");
                     if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
                         log::error!("Failed to flush dirty rings during shutdown: {}", e);
                     }
@@ -103,7 +104,7 @@ impl TrafficMonitor {
                     self.process_monitoring_cycle(ctx).await;
                 }
                 _ = shutdown_notify.notified() => {
-                    log::info!("Traffic monitoring module received shutdown signal, stopping...");
+                    log::debug!("Traffic monitoring module received shutdown signal, stopping...");
                     break;
                 }
             }
@@ -114,28 +115,24 @@ impl TrafficMonitor {
 
     /// Process one monitoring cycle (extract eBPF data and update stats)
     async fn process_monitoring_cycle(&self, ctx: &mut TrafficModuleContext) {
-        // Get eBPF programs
-        let (mut ingress_ebpf, mut egress_ebpf) = match (ctx.ingress_ebpf.take(), ctx.egress_ebpf.take()) {
-            (Some(ingress), Some(egress)) => (ingress, egress),
-            _ => {
+        // Get eBPF program (ingress and egress share the same eBPF object and maps)
+        let ingress_ebpf = match ctx.ingress_ebpf.as_ref() {
+            Some(ebpf) => Arc::clone(ebpf),
+            None => {
                 log::error!("eBPF programs not initialized, skipping this monitoring cycle");
                 return;
             }
         };
 
-        // Process traffic data
-        if let Err(e) = self.process_traffic_data(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
+        // Process traffic data (using ingress_ebpf since both share the same maps)
+        if let Err(e) = self.process_traffic_data(ctx, &ingress_ebpf) {
             log::error!("Failed to process traffic data: {}", e);
         }
 
-        // Update rate limits
-        if let Err(e) = self.apply_rate_limits(ctx, &mut ingress_ebpf, &mut egress_ebpf) {
+        // Update rate limits (using ingress_ebpf since both share the same maps)
+        if let Err(e) = self.apply_rate_limits(ctx, &ingress_ebpf) {
             log::error!("Failed to update rate limits: {}", e);
         }
-
-        // Put eBPF programs back into context
-        ctx.ingress_ebpf = Some(ingress_ebpf);
-        ctx.egress_ebpf = Some(egress_ebpf);
 
         // Execute metrics persistence to memory ring
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -178,29 +175,18 @@ impl TrafficMonitor {
 
     fn collect_mac_ip_mapping(
         &self,
-        ingress_ebpf: &aya::Ebpf,
-        egress_ebpf: &aya::Ebpf,
+        ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u8; 4]>, anyhow::Error> {
         let mut mac_ip_mapping = StdHashMap::new();
 
-        let ingress_mac_ip_mapping = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
-            ingress_ebpf
-                .map("MAC_IPV4_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_IPV4_MAPPING map"))?,
-        )?;
-
-        let egress_mac_ip_mapping = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
-            egress_ebpf
+        // Since ingress and egress share the same eBPF object and maps, we only need to read once
+        let mac_ip_mapping_map = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
+            ebpf
                 .map("MAC_IPV4_MAPPING")
                 .ok_or(anyhow::anyhow!("Cannot find MAC_IPV4_MAPPING map"))?,
         )?;
 
-        for entry in ingress_mac_ip_mapping.iter() {
-            let (key, value) = entry.unwrap();
-            mac_ip_mapping.insert(key, value);
-        }
-
-        for entry in egress_mac_ip_mapping.iter() {
+        for entry in mac_ip_mapping_map.iter() {
             let (key, value) = entry.unwrap();
             mac_ip_mapping.insert(key, value);
         }
@@ -210,29 +196,18 @@ impl TrafficMonitor {
 
     fn collect_mac_ipv6_mapping(
         &self,
-        ingress_ebpf: &aya::Ebpf,
-        egress_ebpf: &aya::Ebpf,
+        ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u8; 16]>, anyhow::Error> {
         let mut mac_ipv6_mapping = StdHashMap::new();
 
-        let ingress_mac_ipv6_mapping = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
-            ingress_ebpf
+        // Since ingress and egress share the same eBPF object and maps, we only need to read once
+        let mac_ipv6_mapping_map = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
+            ebpf
                 .map("MAC_IPV6_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_IPV6_MAPPING map"))?,
+                .ok_or(anyhow::anyhow!("Cannot find MAC_IPV6_MAPPING map"))?,
         )?;
 
-        let egress_mac_ipv6_mapping = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
-            egress_ebpf
-                .map("MAC_IPV6_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find egress MAC_IPV6_MAPPING map"))?,
-        )?;
-
-        for entry in ingress_mac_ipv6_mapping.iter() {
-            let (key, value) = entry.unwrap();
-            mac_ipv6_mapping.insert(key, value);
-        }
-
-        for entry in egress_mac_ipv6_mapping.iter() {
+        for entry in mac_ipv6_mapping_map.iter() {
             let (key, value) = entry.unwrap();
             mac_ipv6_mapping.insert(key, value);
         }
@@ -242,51 +217,24 @@ impl TrafficMonitor {
 
     fn collect_traffic_data(
         &self,
-        ingress_ebpf: &aya::Ebpf,
-        egress_ebpf: &aya::Ebpf,
+        ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u64; 4]>, anyhow::Error> {
         let mut traffic_data = StdHashMap::new();
 
-        let ingress_traffic = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
-            ingress_ebpf
+        // Since ingress and egress share the same eBPF object and maps, we only need to read once
+        let traffic_map = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
+            ebpf
                 .map("MAC_TRAFFIC")
-                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_TRAFFIC map"))?,
+                .ok_or(anyhow::anyhow!("Cannot find MAC_TRAFFIC map"))?,
         )?;
 
-        let egress_traffic = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
-            egress_ebpf
-                .map("MAC_TRAFFIC")
-                .ok_or(anyhow::anyhow!("Cannot find egress MAC_TRAFFIC map"))?,
-        )?;
-
-        // Process ingress direction traffic data
-        for entry in ingress_traffic.iter() {
+        for entry in traffic_map.iter() {
             let (key, value) = entry.unwrap();
             // Exclude broadcast and multicast addresses
             if self.is_special_mac_address(&key) {
                 continue;
             }
             traffic_data.insert(key, value);
-        }
-
-        // Merge egress direction traffic data
-        for entry in egress_traffic.iter() {
-            let (key, value) = entry.unwrap();
-
-            // Exclude broadcast and multicast addresses
-            if self.is_special_mac_address(&key) {
-                continue;
-            }
-
-            if let Some(existing) = traffic_data.get_mut(&key) {
-                // Merge local network and cross-network traffic
-                existing[0] = existing[0].saturating_add(value[0]); // Local network send
-                existing[1] = existing[1].saturating_add(value[1]); // Local network receive
-                existing[2] = existing[2].saturating_add(value[2]); // Cross-network send
-                existing[3] = existing[3].saturating_add(value[3]); // Cross-network receive
-            } else {
-                traffic_data.insert(key, value);
-            }
         }
 
         Ok(traffic_data)
@@ -320,12 +268,11 @@ impl TrafficMonitor {
     fn process_traffic_data(
         &self,
         ctx: &mut TrafficModuleContext,
-        ingress_ebpf: &mut aya::Ebpf,
-        egress_ebpf: &mut aya::Ebpf,
+        ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
-        let mac_ip_mapping = self.collect_mac_ip_mapping(&ingress_ebpf, &egress_ebpf)?;
-        let mac_ipv6_mapping = self.collect_mac_ipv6_mapping(&ingress_ebpf, &egress_ebpf)?;
-        let traffic_data = self.collect_traffic_data(&ingress_ebpf, &egress_ebpf)?;
+        let mac_ip_mapping = self.collect_mac_ip_mapping(ebpf)?;
+        let mac_ipv6_mapping = self.collect_mac_ipv6_mapping(ebpf)?;
+        let traffic_data = self.collect_traffic_data(ebpf)?;
 
         let device_traffic_stats = self.merge(&traffic_data, &mac_ip_mapping)?;
 
@@ -507,29 +454,33 @@ impl TrafficMonitor {
     fn apply_rate_limits(
         &self,
         ctx: &mut TrafficModuleContext,
-        ingress_ebpf: &mut aya::Ebpf,
-        egress_ebpf: &mut aya::Ebpf,
+        _ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
         let rl_map = ctx.rate_limits.lock().unwrap();
 
-        let mut ingress_mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
-            ingress_ebpf
-                .map_mut("MAC_RATE_LIMITS")
-                .ok_or(anyhow::anyhow!("Cannot find ingress MAC_RATE_LIMITS"))?,
-        )?;
+        // Get ingress eBPF reference (both ingress and egress share the same eBPF object and maps)
+        let ingress_ebpf = ctx.ingress_ebpf.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Ingress eBPF program not initialized")
+        })?;
 
-        let mut egress_mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
-            egress_ebpf
+        // Get mutable access to the eBPF object using unsafe
+        // This is safe because eBPF maps are thread-safe and we're only updating the map,
+        // not modifying the eBPF object itself
+        let ebpf_mut = unsafe {
+            // Get a raw pointer to the inner Ebpf object
+            let ptr = Arc::as_ptr(ingress_ebpf) as *const aya::Ebpf as *mut aya::Ebpf;
+            &mut *ptr
+        };
+
+        // Use map_mut to update rate limits
+        let mut mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
+            ebpf_mut
                 .map_mut("MAC_RATE_LIMITS")
-                .ok_or(anyhow::anyhow!("Cannot find egress MAC_RATE_LIMITS"))?,
+                .ok_or(anyhow::anyhow!("Cannot find MAC_RATE_LIMITS"))?,
         )?;
 
         for (mac, lim) in rl_map.iter() {
-            ingress_mac_rate_limits
-                .insert(mac, &[lim[0], lim[1]], 0)
-                .unwrap();
-
-            egress_mac_rate_limits
+            mac_rate_limits
                 .insert(mac, &[lim[0], lim[1]], 0)
                 .unwrap();
         }

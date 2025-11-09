@@ -18,8 +18,8 @@ use maps::{MAC_IPV4_MAPPING, MAC_IPV6_MAPPING, MAC_TRAFFIC, MAC_RATE_LIMITS, RAT
 // ============================================================================
 
 #[inline(always)]
-pub fn handle_traffic_ingress(ctx: TcContext) -> Result<i32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
+pub fn handle_traffic_ingress(ctx: &TcContext) -> Result<i32, ()> {
+    let ethhdr: *const EthHdr = ptr_at(ctx, 0)?;
     let ethhdr_type = unsafe { (*ethhdr).ether_type };
 
     match ethhdr_type {
@@ -30,8 +30,8 @@ pub fn handle_traffic_ingress(ctx: TcContext) -> Result<i32, ()> {
 }
 
 #[inline(always)]
-pub fn handle_traffic_egress(ctx: TcContext) -> Result<i32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
+pub fn handle_traffic_egress(ctx: &TcContext) -> Result<i32, ()> {
+    let ethhdr: *const EthHdr = ptr_at(ctx, 0)?;
     let ethhdr_type = unsafe { (*ethhdr).ether_type };
 
     match ethhdr_type {
@@ -46,13 +46,13 @@ pub fn handle_traffic_egress(ctx: TcContext) -> Result<i32, ()> {
 // ============================================================================
 
 #[inline(always)]
-fn handle_ipv4(ctx: TcContext, is_ingress: bool) -> Result<i32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
+fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
+    let ethhdr: *const EthHdr = ptr_at(ctx, 0)?;
     let src_mac = unsafe { (*ethhdr).src_addr };
     let dst_mac = unsafe { (*ethhdr).dst_addr };
 
     // get ipv4 header
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
+    let ipv4hdr: *const Ipv4Hdr = ptr_at(ctx, EthHdr::LEN)?;
     let data_len = unsafe { u16::from_be_bytes((*ipv4hdr).tot_len) } as u64;
 
     // IP address
@@ -114,13 +114,13 @@ fn is_subnet_configured() -> bool {
 // ============================================================================
 
 #[inline(always)]
-fn handle_ipv6(ctx: TcContext, is_ingress: bool) -> Result<i32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
+fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
+    let ethhdr: *const EthHdr = ptr_at(ctx, 0)?;
     let src_mac = unsafe { (*ethhdr).src_addr };
     let dst_mac = unsafe { (*ethhdr).dst_addr };
 
     // get ipv6 header
-    let ipv6hdr: *const Ipv6Hdr = ptr_at(&ctx, EthHdr::LEN)?;
+    let ipv6hdr: *const Ipv6Hdr = ptr_at(ctx, EthHdr::LEN)?;
     // IPv6 payload_len + IPv6 header size (40 bytes)
     let payload_len = unsafe { u16::from_be_bytes((*ipv6hdr).payload_len) } as u64;
     let data_len = payload_len + 40;
@@ -266,6 +266,7 @@ fn monitor_traffic_v6(
 
 #[inline]
 fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> bool {
+    
     if limit == 0 {
         return false; // No limit
     }

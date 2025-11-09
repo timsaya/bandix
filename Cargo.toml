@@ -28,6 +28,9 @@ which = { version = "6.0.0", default-features = false }
 
 
 # Optimize compilation size
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 debug = 0
 lto = "fat"

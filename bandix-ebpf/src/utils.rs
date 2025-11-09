@@ -17,7 +17,19 @@ pub mod subnet {
     pub static IPV6_SUBNET_INFO: Array<[u8; 32]> = Array::with_max_entries(16, 0);
 }
 
+pub mod config {
+    use aya_ebpf::macros::map;
+    use aya_ebpf::maps::Array;
+
+    // Module enable flags: [traffic_enabled, dns_enabled]
+    // Index 0: traffic module (0=disabled, 1=enabled)
+    // Index 1: DNS module (0=disabled, 1=enabled)
+    #[map]
+    pub static MODULE_ENABLE_FLAGS: Array<u8> = Array::with_max_entries(2, 0);
+}
+
 use subnet::{IPV4_SUBNET_INFO, IPV6_SUBNET_INFO};
+use config::MODULE_ENABLE_FLAGS;
 
 #[inline]
 pub fn is_subnet_ip(ip: &[u8; 4]) -> bool {
@@ -74,8 +86,8 @@ fn ip_matches_prefix(ip: &[u8; 16], subnet_data: &[u8; 32], prefix_len: usize) -
     let bytes_to_check = prefix_len / 8;
     let bits_remainder = prefix_len % 8;
 
-    // 手动展开循环以避免 eBPF verifier 复杂性
-    // 检查完整字节，最多 16 字节
+    // Manually unroll loop to avoid eBPF verifier complexity
+    // Check complete bytes, up to 16 bytes
     if bytes_to_check > 0 && ip[0] != subnet_data[0] {
         return false;
     }
@@ -125,7 +137,7 @@ fn ip_matches_prefix(ip: &[u8; 16], subnet_data: &[u8; 32], prefix_len: usize) -
         return false;
     }
 
-    // 检查剩余的位
+    // Check remaining bits
     if bits_remainder > 0 && bytes_to_check < 16 {
         let mask = !((1u8 << (8 - bits_remainder)) - 1);
         if (ip[bytes_to_check] & mask) != (subnet_data[bytes_to_check] & mask) {
@@ -178,5 +190,35 @@ use aya_ebpf::helpers;
 #[inline]
 pub fn get_current_time() -> u64 {
     unsafe { core::ptr::read_volatile(&helpers::bpf_ktime_get_ns()) }
+}
+
+// ============================================================================
+// Module Configuration Utils
+// ============================================================================
+
+/// Check if traffic module is enabled
+/// Uses volatile read to ensure the value is always read from memory
+#[inline(always)]
+pub fn is_traffic_enabled() -> bool {
+    match MODULE_ENABLE_FLAGS.get(0) {
+        Some(flag_ptr) => {
+            // Use volatile read to ensure we always read the latest value
+            unsafe { core::ptr::read_volatile(flag_ptr as *const u8) != 0 }
+        }
+        None => false, // Default to disabled if not configured
+    }
+}
+
+/// Check if DNS module is enabled
+/// Uses volatile read to ensure the value is always read from memory
+#[inline(always)]
+pub fn is_dns_enabled() -> bool {
+    match MODULE_ENABLE_FLAGS.get(1) {
+        Some(flag_ptr) => {
+            // Use volatile read to ensure we always read the latest value
+            unsafe { core::ptr::read_volatile(flag_ptr as *const u8) != 0 }
+        }
+        None => false, // Default to disabled if not configured
+    }
 }
 

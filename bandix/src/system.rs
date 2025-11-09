@@ -156,15 +156,8 @@ pub fn log_startup_info(options: &Options) {
     }
     info!("Listening port: {}", options.port());
     info!("Data directory: {}", options.data_dir());
+    info!("Log level: {}", options.log_level());
     info!("Retention seconds: {}", options.traffic_retention_seconds());
-    info!(
-        "Web request logging: {}",
-        if options.web_log() {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
     info!(
         "Interface: {} (IP: {}, Mask: {})",
         options.iface(), ip_str, mask_str

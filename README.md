@@ -40,7 +40,7 @@ sudo ./bandix --iface <network_interface_name> [options]
 - **--web-log**: Enable per-request web logging. Default: `false`
 - **--enable-traffic**: Enable traffic monitoring module. Default: `false`
 - **--traffic-retention-seconds**: Retention duration (seconds), i.e., ring file capacity (one slot per second). Default: `600`
-- **--enable-dns**: Enable DNS monitoring module (not yet implemented). Default: `false`
+- **--enable-dns**: Enable DNS monitoring module. Default: `false`
 - **--enable-connection**: Enable connection statistics monitoring module. Default: `false`
 
 ### Example Usage
@@ -52,8 +52,14 @@ sudo ./bandix --iface br-lan --enable-traffic
 # Enable both traffic and connection monitoring
 sudo ./bandix --iface br-lan --enable-traffic --enable-connection
 
+# Enable DNS monitoring
+sudo ./bandix --iface br-lan --enable-dns
+
+# Enable all monitoring modules
+sudo ./bandix --iface br-lan --enable-traffic --enable-connection --enable-dns
+
 # Custom port and data directory
-sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection
+sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection --enable-dns
 ```
 
 ## API Endpoints
@@ -201,19 +207,206 @@ Get connection statistics for all devices.
 
 **Note:** Device statistics only count outgoing connections (where the device is the source). Only devices present in the ARP table and within the same subnet as the specified network interface are included.
 
-### DNS Monitoring API (Not Yet Implemented)
+### DNS Monitoring API
 
 #### GET /api/dns/queries
-Get recent DNS queries.
+Get DNS query records with filtering and pagination support.
+
+**Query Parameters:**
+- `domain` (optional): Filter by domain name (case-insensitive substring match)
+- `device` (optional): Filter by device MAC address or hostname (case-insensitive substring match)
+- `is_query` (optional): Filter by query type - `true` for queries only, `false` for responses only
+- `page` (optional): Page number, default: `1`
+- `page_size` (optional): Records per page, default: `20`, max: `1000`
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "queries": [
+      {
+        "timestamp": 1762676738185,
+        "timestamp_formatted": "2025-11-09 16:25:38.185",
+        "domain": "www.baidu.com.",
+        "query_type": "A",
+        "response_code": "Success",
+        "response_time_ms": 15,
+        "source_ip": "192.168.2.154",
+        "destination_ip": "8.8.8.8",
+        "source_port": 53569,
+        "destination_port": 53,
+        "transaction_id": 62111,
+        "is_query": true,
+        "response_ips": [],
+        "response_records": [],
+        "device_mac": "aa:bb:cc:dd:ee:ff",
+        "device_name": "MacBook-Pro"
+      }
+    ],
+    "total": 156,
+    "page": 1,
+    "page_size": 20,
+    "total_pages": 8
+  }
+}
+```
+
+**Field Descriptions:**
+- `timestamp`: Unix timestamp in milliseconds
+- `timestamp_formatted`: Human-readable local time string
+- `domain`: Queried domain name
+- `query_type`: DNS query type (A, AAAA, CNAME, HTTPS, etc.)
+- `response_code`: Response status ("Success", "Domain not found", etc.)
+- `response_time_ms`: Response time in milliseconds (0 if no response matched)
+- `source_ip`: Source IP address
+- `destination_ip`: Destination IP address
+- `source_port`: Source port
+- `destination_port`: Destination port
+- `transaction_id`: DNS transaction ID
+- `is_query`: `true` for query, `false` for response
+- `response_ips`: IP addresses returned in response (for A/AAAA records)
+- `response_records`: All DNS records in response (A, AAAA, CNAME, HTTPS, etc.)
+- `device_mac`: Device MAC address (from query source or response destination)
+- `device_name`: Device hostname (if available)
+
+**Usage Examples:**
+```bash
+# Get latest 20 DNS records
+GET /api/dns/queries
+
+# Filter by domain
+GET /api/dns/queries?domain=baidu.com
+
+# Filter by device
+GET /api/dns/queries?device=MacBook
+
+# Get only queries (exclude responses)
+GET /api/dns/queries?is_query=true
+
+# Pagination with 50 records per page
+GET /api/dns/queries?page=2&page_size=50
+
+# Combined filters
+GET /api/dns/queries?domain=google&device=iPhone&page=1&page_size=100
+```
+
+**Note:** Records are grouped by transaction (query and response pairs) and sorted by newest first. Within each group, response appears before query.
 
 #### GET /api/dns/stats
-Get DNS query statistics.
+Get comprehensive DNS statistics.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "stats": {
+      "total_queries": 1250,
+      "total_responses": 1200,
+      "queries_with_response": 1200,
+      "queries_without_response": 50,
+      
+      "avg_response_time_ms": 15.5,
+      "min_response_time_ms": 1,
+      "max_response_time_ms": 250,
+      "response_time_percentiles": {
+        "p50": 12,
+        "p90": 28,
+        "p95": 45,
+        "p99": 120
+      },
+      
+      "success_count": 1150,
+      "failure_count": 50,
+      "success_rate": 0.958,
+      "response_codes": [
+        {
+          "code": "Success",
+          "count": 1150,
+          "percentage": 0.958
+        },
+        {
+          "code": "Domain not found",
+          "count": 30,
+          "percentage": 0.025
+        }
+      ],
+      
+      "top_domains": [
+        { "name": "www.baidu.com.", "count": 156 },
+        { "name": "www.google.com.", "count": 98 }
+      ],
+      
+      "top_query_types": [
+        { "name": "A", "count": 650 },
+        { "name": "AAAA", "count": 400 },
+        { "name": "HTTPS", "count": 200 }
+      ],
+      
+      "top_devices": [
+        { "name": "MacBook-Pro", "count": 456 },
+        { "name": "iPhone-12", "count": 234 }
+      ],
+      
+      "top_dns_servers": [
+        { "name": "8.8.8.8", "count": 800 },
+        { "name": "192.168.2.1", "count": 450 }
+      ],
+      
+      "unique_devices": 15,
+      
+      "time_range_start": 1762676738100,
+      "time_range_end": 1762680338100,
+      "time_range_duration_minutes": 60
+    }
+  }
+}
+```
+
+**Statistics Categories:**
+
+**Basic Counts:**
+- `total_queries`: Total number of DNS queries
+- `total_responses`: Total number of DNS responses
+- `queries_with_response`: Queries that received a response
+- `queries_without_response`: Queries without response (timeout/lost)
+
+**Performance Metrics:**
+- `avg_response_time_ms`: Average response time in milliseconds
+- `min_response_time_ms`: Fastest response time
+- `max_response_time_ms`: Slowest response time
+- `response_time_percentiles`: Response time distribution
+  - `p50`: Median (50th percentile)
+  - `p90`: 90th percentile
+  - `p95`: 95th percentile
+  - `p99`: 99th percentile
+
+**Success/Failure Metrics:**
+- `success_count`: Number of successful responses (NoError)
+- `failure_count`: Number of failed responses (errors)
+- `success_rate`: Success rate (0.0 - 1.0)
+- `response_codes`: Breakdown by response code with counts and percentages
+
+**Top Rankings:**
+- `top_domains`: Most queried domains (top 10)
+- `top_query_types`: Most used query types (A, AAAA, HTTPS, etc.)
+- `top_devices`: Most active devices (top 10, by hostname or MAC)
+- `top_dns_servers`: Most used DNS servers (top 5)
+
+**Device Statistics:**
+- `unique_devices`: Number of unique devices making DNS queries
+
+**Time Range:**
+- `time_range_start`: Earliest record timestamp (milliseconds)
+- `time_range_end`: Latest record timestamp (milliseconds)
+- `time_range_duration_minutes`: Time span in minutes
 
 #### GET /api/dns/config
-Get DNS monitoring configuration.
+Get DNS monitoring configuration (Not Yet Fully Implemented).
 
 #### POST /api/dns/config
-Update DNS monitoring configuration.
+Update DNS monitoring configuration (Not Yet Implemented).
 
 ## Field Descriptions
 

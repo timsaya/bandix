@@ -1,10 +1,11 @@
-// DNS monitoring module maps (预留)
-// This module will contain DNS-related eBPF maps
+// DNS monitoring module maps
+// This module contains DNS-related eBPF maps
 
-// TODO: Add DNS-related maps here when implementing DNS monitoring
-// Example:
-// use aya_ebpf::macros::map;
-// use aya_ebpf::maps::HashMap;
-// #[map]
-// pub static DNS_QUERIES: HashMap<[u8; 16], DnsQueryInfo> = HashMap::with_max_entries(1024, 0);
+use aya_ebpf::macros::map;
+use aya_ebpf::maps::RingBuf;
+
+// RingBuf for sending DNS packet data to userspace
+// Size: 256KB
+#[map]
+pub static DNS_DATA: RingBuf = RingBuf::with_byte_size(1024 * 256, 0);
 
