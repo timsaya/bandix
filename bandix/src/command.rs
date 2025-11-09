@@ -74,6 +74,13 @@ pub struct TrafficArgs {
 pub struct DnsArgs {
     #[clap(long, default_value = "false", help = "Enable DNS monitoring module")]
     pub enable_dns: bool,
+
+    #[clap(
+        long,
+        default_value = "10000",
+        help = "Maximum number of DNS records to keep in memory (default: 10000)"
+    )]
+    pub dns_max_records: usize,
 }
 
 /// Connection module arguments
@@ -150,6 +157,11 @@ impl Options {
     /// Get enable_dns from dns args
     pub fn enable_dns(&self) -> bool {
         self.dns.enable_dns
+    }
+
+    /// Get dns_max_records from dns args
+    pub fn dns_max_records(&self) -> usize {
+        self.dns.dns_max_records
     }
 
     /// Get enable_connection from connection args

@@ -124,11 +124,16 @@ pub struct DnsApiHandler {
     #[allow(dead_code)]
     options: Options,
     dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>,
+    hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
     boot_time_offset_ns: u64, // Offset to convert monotonic time to Unix timestamp
 }
 
 impl DnsApiHandler {
-    pub fn new(options: Options, dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>) -> Self {
+    pub fn new(
+        options: Options,
+        dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>,
+        hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
+    ) -> Self {
         // Calculate boot time offset: Unix time - monotonic time
         // We'll use the first DNS record's timestamp as reference if available,
         // otherwise calculate from current time
@@ -137,6 +142,7 @@ impl DnsApiHandler {
         Self {
             options,
             dns_queries,
+            hostname_bindings,
             boot_time_offset_ns,
         }
     }
@@ -178,6 +184,11 @@ impl DnsApiHandler {
         // Unix timestamp = monotonic timestamp + boot time offset
         let unix_ns = monotonic_ns.saturating_add(self.boot_time_offset_ns);
         unix_ns / 1_000_000 // Convert to milliseconds
+    }
+    
+    /// Parse MAC address string to [u8; 6] bytes
+    fn parse_mac_address(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
+        crate::utils::network_utils::parse_mac_address(mac_str)
     }
     
     /// Format Unix timestamp (milliseconds) to readable string (local time)
@@ -366,6 +377,13 @@ impl DnsApiHandler {
             vec![] // Page out of range
         };
 
+        // Get latest hostname bindings for dynamic lookup
+        let hostname_bindings = if let Ok(bindings) = self.hostname_bindings.lock() {
+            bindings.clone()
+        } else {
+            std::collections::HashMap::new()
+        };
+
         // Convert to API response format
         let query_infos: Vec<DnsQueryInfo> = paginated_queries
             .into_iter()
@@ -378,6 +396,22 @@ impl DnsApiHandler {
                 
                 // Format timestamp
                 let timestamp_formatted = Self::format_timestamp(unix_timestamp_ms);
+
+                // Get latest hostname from bindings based on MAC address
+                let device_name = if !q.device_mac.is_empty() {
+                    // Parse MAC address string to [u8; 6]
+                    if let Ok(mac_bytes) = Self::parse_mac_address(&q.device_mac) {
+                        hostname_bindings.get(&mac_bytes).cloned().unwrap_or_else(|| {
+                            // Fallback to stored hostname if not found in bindings
+                            q.device_name
+                        })
+                    } else {
+                        // If MAC parsing fails, use stored hostname
+                        q.device_name
+                    }
+                } else {
+                    q.device_name
+                };
 
                 DnsQueryInfo {
                     timestamp: unix_timestamp_ms,
@@ -395,7 +429,7 @@ impl DnsApiHandler {
                     response_ips: q.response_ips,
                     response_records: q.response_records,
                     device_mac: q.device_mac,
-                    device_name: q.device_name,
+                    device_name,
                 }
             })
             .collect();
@@ -422,6 +456,13 @@ impl DnsApiHandler {
             queries.clone()
         } else {
             vec![]
+        };
+        
+        // Get latest hostname bindings for dynamic lookup
+        let hostname_bindings = if let Ok(bindings) = self.hostname_bindings.lock() {
+            bindings.clone()
+        } else {
+            std::collections::HashMap::new()
         };
         
         if queries.is_empty() {
@@ -525,9 +566,12 @@ impl DnsApiHandler {
                 },
             })
             .collect();
-        // Sort by count (descending), then by code name (ascending)
+        // Sort by count (descending), then by code name (ascending) for stable ordering
         response_codes.sort_by(|a, b| {
-            b.count.cmp(&a.count).then_with(|| a.code.cmp(&b.code))
+            match b.count.cmp(&a.count) {
+                std::cmp::Ordering::Equal => a.code.cmp(&b.code),
+                other => other,
+            }
         });
         
         // Top domains
@@ -539,9 +583,12 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        // Sort by count (descending), then by name (ascending)
+        // Sort by count (descending), then by name (ascending) for stable ordering
         top_domains.sort_by(|a, b| {
-            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+            match b.count.cmp(&a.count) {
+                std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+                other => other,
+            }
         });
         top_domains.truncate(10);
         
@@ -554,19 +601,40 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        // Sort by count (descending), then by name (ascending)
+        // Sort by count (descending), then by name (ascending) for stable ordering
         top_query_types.sort_by(|a, b| {
-            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+            match b.count.cmp(&a.count) {
+                std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+                other => other,
+            }
         });
         top_query_types.truncate(10);
         
         // Top devices (by MAC or name)
+        // Use latest hostname from bindings for accurate device names
         let mut device_map: HashMap<String, usize> = HashMap::new();
         for query in queries.iter().filter(|q| q.is_query) {
-            let device_key = if !query.device_name.is_empty() {
+            let device_key = if !query.device_mac.is_empty() {
+                // Try to get latest hostname from bindings
+                if let Ok(mac_bytes) = Self::parse_mac_address(&query.device_mac) {
+                    if let Some(hostname) = hostname_bindings.get(&mac_bytes) {
+                        if !hostname.is_empty() {
+                            hostname.clone()
+                        } else {
+                            query.device_mac.clone()
+                        }
+                    } else if !query.device_name.is_empty() {
+                        query.device_name.clone()
+                    } else {
+                        query.device_mac.clone()
+                    }
+                } else if !query.device_name.is_empty() {
+                    query.device_name.clone()
+                } else {
+                    query.device_mac.clone()
+                }
+            } else if !query.device_name.is_empty() {
                 query.device_name.clone()
-            } else if !query.device_mac.is_empty() {
-                query.device_mac.clone()
             } else {
                 continue;
             };
@@ -576,9 +644,12 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        // Sort by count (descending), then by name (ascending)
+        // Sort by count (descending), then by name (ascending) for stable ordering
         top_devices.sort_by(|a, b| {
-            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+            match b.count.cmp(&a.count) {
+                std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+                other => other,
+            }
         });
         top_devices.truncate(10);
         
@@ -591,9 +662,12 @@ impl DnsApiHandler {
             .into_iter()
             .map(|(name, count)| TopItem { name, count })
             .collect();
-        // Sort by count (descending), then by name (ascending)
+        // Sort by count (descending), then by name (ascending) for stable ordering
         top_dns_servers.sort_by(|a, b| {
-            b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name))
+            match b.count.cmp(&a.count) {
+                std::cmp::Ordering::Equal => a.name.cmp(&b.name),
+                other => other,
+            }
         });
         top_dns_servers.truncate(10);
         

@@ -617,8 +617,9 @@ impl DnsMonitor {
                 
                 // Store the new record (both query and response are stored)
                 queries.push(record);
-                // Keep only last 1000 records
-                if queries.len() > 1000 {
+                // Keep only last N records (configurable via --dns-max-records)
+                let max_records = ctx.options.dns_max_records();
+                if queries.len() > max_records {
                     queries.remove(0);
                 }
             }

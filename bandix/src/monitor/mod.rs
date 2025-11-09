@@ -240,6 +240,7 @@ impl ModuleType {
                 let handler = ApiHandler::Dns(DnsApiHandler::new(
                     dns_ctx.options.clone(),
                     Arc::clone(&dns_ctx.dns_queries),
+                    Arc::clone(&dns_ctx.hostname_bindings),
                 ));
 
                 // Register with API router
