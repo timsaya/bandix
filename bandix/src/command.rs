@@ -340,7 +340,7 @@ async fn create_module_contexts(
 
     // Configure module enable flags and get DNS map if needed
     // This requires exclusive access to the eBPF object, so we do it before creating contexts
-    let (shared_ebpf_arc, dns_map) = if let Some(mut ebpf) = shared_ebpf {
+    if let Some(mut ebpf) = shared_ebpf {
         // Configure module enable flags
         log::info!("Configuring module enable flags...");
         let mut module_flags: Array<_, u8> = Array::try_from(
@@ -370,44 +370,41 @@ async fn create_module_contexts(
         };
         
         // Now wrap in Arc so both modules can share it
-        (Arc::new(ebpf), dns_map)
-    } else {
-        // This should not happen if we reach here, but handle it gracefully
-        return Err(anyhow::anyhow!("Shared eBPF object not available"));
-    };
+        let shared_ebpf_arc = Arc::new(ebpf);
 
-    // Initialize traffic module
-    if options.enable_traffic() {
-        log::info!("Initializing traffic module...");
-        
-        // Create references to the shared eBPF object
-        let ingress = Arc::clone(&shared_ebpf_arc);
-        let egress = Arc::clone(&shared_ebpf_arc);
+        // Initialize traffic module
+        if options.enable_traffic() {
+            log::info!("Initializing traffic module...");
+            
+            // Create references to the shared eBPF object
+            let ingress = Arc::clone(&shared_ebpf_arc);
+            let egress = Arc::clone(&shared_ebpf_arc);
 
-        // Create traffic module context
-        let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress);
-        traffic_ctx.hostname_bindings = std::sync::Arc::clone(shared_hostname_bindings);
+            // Create traffic module context
+            let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress);
+            traffic_ctx.hostname_bindings = std::sync::Arc::clone(shared_hostname_bindings);
 
-        module_contexts.push(ModuleContext::Traffic(traffic_ctx));
-    }
+            module_contexts.push(ModuleContext::Traffic(traffic_ctx));
+        }
 
-    // Initialize DNS module
-    if options.enable_dns() {
-        log::info!("Initializing DNS module...");
-        
-        // Create references to the shared eBPF object
-        let ingress = Arc::clone(&shared_ebpf_arc);
-        let egress = Arc::clone(&shared_ebpf_arc);
+        // Initialize DNS module
+        if options.enable_dns() {
+            log::info!("Initializing DNS module...");
+            
+            // Create references to the shared eBPF object
+            let ingress = Arc::clone(&shared_ebpf_arc);
+            let egress = Arc::clone(&shared_ebpf_arc);
 
-        // Create DNS module context with the pre-acquired map
-        let dns_ctx = DnsModuleContext::new_with_map(
-            options.clone(), 
-            ingress, 
-            egress,
-            dns_map.unwrap(),
-            std::sync::Arc::clone(shared_hostname_bindings),
-        );
-        module_contexts.push(ModuleContext::Dns(dns_ctx));
+            // Create DNS module context with the pre-acquired map
+            let dns_ctx = DnsModuleContext::new_with_map(
+                options.clone(), 
+                ingress, 
+                egress,
+                dns_map.unwrap(),
+                std::sync::Arc::clone(shared_hostname_bindings),
+            );
+            module_contexts.push(ModuleContext::Dns(dns_ctx));
+        }
     }
 
     // Initialize connection module
