@@ -151,42 +151,75 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
         return false;
     }
 
-    // Check protocol type, DNS uses UDP (17)
+    // Check protocol type, DNS uses UDP (17) or TCP (6)
     let protocol: u8 = match ctx.load(ip_header_start + 9) {
         Ok(b) => b,
         Err(_) => return false,
     };
-    if protocol != 17 {
-        // Not UDP, skip
-        return false;
+    
+    // Support both UDP and TCP
+    match protocol {
+        17 => {
+            // UDP DNS
+            let udp_header_start = ip_header_start + ip_header_len;
+            
+            // Check UDP header length (at least 8 bytes)
+            if len < udp_header_start + 8 {
+                return false;
+            }
+            
+            // Parse UDP ports (source and destination ports)
+            let src_port_bytes = match (ctx.load(udp_header_start), ctx.load(udp_header_start + 1)) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let src_port = u16::from_be_bytes(src_port_bytes);
+            
+            let dst_port_bytes = match (
+                ctx.load(udp_header_start + 2),
+                ctx.load(udp_header_start + 3),
+            ) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let dst_port = u16::from_be_bytes(dst_port_bytes);
+            
+            // Check if DNS packet (port 53)
+            src_port == 53 || dst_port == 53
+        }
+        6 => {
+            // TCP DNS
+            let tcp_header_start = ip_header_start + ip_header_len;
+            
+            // Check TCP header minimum length (20 bytes)
+            if len < tcp_header_start + 20 {
+                return false;
+            }
+            
+            // Parse TCP ports (source and destination ports)
+            let src_port_bytes = match (ctx.load(tcp_header_start), ctx.load(tcp_header_start + 1)) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let src_port = u16::from_be_bytes(src_port_bytes);
+            
+            let dst_port_bytes = match (
+                ctx.load(tcp_header_start + 2),
+                ctx.load(tcp_header_start + 3),
+            ) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let dst_port = u16::from_be_bytes(dst_port_bytes);
+            
+            // Check if DNS packet (port 53)
+            src_port == 53 || dst_port == 53
+        }
+        _ => {
+            // Not UDP or TCP, skip
+            false
+        }
     }
-
-    // UDP header start position (after IPv4 header)
-    let udp_header_start = ip_header_start + ip_header_len;
-
-    // Check UDP header length (at least 8 bytes)
-    if len < udp_header_start + 8 {
-        return false;
-    }
-
-    // Parse UDP ports (source and destination ports)
-    let src_port_bytes = match (ctx.load(udp_header_start), ctx.load(udp_header_start + 1)) {
-        (Ok(b1), Ok(b2)) => [b1, b2],
-        _ => return false,
-    };
-    let src_port = u16::from_be_bytes(src_port_bytes);
-
-    let dst_port_bytes = match (
-        ctx.load(udp_header_start + 2),
-        ctx.load(udp_header_start + 3),
-    ) {
-        (Ok(b1), Ok(b2)) => [b1, b2],
-        _ => return false,
-    };
-    let dst_port = u16::from_be_bytes(dst_port_bytes);
-
-    // Check if DNS packet (port 53)
-    src_port == 53 || dst_port == 53
 }
 
 /// Check IPv6 DNS packet
@@ -291,30 +324,57 @@ fn is_dns_ipv6(ctx: &TcContext, len: usize) -> bool {
         }
     }
 
-    // If not UDP in the end, return false
-    if next_header != 17 {
-        return false;
+    // Support both UDP (17) and TCP (6)
+    match next_header {
+        17 => {
+            // UDP DNS
+            // Check UDP header length (at least 8 bytes)
+            if len < offset + 8 {
+                return false;
+            }
+            
+            // Parse UDP ports (source and destination ports)
+            let src_port_bytes = match (ctx.load(offset), ctx.load(offset + 1)) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let src_port = u16::from_be_bytes(src_port_bytes);
+            
+            let dst_port_bytes = match (ctx.load(offset + 2), ctx.load(offset + 3)) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let dst_port = u16::from_be_bytes(dst_port_bytes);
+            
+            // Check if DNS packet (port 53)
+            src_port == 53 || dst_port == 53
+        }
+        6 => {
+            // TCP DNS
+            // Check TCP header minimum length (20 bytes)
+            if len < offset + 20 {
+                return false;
+            }
+            
+            // Parse TCP ports (source and destination ports)
+            let src_port_bytes = match (ctx.load(offset), ctx.load(offset + 1)) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let src_port = u16::from_be_bytes(src_port_bytes);
+            
+            let dst_port_bytes = match (ctx.load(offset + 2), ctx.load(offset + 3)) {
+                (Ok(b1), Ok(b2)) => [b1, b2],
+                _ => return false,
+            };
+            let dst_port = u16::from_be_bytes(dst_port_bytes);
+            
+            // Check if DNS packet (port 53)
+            src_port == 53 || dst_port == 53
+        }
+        _ => {
+            // Not UDP or TCP
+            false
+        }
     }
-
-    // UDP header start position
-    // Check UDP header length (at least 8 bytes)
-    if len < offset + 8 {
-        return false;
-    }
-
-    // Parse UDP ports (source and destination ports)
-    let src_port_bytes = match (ctx.load(offset), ctx.load(offset + 1)) {
-        (Ok(b1), Ok(b2)) => [b1, b2],
-        _ => return false,
-    };
-    let src_port = u16::from_be_bytes(src_port_bytes);
-
-    let dst_port_bytes = match (ctx.load(offset + 2), ctx.load(offset + 3)) {
-        (Ok(b1), Ok(b2)) => [b1, b2],
-        _ => return false,
-    };
-    let dst_port = u16::from_be_bytes(dst_port_bytes);
-
-    // Check if DNS packet (port 53)
-    src_port == 53 || dst_port == 53
 }

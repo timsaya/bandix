@@ -206,7 +206,7 @@ impl DnsMonitor {
         }
     }
 
-    /// Parse IPv4 DNS packet
+    /// Parse IPv4 DNS packet (supports both UDP and TCP)
     fn parse_dns_ipv4(
         &self,
         data: &[u8],
@@ -237,21 +237,9 @@ impl DnsMonitor {
             return None;
         }
 
-        // Check protocol type, DNS uses UDP (17)
+        // Check protocol type, DNS uses UDP (17) or TCP (6)
         let protocol = data[ip_header_start + 9];
-        if protocol != 17 {
-            // Not UDP, skip
-            return None;
-        }
-
-        // UDP header start position (after IPv4 header)
-        let udp_header_start = ip_header_start + ip_header_len;
         
-        // Check UDP header length (at least 8 bytes)
-        if data.len() < udp_header_start + 8 {
-            return None;
-        }
-
         // Parse IP addresses (source and destination addresses in IPv4 header)
         let src_ip = format!(
             "{}.{}.{}.{}",
@@ -268,21 +256,82 @@ impl DnsMonitor {
             data[ip_header_start + 19]
         );
 
-        // Parse UDP ports
-        let src_port = u16::from_be_bytes([data[udp_header_start], data[udp_header_start + 1]]);
-        let dst_port = u16::from_be_bytes([data[udp_header_start + 2], data[udp_header_start + 3]]);
+        match protocol {
+            17 => {
+                // UDP DNS
+                let udp_header_start = ip_header_start + ip_header_len;
+                
+                // Check UDP header length (at least 8 bytes)
+                if data.len() < udp_header_start + 8 {
+                    return None;
+                }
 
-        // Check if DNS packet (port 53)
-        if src_port == 53 || dst_port == 53 {
-            // DNS data start position (after UDP header, offset 8 bytes)
-            let dns_offset = udp_header_start + 8;
-            Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx))
-        } else {
-            None
+                // Parse UDP ports
+                let src_port = u16::from_be_bytes([data[udp_header_start], data[udp_header_start + 1]]);
+                let dst_port = u16::from_be_bytes([data[udp_header_start + 2], data[udp_header_start + 3]]);
+
+                // Check if DNS packet (port 53)
+                if src_port == 53 || dst_port == 53 {
+                    // DNS data start position (after UDP header, offset 8 bytes)
+                    let dns_offset = udp_header_start + 8;
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "UDP"))
+                } else {
+                    None
+                }
+            }
+            6 => {
+                // TCP DNS
+                let tcp_header_start = ip_header_start + ip_header_len;
+                
+                // Check TCP header minimum length (20 bytes)
+                if data.len() < tcp_header_start + 20 {
+                    return None;
+                }
+
+                // Parse TCP ports
+                let src_port = u16::from_be_bytes([data[tcp_header_start], data[tcp_header_start + 1]]);
+                let dst_port = u16::from_be_bytes([data[tcp_header_start + 2], data[tcp_header_start + 3]]);
+
+                // Check if DNS packet (port 53)
+                if src_port == 53 || dst_port == 53 {
+                    // Get TCP header length (data offset field, upper 4 bits of byte 12)
+                    let data_offset = ((data[tcp_header_start + 12] >> 4) & 0x0F) as usize;
+                    let tcp_header_len = data_offset * 4;
+                    
+                    // Validate TCP header length
+                    if tcp_header_len < 20 || data.len() < tcp_header_start + tcp_header_len {
+                        return None;
+                    }
+                    
+                    // TCP DNS data start position (after TCP header)
+                    let tcp_data_start = tcp_header_start + tcp_header_len;
+                    
+                    // TCP DNS messages have a 2-byte length prefix
+                    if data.len() < tcp_data_start + 2 {
+                        return None;
+                    }
+                    
+                    // Skip the 2-byte length prefix to get to DNS data
+                    let dns_offset = tcp_data_start + 2;
+                    
+                    // Check if there's actual DNS data
+                    if data.len() <= dns_offset {
+                        return None;
+                    }
+                    
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "TCP"))
+                } else {
+                    None
+                }
+            }
+            _ => {
+                // Not UDP or TCP
+                None
+            }
         }
     }
 
-    /// Parse IPv6 DNS packet
+    /// Parse IPv6 DNS packet (supports both UDP and TCP)
     fn parse_dns_ipv6(
         &self,
         data: &[u8],
@@ -314,7 +363,7 @@ impl DnsMonitor {
         // Process extension headers (simplified, handle common cases)
         // Most DNS packets have 0-1 extension headers
         let mut max_ext_headers = 3;
-        while next_header != 17 && max_ext_headers > 0 && offset + 8 <= data.len() {
+        while next_header != 17 && next_header != 6 && max_ext_headers > 0 && offset + 8 <= data.len() {
             if next_header >= 60 {
                 return None; // Invalid next header
             }
@@ -331,27 +380,75 @@ impl DnsMonitor {
             max_ext_headers -= 1;
         }
 
-        // If not UDP, return None
-        if next_header != 17 {
-            return None;
-        }
+        // Support both UDP and TCP
+        match next_header {
+            17 => {
+                // UDP DNS
+                // Check UDP header length (at least 8 bytes)
+                if data.len() < offset + 8 {
+                    return None;
+                }
 
-        // Check UDP header length (at least 8 bytes)
-        if data.len() < offset + 8 {
-            return None;
-        }
+                // Parse UDP ports
+                let src_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
+                let dst_port = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-        // Parse UDP ports
-        let src_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
-        let dst_port = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+                // Check if DNS packet (port 53)
+                if src_port == 53 || dst_port == 53 {
+                    // DNS data start position (after UDP header, offset 8 bytes)
+                    let dns_offset = offset + 8;
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "UDP"))
+                } else {
+                    None
+                }
+            }
+            6 => {
+                // TCP DNS
+                // Check TCP header minimum length (20 bytes)
+                if data.len() < offset + 20 {
+                    return None;
+                }
 
-        // Check if DNS packet (port 53)
-        if src_port == 53 || dst_port == 53 {
-            // DNS data start position (after UDP header, offset 8 bytes)
-            let dns_offset = offset + 8;
-            Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx))
-        } else {
-            None
+                // Parse TCP ports
+                let src_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
+                let dst_port = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+
+                // Check if DNS packet (port 53)
+                if src_port == 53 || dst_port == 53 {
+                    // Get TCP header length (data offset field, upper 4 bits of byte 12)
+                    let data_offset = ((data[offset + 12] >> 4) & 0x0F) as usize;
+                    let tcp_header_len = data_offset * 4;
+                    
+                    // Validate TCP header length
+                    if tcp_header_len < 20 || data.len() < offset + tcp_header_len {
+                        return None;
+                    }
+                    
+                    // TCP DNS data start position (after TCP header)
+                    let tcp_data_start = offset + tcp_header_len;
+                    
+                    // TCP DNS messages have a 2-byte length prefix
+                    if data.len() < tcp_data_start + 2 {
+                        return None;
+                    }
+                    
+                    // Skip the 2-byte length prefix to get to DNS data
+                    let dns_offset = tcp_data_start + 2;
+                    
+                    // Check if there's actual DNS data
+                    if data.len() <= dns_offset {
+                        return None;
+                    }
+                    
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "TCP"))
+                } else {
+                    None
+                }
+            }
+            _ => {
+                // Not UDP or TCP
+                None
+            }
         }
     }
 
@@ -459,6 +556,7 @@ impl DnsMonitor {
         dst_port: u16,
         timestamp: u64,
         ctx: &DnsModuleContext,
+        protocol: &str, // "UDP" or "TCP"
     ) -> String {
         // Check DNS data length (at least need 12 bytes DNS header)
         if data.len() < dns_offset + 12 {
@@ -499,8 +597,18 @@ impl DnsMonitor {
         let mut response_records = Vec::new();
         if !is_query {
             // This is a response packet
+            let answer_count = message.answer_count();
+            
+            // Log for debugging empty responses
+            if answer_count == 0 && log::max_level() >= log::Level::Debug {
+                log::debug!("DNS response has no answers: Domain={}, Type={}, ResponseCode={:?}", 
+                    domain_name, query_type, message.response_code());
+            }
+            
             // Process answer section
             for answer in message.answers() {
+                let record_type = answer.record_type();
+                
                 if let Some(rdata) = answer.data() {
                     match rdata {
                         RData::A(ipv4) => {
@@ -534,9 +642,33 @@ impl DnsMonitor {
                             response_records.push(format!("SOA:{}", soa.mname()));
                         }
                         _ => {
-                            response_records.push(format!("{:?}:{:?}", answer.record_type(), rdata));
+                            // Handle other record types (including HTTPS, SVCB, and unknown ones)
+                            // Format: RecordType:<hex data> for better visibility
+                            let rdata_str = format!("{:?}", rdata);
+                            // Limit output to avoid very long strings
+                            let rdata_display = if rdata_str.len() > 100 {
+                                format!("{}...", &rdata_str[..100])
+                            } else {
+                                rdata_str
+                            };
+                            response_records.push(format!("{}:{}", record_type, rdata_display));
+                            
+                            // Log for debugging to help diagnose HTTPS and other special record types
+                            if log::max_level() >= log::Level::Debug && 
+                               (format!("{:?}", record_type).contains("HTTPS") || 
+                                format!("{:?}", record_type).contains("SVCB") ||
+                                format!("{:?}", record_type) == "Unknown(65)" ||  // HTTPS type code
+                                format!("{:?}", record_type) == "Unknown(64)") {  // SVCB type code
+                                log::debug!("DNS special record: Domain={}, Type={:?}, Data={}", 
+                                    domain_name, record_type, rdata_display);
+                            }
                         }
                     }
+                } else {
+                    // No data in answer (should not happen, but log it for debugging)
+                    log::warn!("DNS answer has no data: Type={:?}, Name={}, Domain={}", 
+                        record_type, answer.name(), domain_name);
+                    response_records.push(format!("{}:<no data>", record_type));
                 }
             }
             
@@ -668,9 +800,14 @@ impl DnsMonitor {
 
         // Build output string
         let mut result = format!(
-            "DNS {} {}:{} -> {}:{} [ID:0x{:04X}]",
-            direction, src_ip, src_port, dst_ip, dst_port, transaction_id
+            "DNS/{} {} {}:{} -> {}:{} [ID:0x{:04X}]",
+            protocol, direction, src_ip, src_port, dst_ip, dst_port, transaction_id
         );
+
+        // Add query type if present (especially useful for PTR queries)
+        if !query_type.is_empty() {
+            result.push_str(&format!(" [Type:{}]", query_type));
+        }
 
         // Add domain name (in query or response)
         if !domain_name.is_empty() {
@@ -698,22 +835,21 @@ impl DnsMonitor {
                 result.push_str("]");
             }
             
-            // Add response IP addresses (if any)
-        if !response_ips.is_empty() {
-            result.push_str(&format!(" => IP:{}", response_ips.join(",")));
-        }
-
-            // Add other response records (if any, and no IP addresses)
-            if response_ips.is_empty() && !response_records.is_empty() {
-                result.push_str(&format!(" => Records:{}", response_records.join(", ")));
-            } else if !response_records.is_empty() {
-                // Show non-IP records separately
+            // Add response records
+            if !response_ips.is_empty() {
+                // Has IP addresses (A/AAAA records)
+                result.push_str(&format!(" => IP:{}", response_ips.join(",")));
+                
+                // Show other non-IP records separately
                 let non_ip_records: Vec<_> = response_records.iter()
                     .filter(|r| !r.starts_with("A:") && !r.starts_with("AAAA:"))
                     .collect();
                 if !non_ip_records.is_empty() {
                     result.push_str(&format!(" Other:{}", non_ip_records.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ")));
                 }
+            } else if !response_records.is_empty() {
+                // No IP addresses, show all records (CNAME, PTR, MX, etc.)
+                result.push_str(&format!(" => {}", response_records.join(", ")));
             }
         }
 

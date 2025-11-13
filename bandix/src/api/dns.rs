@@ -74,6 +74,7 @@ pub struct DnsStatsInfo {
     pub avg_response_time_ms: f64,               // Average response time in milliseconds
     pub min_response_time_ms: u64,               // Fastest response time
     pub max_response_time_ms: u64,               // Slowest response time
+    pub latest_response_time_ms: Option<u64>,    // Most recent response time (None if no responses yet)
     pub response_time_percentiles: ResponseTimePercentiles,
     
     // Success/failure metrics
@@ -492,6 +493,7 @@ impl DnsApiHandler {
                 avg_response_time_ms: 0.0,
                 min_response_time_ms: 0,
                 max_response_time_ms: 0,
+                latest_response_time_ms: None,
                 response_time_percentiles: ResponseTimePercentiles {
                     p50: 0,
                     p90: 0,
@@ -531,6 +533,12 @@ impl DnsApiHandler {
             .filter_map(|q| q.response_time_ms)
             .filter(|&t| t > 0)
             .collect();
+        
+        // Get latest response time (from the most recent response with response_time_ms)
+        let latest_response_time_ms = queries.iter()
+            .filter(|q| !q.is_query && q.response_time_ms.is_some())
+            .max_by_key(|q| q.timestamp)
+            .and_then(|q| q.response_time_ms);
         
         let (avg_response_time_ms, min_response_time_ms, max_response_time_ms, response_time_percentiles) = 
             if !response_times.is_empty() {
@@ -712,6 +720,7 @@ impl DnsApiHandler {
             avg_response_time_ms,
             min_response_time_ms,
             max_response_time_ms,
+            latest_response_time_ms,
             response_time_percentiles,
             success_count,
             failure_count,
