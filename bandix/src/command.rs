@@ -433,7 +433,7 @@ fn start_hostname_refresh_task(
     shutdown_notify: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600));
 
         loop {
             tokio::select! {
@@ -519,7 +519,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         }
     });
 
-    // Start hostname refresh task (every 5 seconds)
+    // Start hostname refresh task (every 10 minutes)
     let hostname_refresh_task = start_hostname_refresh_task(
         std::sync::Arc::clone(&shared_hostname_bindings),
         options.clone(),
