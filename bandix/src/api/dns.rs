@@ -404,11 +404,9 @@ impl DnsApiHandler {
     /// - page_size: Number of records per page (default: 20, max: 1000)
     /// - limit: (deprecated, use page_size) Maximum number of records to return
     async fn handle_queries(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        
-        
+
         // Self::_generate_test_data(&self.dns_queries);
-
-
+        
         // Get query parameters
         let domain_filter = request.query_params.get("domain");
         let device_filter = request.query_params.get("device").map(|s| s.to_lowercase());
