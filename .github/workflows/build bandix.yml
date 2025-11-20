@@ -61,7 +61,7 @@ jobs:
           df -H
           echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: build bandix
+      - name: build bandix ${{ steps.check_version.outputs.latest_version }}
         id: build_bandix
         if: steps.check_version.outputs.has_update == 'true' && steps.install_dependencies.outputs.status == 'success'
         run: |
