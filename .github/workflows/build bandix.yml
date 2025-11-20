@@ -73,7 +73,6 @@ jobs:
         id: prepare_release
         if: steps.check_version.outputs.has_update == 'true' && steps.build_bandix.outputs.status == 'success'
         run: |
-          echo "## :mega:Update content" >> release.txt
           echo "![](https://img.shields.io/github/downloads/${{ github.repository }}/${{steps.check_version.outputs.latest_version}}/total?style=flat-square)" >> release.txt
           touch release.txt
           cd release
