@@ -30,7 +30,6 @@ jobs:
         env:
           url_tags: https://api.github.com/repos/${{ github.repository }}/releases/latest
         run: |
-          cd bandix
           latest_version=v$(grep '^version' bandix/Cargo.toml | awk -F '"' '{print $2}')
           echo "latest_version=${latest_version}" >> $GITHUB_OUTPUT
 
