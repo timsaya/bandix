@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+source ~/.cargo/env
+
 # Define version number (get from Cargo.toml or specify manually)
 VERSION=$(grep "^version" bandix/Cargo.toml | cut -d '"' -f2)
 echo "Build version: $VERSION"
