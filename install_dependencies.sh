@@ -5,7 +5,7 @@
 set -e
 
 INSTALL_BASE="/opt/musl-cross"
-MUSL_CC_BASE="https://github.com/timsaya/musl-cc/releases/download/v0.1.0/"
+MUSL_CC_BASE="https://github.com/timsaya/musl-cc/releases/download/latest/"
 PACKAGE_MANAGER=""
 
 # 颜色输出
