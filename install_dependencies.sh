@@ -50,18 +50,18 @@ install_system_packages() {
     case "$PACKAGE_MANAGER" in
         apt)
             apt-get update
-            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc 
+            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file
             ;;
         yum)
             yum groupinstall -y "Development Tools"
-            yum install -y curl tar gzip xz pkgconfig gcc 
+            yum install -y curl tar gzip xz pkgconfig gcc file
             ;;
         dnf)
             dnf groupinstall -y 'Development Tools'
-            dnf install -y curl tar gzip xz pkg-config gcc
+            dnf install -y curl tar gzip xz pkg-config gcc file
             ;;
         pacman)
-            pacman -Sy --noconfirm base-devel curl tar gzip xz pkgconf gcc
+            pacman -Sy --noconfirm base-devel curl tar gzip xz pkgconf gcc file
             ;;
         *)
             echo -e "${RED}错误: 未能识别的包管理器，请手动安装 gcc、make、curl、tar、gzip、xz、pkg-config${NC}"
