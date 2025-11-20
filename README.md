@@ -26,6 +26,14 @@ Bandix is a network traffic monitoring tool based on eBPF technology, developed 
 - Linux system (kernel version supporting eBPF, 6.0+ recommended)
 - Root privileges required to load eBPF programs
 
+## Build Instructions
+
+```shell
+./install_dependencies.sh
+
+./build_release.sh
+```
+
 ## Usage
 
 ```shell
