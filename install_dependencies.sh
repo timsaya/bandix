@@ -150,7 +150,7 @@ for toolchain_name in "${!TOOLCHAINS[@]}"; do
     fi
     
     # 下载并安装
-    echo -n "下载并安装... "
+    echo "下载并安装..."
     cd /tmp
     if curl -L -o "${toolchain_name}.tgz" "$download_url" && [ -f "${toolchain_name}.tgz" ] && [ -s "${toolchain_name}.tgz" ]; then
         tar -xzf "${toolchain_name}.tgz" -C "$INSTALL_BASE"
