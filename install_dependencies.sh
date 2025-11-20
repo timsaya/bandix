@@ -5,7 +5,7 @@
 set -e
 
 INSTALL_BASE="/opt/musl-cross"
-MUSL_CC_BASE="https://musl.cc"
+MUSL_CC_BASE="https://joeyparrish.github.io/musl-cc-mirror/"
 PACKAGE_MANAGER=""
 
 # 颜色输出
