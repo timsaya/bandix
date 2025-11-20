@@ -1,106 +1,57 @@
+# ARM 架构配置
+
 [target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-gnu-gcc"
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-
-[target.armv7-unknown-linux-gnueabihf]
-linker = "arm-linux-gnueabihf-gcc"
+linker = "/opt/musl-cross/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc"
 
 [target.armv7-unknown-linux-musleabihf]
-linker = "arm-linux-musleabihf-gcc"
+linker = "/opt/musl-cross/arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-gcc"
 
-[target.armv5te-unknown-linux-gnueabi]
-linker = "arm-linux-gnueabi-gcc"
+[target.armv7-unknown-linux-musleabi]
+linker = "/opt/musl-cross/arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
 
 [target.armv5te-unknown-linux-musleabi]
-linker = "arm-linux-musleabi-gcc"
-
-# ARM 32位架构的更多变体
-[target.arm-unknown-linux-gnueabi]
-linker = "arm-linux-gnueabi-gcc"
-
-[target.arm-unknown-linux-gnueabihf]
-linker = "arm-linux-gnueabihf-gcc"
+linker = "/opt/musl-cross/arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
 
 [target.arm-unknown-linux-musleabi]
-linker = "arm-linux-musleabi-gcc"
+linker = "/opt/musl-cross/arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
 
 [target.arm-unknown-linux-musleabihf]
-linker = "arm-linux-musleabihf-gcc"
+linker = "/opt/musl-cross/arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-gcc"
 
-# ARM Cortex-A 系列（现代路由器常用）
-[target.armv7-unknown-linux-musleabi]
-linker = "arm-linux-musleabi-gcc"
-
-# AArch64 的更多变体
-[target.aarch64-unknown-linux-android]
-linker = "aarch64-linux-android-gcc"
 
 # RISC-V 架构配置
-[target.riscv64gc-unknown-linux-gnu]
-linker = "riscv64-linux-gnu-gcc"
 
 [target.riscv64gc-unknown-linux-musl]
-linker = "riscv64-linux-gnu-gcc"
+linker = "/opt/musl-cross/riscv64-linux-musl-cross/bin/riscv64-linux-musl-gcc"
+rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
-# PowerPC 架构配置
-[target.powerpc-unknown-linux-gnu]
-linker = "powerpc-linux-gnu-gcc"
 
-[target.powerpc64-unknown-linux-gnu]
-linker = "powerpc64-linux-gnu-gcc"
+# PowerPC64 架构配置
 
-[target.powerpc64le-unknown-linux-gnu]
-linker = "powerpc64le-linux-gnu-gcc"
+[target.powerpc64le-unknown-linux-musl]
+linker = "/opt/musl-cross/powerpc64le-linux-musl-cross/bin/powerpc64le-linux-musl-gcc"
+rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+
 
 # MIPS 架构配置
-[target.mips-unknown-linux-gnu]
-linker = "mips-linux-gnu-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
 [target.mips-unknown-linux-musl]
-linker = "/opt/musl/mips-linux-musl-cross/bin/mips-linux-musl-gcc"
+linker = "/opt/musl-cross/mips-linux-musl-cross/bin/mips-linux-musl-gcc"
 rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
-
-[target.mips64-unknown-linux-gnuabi64]
-linker = "mips64-linux-gnuabi64-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
-
-[target.mips64-unknown-linux-muslabi64]
-linker = "mips64-linux-muslabi64-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
-
-[target.mipsel-unknown-linux-gnu]
-linker = "mipsel-linux-gnu-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
-
-# [target.mipsel-unknown-linux-musl]
-# linker = "/opt/musl/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
-# rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
 [target.mipsel-unknown-linux-musl]
-linker = "/opt/musl/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
+linker = "/opt/musl-cross/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
 rustflags = [
     "-C",
     "target-feature=-crt-static",
     "-C",
     "link-arg=-dynamic",
     "-L",
-    "/opt/musl/mipsel-linux-musl-cross/mipsel-linux-musl/lib",
+    "/opt/musl-cross/mipsel-linux-musl-cross/mipsel-linux-musl/lib",
     "-L",
-    "/opt/musl/mipsel-linux-musl-cross/lib/gcc/mipsel-linux-musl/11.2.1",
+    "/opt/musl-cross/mipsel-linux-musl-cross/lib/gcc/mipsel-linux-musl/11.2.1",
     "-C",
     "link-arg=-Wl,--dynamic-linker=/lib/ld-musl-mipsel-sf.so.1",
     "-C",
     "panic=unwind",
 ]
-
-
-[target.mips64el-unknown-linux-gnuabi64]
-linker = "mips64el-linux-gnuabi64-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
-
-[target.mips64el-unknown-linux-muslabi64]
-linker = "mips64el-linux-muslabi64-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]

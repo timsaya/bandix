@@ -18,45 +18,77 @@ if ! command -v bpf-linker &> /dev/null; then
     cargo install bpf-linker
 fi
 
-# Build target platform list
-TARGETS=(
+# Check and install nightly toolchain (required for eBPF builds and MIPS build-std)
+echo "Checking nightly toolchain..."
+if ! rustup toolchain list | grep -q "nightly"; then
+    echo "Installing nightly toolchain..."
+    rustup toolchain install nightly
+else
+    echo "✓ Nightly toolchain already installed"
+fi
+
+echo "Checking rust-src component for nightly (required for build-std)..."
+if ! rustup component list --toolchain nightly | grep -q "rust-src (installed)"; then
+    echo "Installing rust-src component for nightly..."
+    rustup component add rust-src --toolchain nightly
+else
+    echo "✓ rust-src already installed for nightly"
+fi
+
+# Build target platform lists
+DEFAULT_TARGETS=(
   # x86_64 architecture
-  # "x86_64-unknown-linux-gnu"
   "x86_64-unknown-linux-musl"
   
   # AArch64 (ARM64) architecture
-  # "aarch64-unknown-linux-gnu"
   "aarch64-unknown-linux-musl"
   
   # ARM 32-bit architecture
-  # "armv7-unknown-linux-gnueabihf"
   "armv7-unknown-linux-musleabihf"
   "armv7-unknown-linux-musleabi"
-  # "armv7-unknown-linux-gnueabi"
-  # "armv5te-unknown-linux-gnueabi"
   "armv5te-unknown-linux-musleabi"
   "arm-unknown-linux-musleabi"
   "arm-unknown-linux-musleabihf"
-  # "arm-unknown-linux-gnueabi"
-  # "arm-unknown-linux-gnueabihf"
   
   # RISC-V architecture (emerging open source architecture)
-  # "riscv64gc-unknown-linux-gnu"
   "riscv64gc-unknown-linux-musl"
-  
-  # PowerPC architecture (some high-end routers)
-  # "powerpc64-unknown-linux-gnu"
-  # "powerpc64le-unknown-linux-gnu"
-  "powerpc64le-unknown-linux-musl"
 
+  # PowerPC architecture (some high-end routers)
+  "powerpc64le-unknown-linux-musl"
 )
 
-# Install target platforms
-for TARGET in "${TARGETS[@]}"; do
-  echo "Installing target platform: $TARGET"
-  rustup target add $TARGET
-done
+MIPS_TARGETS=(
+  # MIPS 32-bit architectures (built with nightly + build-std)
+  "mips-unknown-linux-musl"
+  "mipsel-unknown-linux-musl"
+)
 
+# Helper to package build artifacts
+package_target() {
+  local TARGET="$1"
+  local TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
+  local BINARY_PATH="target/$TARGET/release/bandix"
+
+  if [ -f "$BINARY_PATH" ]; then
+    mkdir -p "$TARGET_DIR"
+    cp "$BINARY_PATH" "$TARGET_DIR/"
+    cp LICENSE "$TARGET_DIR/" 2>/dev/null || echo "⚠ Warning: LICENSE file does not exist"
+    cp README.md "$TARGET_DIR/" 2>/dev/null || echo "⚠ Warning: README.md file does not exist"
+
+    echo "Creating compressed package..."
+    tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C "$RELEASE_DIR" "bandix-$VERSION-$TARGET" > /dev/null
+    rm -rf "$TARGET_DIR"
+
+    echo "✓ Completed $TARGET build and packaging"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    return 0
+  else
+    echo "✗ Binary file does not exist: $BINARY_PATH"
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+    FAILED_TARGETS+=("$TARGET")
+    return 1
+  fi
+}
 
 # Build statistics
 SUCCESS_COUNT=0
@@ -66,79 +98,38 @@ FAILED_TARGETS=()
 echo "Starting build for all target platforms..."
 echo "========================================"
 
-# Build for each target platform
-for TARGET in "${TARGETS[@]}"; do
+# Build for each default target platform
+for TARGET in "${DEFAULT_TARGETS[@]}"; do
   echo ""
   echo "Starting build for $TARGET..."
   
   # Build release version
-  if cargo build --release --target "$TARGET" 2>/dev/null; then
+  if cargo build -q --release --target "$TARGET"; then
     echo "✓ Build successful: $TARGET"
-    
-    # Create release package directory
-    TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
-    mkdir -p $TARGET_DIR
-    
-    # Copy binary file
-    if [ -f "target/$TARGET/release/bandix" ]; then
-      cp "target/$TARGET/release/bandix" $TARGET_DIR/
-      
-      # Copy other necessary files
-      cp LICENSE $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: LICENSE file does not exist"
-      cp README.md $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: README.md file does not exist"
-      
-      # Create compressed package
-      echo "Creating compressed package..."
-      tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET" > /dev/null
-      
-      # Clean up temporary files
-      rm -rf $TARGET_DIR
-      
-      echo "✓ Completed $TARGET build and packaging"
-      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-    else
-      echo "✗ Binary file does not exist: target/$TARGET/release/bandix"
-      FAILED_COUNT=$((FAILED_COUNT + 1))
-      FAILED_TARGETS+=("$TARGET")
-    fi
+    package_target "$TARGET"
   else
-    echo "✗ cargo build failed, trying cargo zigbuild..."
-    if cargo zigbuild --release --target "$TARGET" 2>/dev/null; then
-      echo "✓ zigbuild successful: $TARGET"
-      
-      # Create release package directory
-      TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
-      mkdir -p $TARGET_DIR
-      
-      # Copy binary file
-      if [ -f "target/$TARGET/release/bandix" ]; then
-        cp "target/$TARGET/release/bandix" $TARGET_DIR/
-        
-        # Copy other necessary files
-        cp LICENSE $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: LICENSE file does not exist"
-        cp README.md $TARGET_DIR/ 2>/dev/null || echo "⚠ Warning: README.md file does not exist"
-        
-        # Create compressed package
-        echo "Creating compressed package..."
-        tar -czvf "$RELEASE_DIR/bandix-$VERSION-$TARGET.tar.gz" -C $RELEASE_DIR "bandix-$VERSION-$TARGET" > /dev/null
-        
-        # Clean up temporary files
-        rm -rf $TARGET_DIR
-        
-        echo "✓ Completed $TARGET build and packaging"
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-      else
-        echo "✗ Binary file does not exist after zigbuild: target/$TARGET/release/bandix"
-        FAILED_COUNT=$((FAILED_COUNT + 1))
-        FAILED_TARGETS+=("$TARGET")
-      fi
-    else
-      echo "✗ Both cargo build and zigbuild failed: $TARGET"
-      FAILED_COUNT=$((FAILED_COUNT + 1))
-      FAILED_TARGETS+=("$TARGET")
-    fi
+    echo "✗ cargo build failed: $TARGET"
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+    FAILED_TARGETS+=("$TARGET")
   fi
   
+  echo "----------------------------------------"
+done
+
+# Build for each MIPS target platform (nightly + build-std)
+for TARGET in "${MIPS_TARGETS[@]}"; do
+  echo ""
+  echo "Starting build for $TARGET (nightly + build-std)..."
+
+  if cargo +nightly build -q -Z build-std --release --target "$TARGET"; then
+    echo "✓ Build successful (nightly build-std): $TARGET"
+    package_target "$TARGET"
+  else
+    echo "✗ cargo +nightly -Z build-std failed: $TARGET"
+    FAILED_COUNT=$((FAILED_COUNT + 1))
+    FAILED_TARGETS+=("$TARGET")
+  fi
+
   echo "----------------------------------------"
 done
 
