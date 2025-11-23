@@ -96,13 +96,15 @@ impl DnsMonitor {
         ctx: &DnsModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
+        
         loop {
             tokio::select! {
                 _ = shutdown_notify.notified() => {
                     log::debug!("DNS monitoring module received shutdown signal, stopping...");
                     break;
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {
+                _ = interval.tick() => {
                     // Process RingBuf events
                     self.process_ringbuf_events(ringbuf, ctx).await;
                 }
