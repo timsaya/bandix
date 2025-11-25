@@ -284,7 +284,7 @@ impl TrafficMonitor {
 
         let mut stats_map = ctx.mac_stats.lock().unwrap();
         let baseline_map = ctx.baselines.lock().unwrap();
-        let rl_map = ctx.rate_limits.lock().unwrap();
+        let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
         for (mac, traffic_data) in device_traffic_stats.iter() {
             let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
@@ -321,10 +321,10 @@ impl TrafficMonitor {
                 last_sample_ts: 0,
             });
 
-            // Apply rate limit if exists in rate_limits map
-            if let Some(lim) = rl_map.get(mac) {
-                stats.wide_rx_rate_limit = lim[0];
-                stats.wide_tx_rate_limit = lim[1];
+            // Calculate current effective rate limit from scheduled rules
+            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac) {
+                stats.wide_rx_rate_limit = limits[0];
+                stats.wide_tx_rate_limit = limits[1];
             }
 
             // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
@@ -456,7 +456,21 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         _ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
-        let rl_map = ctx.rate_limits.lock().unwrap();
+        // Calculate current effective rate limits from scheduled rules
+        let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
+        
+        // Collect all unique MAC addresses from scheduled limits
+        use std::collections::HashSet;
+        let macs: HashSet<[u8; 6]> = scheduled_limits.iter().map(|r| r.mac).collect();
+        
+        // Calculate current effective limits for each MAC
+        let mut effective_limits: std::collections::HashMap<[u8; 6], [u64; 2]> = std::collections::HashMap::new();
+        for mac in macs {
+            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac) {
+                effective_limits.insert(mac, limits);
+            }
+        }
+        drop(scheduled_limits);
 
         // Get ingress eBPF reference (both ingress and egress share the same eBPF object and maps)
         let ingress_ebpf = ctx.ingress_ebpf.as_ref().ok_or_else(|| {
@@ -479,9 +493,27 @@ impl TrafficMonitor {
                 .ok_or(anyhow::anyhow!("Cannot find MAC_RATE_LIMITS"))?,
         )?;
 
-        for (mac, lim) in rl_map.iter() {
+        // Collect all MACs currently in eBPF map
+        let mut existing_macs_in_ebpf: std::collections::HashSet<[u8; 6]> = std::collections::HashSet::new();
+        for entry in mac_rate_limits.iter() {
+            if let Ok((mac, _)) = entry {
+                existing_macs_in_ebpf.insert(mac);
+            }
+        }
+
+        // Apply effective limits to eBPF map (update or add)
+        for (mac, lim) in effective_limits.iter() {
             mac_rate_limits
                 .insert(mac, &[lim[0], lim[1]], 0)
+                .unwrap();
+            existing_macs_in_ebpf.remove(mac);
+        }
+
+        // Clear limits for MACs that no longer have matching rules
+        // Set to [0, 0] to remove rate limiting (unlimited)
+        for mac in existing_macs_in_ebpf.iter() {
+            mac_rate_limits
+                .insert(mac, &[0, 0], 0)
                 .unwrap();
         }
 

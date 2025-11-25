@@ -1,6 +1,6 @@
 use super::{HttpRequest, HttpResponse, ApiResponse};
 use crate::command::Options;
-use crate::storage::traffic::{self, MemoryRingManager};
+use crate::storage::traffic::{self, MemoryRingManager, ScheduledRateLimit, TimeSlot};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
 use serde::{Deserialize, Serialize};
@@ -38,20 +38,6 @@ pub struct DevicesResponse {
     pub devices: Vec<DeviceInfo>,
 }
 
-/// Rate limit information for API response
-#[derive(Serialize, Deserialize)]
-pub struct RateLimitInfo {
-    pub mac: String,
-    pub wide_rx_rate_limit: u64,
-    pub wide_tx_rate_limit: u64,
-}
-
-/// Rate limits response structure
-#[derive(Serialize, Deserialize)]
-pub struct RateLimitsResponse {
-    pub limits: Vec<RateLimitInfo>,
-}
-
 /// Metrics data point for API response
 #[derive(Serialize, Deserialize)]
 pub struct MetricsDataPoint {
@@ -78,14 +64,6 @@ pub struct MetricsResponse {
     pub metrics: Vec<MetricsDataPoint>,
 }
 
-/// Set limit request structure
-#[derive(Serialize, Deserialize)]
-pub struct SetLimitRequest {
-    pub mac: String,
-    pub wide_rx_rate_limit: u64,
-    pub wide_tx_rate_limit: u64,
-}
-
 /// Hostname binding information for API response
 #[derive(Serialize, Deserialize)]
 pub struct HostnameBinding {
@@ -106,11 +84,89 @@ pub struct SetHostnameBindingRequest {
     pub hostname: String,
 }
 
+/// Time slot for API request/response
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimeSlotApi {
+    pub start: String,  // Format: "HH:MM"
+    pub end: String,    // Format: "HH:MM"
+    pub days: Vec<u8>,  // 1-7 (Monday-Sunday)
+}
+
+impl From<&TimeSlot> for TimeSlotApi {
+    fn from(slot: &TimeSlot) -> Self {
+        let mut days = Vec::new();
+        for i in 0..7 {
+            if (slot.days_of_week & (1 << i)) != 0 {
+                days.push(i + 1); // Convert to 1-7 (Monday-Sunday)
+            }
+        }
+        Self {
+            start: TimeSlot::format_time(slot.start_hour, slot.start_minute),
+            end: TimeSlot::format_time(slot.end_hour, slot.end_minute),
+            days,
+        }
+    }
+}
+
+impl TryFrom<&TimeSlotApi> for TimeSlot {
+    type Error = anyhow::Error;
+
+    fn try_from(api: &TimeSlotApi) -> Result<Self, Self::Error> {
+        let (start_hour, start_minute) = TimeSlot::parse_time(&api.start)?;
+        let (end_hour, end_minute) = TimeSlot::parse_time(&api.end)?;
+        let mut days_of_week = 0u8;
+        for day in &api.days {
+            if *day < 1 || *day > 7 {
+                return Err(anyhow::anyhow!("Day must be 1-7 (Monday-Sunday)"));
+            }
+            days_of_week |= 1 << (day - 1);
+        }
+        Ok(TimeSlot {
+            start_hour,
+            start_minute,
+            end_hour,
+            end_minute,
+            days_of_week,
+        })
+    }
+}
+
+/// Scheduled rate limit info for API response
+#[derive(Serialize, Deserialize)]
+pub struct ScheduledRateLimitInfo {
+    pub mac: String,
+    pub time_slot: TimeSlotApi,
+    pub wide_rx_rate_limit: u64,
+    pub wide_tx_rate_limit: u64,
+}
+
+/// Scheduled rate limits response structure
+#[derive(Serialize, Deserialize)]
+pub struct ScheduledRateLimitsResponse {
+    pub limits: Vec<ScheduledRateLimitInfo>,
+}
+
+/// Set scheduled limit request structure
+#[derive(Serialize, Deserialize)]
+pub struct SetScheduledLimitRequest {
+    pub mac: String,
+    pub time_slot: TimeSlotApi,
+    pub wide_rx_rate_limit: u64,
+    pub wide_tx_rate_limit: u64,
+}
+
+/// Delete scheduled limit request structure
+#[derive(Serialize, Deserialize)]
+pub struct DeleteScheduledLimitRequest {
+    pub mac: String,
+    pub time_slot: TimeSlotApi,
+}
+
 /// Traffic monitoring API handler
 #[derive(Clone)]
 pub struct TrafficApiHandler {
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
-    rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+    scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     memory_ring_manager: Arc<MemoryRingManager>,
     options: Options,
@@ -119,14 +175,14 @@ pub struct TrafficApiHandler {
 impl TrafficApiHandler {
     pub fn new(
         mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
-        rate_limits: Arc<Mutex<HashMap<[u8; 6], [u64; 2]>>>,
+        scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         memory_ring_manager: Arc<MemoryRingManager>,
         options: Options,
     ) -> Self {
         Self {
             mac_stats,
-            rate_limits,
+            scheduled_rate_limits,
             hostname_bindings,
             memory_ring_manager,
             options,
@@ -138,7 +194,7 @@ impl TrafficApiHandler {
     pub fn supported_routes(&self) -> Vec<&'static str> {
         vec![
             "/api/traffic/devices",
-            "/api/traffic/limits",
+            "/api/traffic/limits/schedule",
             "/api/traffic/metrics",
             "/api/traffic/bindings",
         ]
@@ -156,15 +212,6 @@ impl TrafficApiHandler {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
             }
-            "/api/traffic/limits" => {
-                match request.method.as_str() {
-                    "GET" => self.handle_limits().await,
-                    "POST" => self.handle_set_limit(request).await,
-                    // "PUT" => self.handle_set_limit(request).await,
-                    // "DELETE" => self.handle_delete_limit(request).await,
-                    _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
-                }
-            }
             "/api/traffic/bindings" => {
                 match request.method.as_str() {
                     "GET" => self.handle_hostname_bindings().await,
@@ -177,6 +224,14 @@ impl TrafficApiHandler {
                     self.handle_metrics(request).await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/limits/schedule" => {
+                match request.method.as_str() {
+                    "GET" => self.handle_scheduled_limits().await,
+                    "POST" => self.handle_set_scheduled_limit(request).await,
+                    "DELETE" => self.handle_delete_scheduled_limit(request).await,
+                    _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
                 }
             }
             _ => Ok(HttpResponse::not_found()),
@@ -269,92 +324,6 @@ impl TrafficApiHandler {
             .collect();
 
         let response = DevicesResponse { devices };
-        let api_response = ApiResponse::success(response);
-        let body = serde_json::to_string(&api_response)?;
-        Ok(HttpResponse::ok(body))
-    }
-
-    /// Handle /api/limit endpoint (POST)
-    async fn handle_set_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        let body = request
-            .body
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
-
-        // Parse JSON request body using serde
-        let set_limit_request: SetLimitRequest = serde_json::from_str(body)?;
-
-        let mac = crate::utils::network_utils::parse_mac_address(&set_limit_request.mac)?;
-
-        // Use the parsed values directly
-        let wide_rx_rate_limit = set_limit_request.wide_rx_rate_limit;
-        let wide_tx_rate_limit = set_limit_request.wide_tx_rate_limit;
-
-        // Update in-memory rate limits
-        {
-            let mut rl = self.rate_limits.lock().unwrap();
-            rl.insert(mac, [wide_rx_rate_limit, wide_tx_rate_limit]);
-        }
-
-        // Sync with mac_stats for UI consistency
-        {
-            let mut stats_map = self.mac_stats.lock().unwrap();
-            if let Some(stats) = stats_map.get_mut(&mac) {
-                stats.wide_rx_rate_limit = wide_rx_rate_limit;
-                stats.wide_tx_rate_limit = wide_tx_rate_limit;
-            }
-        }
-
-        // Persist to files
-        traffic::upsert_limit(
-            self.options.data_dir(),
-            &mac,
-            wide_rx_rate_limit,
-            wide_tx_rate_limit,
-        )?;
-
-        // Log the change
-        let rx_str = if wide_rx_rate_limit == 0 {
-            "Unlimited".to_string()
-        } else {
-            format!("{}/s", format_bytes(wide_rx_rate_limit))
-        };
-
-        let tx_str = if wide_tx_rate_limit == 0 {
-            "Unlimited".to_string()
-        } else {
-            format!("{}/s", format_bytes(wide_tx_rate_limit))
-        };
-
-        log::info!(
-            "Rate limit set for MAC: {} - Receive: {}, Transmit: {}",
-            format_mac(&mac),
-            rx_str,
-            tx_str
-        );
-
-        let api_response = ApiResponse::success(());
-        let body = serde_json::to_string(&api_response)?;
-        Ok(HttpResponse::ok(body))
-    }
-
-    /// Handle /api/limits endpoint
-    async fn handle_limits(&self) -> Result<HttpResponse, anyhow::Error> {
-        let rl_map = self.rate_limits.lock().unwrap();
-        
-        let limits: Vec<RateLimitInfo> = rl_map
-            .iter()
-            .map(|(mac, lim)| {
-                let mac_str = format_mac(mac);
-                RateLimitInfo {
-                    mac: mac_str,
-                    wide_rx_rate_limit: lim[0],
-                    wide_tx_rate_limit: lim[1],
-                }
-            })
-            .collect();
-
-        let response = RateLimitsResponse { limits };
         let api_response = ApiResponse::success(response);
         let body = serde_json::to_string(&api_response)?;
         Ok(HttpResponse::ok(body))
@@ -499,6 +468,146 @@ impl TrafficApiHandler {
                 hostname
             );
         }
+
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/limits/schedule endpoint (GET)
+    async fn handle_scheduled_limits(&self) -> Result<HttpResponse, anyhow::Error> {
+        let scheduled_limits = self.scheduled_rate_limits.lock().unwrap();
+        
+        let limits: Vec<ScheduledRateLimitInfo> = scheduled_limits
+            .iter()
+            .map(|rule| {
+                ScheduledRateLimitInfo {
+                    mac: format_mac(&rule.mac),
+                    time_slot: TimeSlotApi::from(&rule.time_slot),
+                    wide_rx_rate_limit: rule.wide_rx_rate_limit,
+                    wide_tx_rate_limit: rule.wide_tx_rate_limit,
+                }
+            })
+            .collect();
+
+        let response = ScheduledRateLimitsResponse { limits };
+        let api_response = ApiResponse::success(response);
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/limits/schedule endpoint (POST)
+    async fn handle_set_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request
+            .body
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+
+        // Parse JSON request body
+        let set_request: SetScheduledLimitRequest = serde_json::from_str(body)?;
+
+        let mac = crate::utils::network_utils::parse_mac_address(&set_request.mac)?;
+        let time_slot = TimeSlot::try_from(&set_request.time_slot)
+            .map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
+
+        let scheduled_limit = ScheduledRateLimit {
+            mac,
+            time_slot,
+            wide_rx_rate_limit: set_request.wide_rx_rate_limit,
+            wide_tx_rate_limit: set_request.wide_tx_rate_limit,
+        };
+
+        // Update in-memory scheduled rate limits
+        {
+            let mut srl = self.scheduled_rate_limits.lock().unwrap();
+            // Remove existing rule with same MAC and time slot
+            srl.retain(|r| {
+                !(r.mac == scheduled_limit.mac 
+                  && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
+                  && r.time_slot.start_minute == scheduled_limit.time_slot.start_minute
+                  && r.time_slot.end_hour == scheduled_limit.time_slot.end_hour
+                  && r.time_slot.end_minute == scheduled_limit.time_slot.end_minute
+                  && r.time_slot.days_of_week == scheduled_limit.time_slot.days_of_week)
+            });
+            srl.push(scheduled_limit.clone());
+        }
+
+        // Persist to file
+        traffic::upsert_scheduled_limit(
+            self.options.data_dir(),
+            &scheduled_limit,
+        )?;
+
+        // Log the change
+        let rx_str = if scheduled_limit.wide_rx_rate_limit == 0 {
+            "Unlimited".to_string()
+        } else {
+            format!("{}/s", format_bytes(scheduled_limit.wide_rx_rate_limit))
+        };
+
+        let tx_str = if scheduled_limit.wide_tx_rate_limit == 0 {
+            "Unlimited".to_string()
+        } else {
+            format!("{}/s", format_bytes(scheduled_limit.wide_tx_rate_limit))
+        };
+
+        log::info!(
+            "Scheduled rate limit set for MAC: {} - Time: {} to {} (days: {}) - Receive: {}, Transmit: {}",
+            format_mac(&scheduled_limit.mac),
+            TimeSlot::format_time(scheduled_limit.time_slot.start_hour, scheduled_limit.time_slot.start_minute),
+            TimeSlot::format_time(scheduled_limit.time_slot.end_hour, scheduled_limit.time_slot.end_minute),
+            TimeSlot::format_days(scheduled_limit.time_slot.days_of_week),
+            rx_str,
+            tx_str
+        );
+
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/limits/schedule endpoint (DELETE)
+    async fn handle_delete_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request
+            .body
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+
+        // Parse JSON request body
+        let delete_request: DeleteScheduledLimitRequest = serde_json::from_str(body)?;
+
+        let mac = crate::utils::network_utils::parse_mac_address(&delete_request.mac)?;
+        let time_slot = TimeSlot::try_from(&delete_request.time_slot)
+            .map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
+
+        // Remove from in-memory scheduled rate limits
+        {
+            let mut srl = self.scheduled_rate_limits.lock().unwrap();
+            srl.retain(|r| {
+                !(r.mac == mac 
+                  && r.time_slot.start_hour == time_slot.start_hour
+                  && r.time_slot.start_minute == time_slot.start_minute
+                  && r.time_slot.end_hour == time_slot.end_hour
+                  && r.time_slot.end_minute == time_slot.end_minute
+                  && r.time_slot.days_of_week == time_slot.days_of_week)
+            });
+        }
+
+        // Remove from file
+        traffic::delete_scheduled_limit(
+            self.options.data_dir(),
+            &mac,
+            &time_slot,
+        )?;
+
+        // Log the change
+        log::info!(
+            "Scheduled rate limit deleted for MAC: {} - Time: {} to {} (days: {})",
+            format_mac(&mac),
+            TimeSlot::format_time(time_slot.start_hour, time_slot.start_minute),
+            TimeSlot::format_time(time_slot.end_hour, time_slot.end_minute),
+            TimeSlot::format_days(time_slot.days_of_week)
+        );
 
         let api_response = ApiResponse::success(());
         let body = serde_json::to_string(&api_response)?;

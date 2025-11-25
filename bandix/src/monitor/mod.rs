@@ -4,7 +4,7 @@ pub mod traffic;
 
 use crate::api::ApiRouter;
 use crate::command::Options;
-use crate::storage::traffic::{BaselineTotals, MemoryRingManager};
+use crate::storage::traffic::{BaselineTotals, MemoryRingManager, ScheduledRateLimit};
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ pub struct TrafficModuleContext {
     pub options: Options,
     pub mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
     pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
-    pub rate_limits: Arc<Mutex<StdHashMap<[u8; 6], [u64; 2]>>>,
+    pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
     pub memory_ring_manager: Arc<MemoryRingManager>,
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
@@ -52,7 +52,7 @@ impl TrafficModuleContext {
             options,
             mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
             baselines: Arc::new(Mutex::new(StdHashMap::new())),
-            rate_limits: Arc::new(Mutex::new(StdHashMap::new())),
+            scheduled_rate_limits: Arc::new(Mutex::new(Vec::new())),
             hostname_bindings,
             memory_ring_manager,
             ingress_ebpf: Some(ingress_ebpf),
@@ -126,7 +126,7 @@ impl Clone for ModuleContext {
                 options: ctx.options.clone(),
                 mac_stats: Arc::clone(&ctx.mac_stats),
                 baselines: Arc::clone(&ctx.baselines),
-                rate_limits: Arc::clone(&ctx.rate_limits),
+                scheduled_rate_limits: Arc::clone(&ctx.scheduled_rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
                 memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
@@ -160,14 +160,12 @@ impl ModuleType {
                 // Traffic module data initialization logic
                 crate::storage::traffic::ensure_schema(traffic_ctx.options.data_dir())?;
 
-                // Load rate limits
-                let limits =
-                    crate::storage::traffic::load_all_limits(traffic_ctx.options.data_dir())?;
+                // Load scheduled rate limits (includes legacy limits converted to scheduled format)
+                let scheduled_limits =
+                    crate::storage::traffic::load_all_scheduled_limits(traffic_ctx.options.data_dir())?;
                 {
-                    let mut rl = traffic_ctx.rate_limits.lock().unwrap();
-                    for (mac, rx, tx) in limits {
-                        rl.insert(mac, [rx, tx]);
-                    }
+                    let mut srl = traffic_ctx.scheduled_rate_limits.lock().unwrap();
+                    *srl = scheduled_limits;
                 }
 
                 // Note: hostname bindings are now loaded and shared in command.rs,
@@ -222,7 +220,7 @@ impl ModuleType {
                 // Create traffic API handler
                 let handler = ApiHandler::Traffic(TrafficApiHandler::new(
                     Arc::clone(&traffic_ctx.mac_stats),
-                    Arc::clone(&traffic_ctx.rate_limits),
+                    Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
                     Arc::clone(&traffic_ctx.memory_ring_manager),
                     traffic_ctx.options.clone(),
