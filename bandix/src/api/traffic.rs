@@ -1,4 +1,4 @@
-use super::{HttpRequest, HttpResponse, ApiResponse};
+use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::storage::traffic::{self, MemoryRingManager, ScheduledRateLimit, TimeSlot};
 use crate::utils::format_utils::{format_bytes, format_mac};
@@ -38,30 +38,16 @@ pub struct DevicesResponse {
     pub devices: Vec<DeviceInfo>,
 }
 
-/// Metrics data point for API response
-#[derive(Serialize, Deserialize)]
-pub struct MetricsDataPoint {
-    pub ts_ms: u64,
-    pub total_rx_rate: u64,
-    pub total_tx_rate: u64,
-    pub local_rx_rate: u64,
-    pub local_tx_rate: u64,
-    pub wide_rx_rate: u64,
-    pub wide_tx_rate: u64,
-    pub total_rx_bytes: u64,
-    pub total_tx_bytes: u64,
-    pub local_rx_bytes: u64,
-    pub local_tx_bytes: u64,
-    pub wide_rx_bytes: u64,
-    pub wide_tx_bytes: u64,
-}
-
 /// Metrics response structure
+/// metrics is a Vec of arrays, each array contains:
+/// [ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate, 
+///  wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes, 
+///  local_rx_bytes, local_tx_bytes, wide_rx_bytes, wide_tx_bytes]
 #[derive(Serialize, Deserialize)]
 pub struct MetricsResponse {
     pub retention_seconds: u64,
     pub mac: String,
-    pub metrics: Vec<MetricsDataPoint>,
+    pub metrics: Vec<Vec<u64>>,
 }
 
 /// Hostname binding information for API response
@@ -87,9 +73,9 @@ pub struct SetHostnameBindingRequest {
 /// Time slot for API request/response
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimeSlotApi {
-    pub start: String,  // Format: "HH:MM"
-    pub end: String,    // Format: "HH:MM"
-    pub days: Vec<u8>,  // 1-7 (Monday-Sunday)
+    pub start: String, // Format: "HH:MM"
+    pub end: String,   // Format: "HH:MM"
+    pub days: Vec<u8>, // 1-7 (Monday-Sunday)
 }
 
 impl From<&TimeSlot> for TimeSlotApi {
@@ -212,28 +198,24 @@ impl TrafficApiHandler {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
             }
-            "/api/traffic/bindings" => {
-                match request.method.as_str() {
-                    "GET" => self.handle_hostname_bindings().await,
-                    "POST" => self.handle_set_hostname_binding(request).await,
-                    _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
-                }
-            }
-            path if path.starts_with("/api/traffic/metrics") => {
+            "/api/traffic/bindings" => match request.method.as_str() {
+                "GET" => self.handle_hostname_bindings().await,
+                "POST" => self.handle_set_hostname_binding(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
+            "/api/traffic/metrics" => {
                 if request.method == "GET" {
                     self.handle_metrics(request).await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
             }
-            "/api/traffic/limits/schedule" => {
-                match request.method.as_str() {
-                    "GET" => self.handle_scheduled_limits().await,
-                    "POST" => self.handle_set_scheduled_limit(request).await,
-                    "DELETE" => self.handle_delete_scheduled_limit(request).await,
-                    _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
-                }
-            }
+            "/api/traffic/limits/schedule" => match request.method.as_str() {
+                "GET" => self.handle_scheduled_limits().await,
+                "POST" => self.handle_set_scheduled_limit(request).await,
+                "DELETE" => self.handle_delete_scheduled_limit(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
             _ => Ok(HttpResponse::not_found()),
         }
     }
@@ -263,13 +245,17 @@ impl TrafficApiHandler {
                 // Format IP address
                 let ip_str = format!(
                     "{}.{}.{}.{}",
-                    stats.ip_address[0], stats.ip_address[1], stats.ip_address[2], stats.ip_address[3]
+                    stats.ip_address[0],
+                    stats.ip_address[1],
+                    stats.ip_address[2],
+                    stats.ip_address[3]
                 );
 
                 // Get IPv6 addresses for this MAC
                 // Combine addresses from both eBPF stats and system neighbor table
-                let mut ipv6_addresses_set: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
-                
+                let mut ipv6_addresses_set: std::collections::HashSet<[u8; 16]> =
+                    std::collections::HashSet::new();
+
                 // First, add IPv6 addresses from eBPF stats
                 for i in 0..(stats.ipv6_count as usize) {
                     let addr = stats.ipv6_addresses[i];
@@ -277,7 +263,7 @@ impl TrafficApiHandler {
                         ipv6_addresses_set.insert(addr);
                     }
                 }
-                
+
                 // Then, add IPv6 addresses from system neighbor table
                 if let Some(addrs) = ipv6_neighbors.get(mac) {
                     for addr in addrs {
@@ -286,13 +272,13 @@ impl TrafficApiHandler {
                         }
                     }
                 }
-                
+
                 // Convert to formatted strings and sort lexicographically
                 let mut ipv6_addresses: Vec<String> = ipv6_addresses_set
                     .iter()
                     .map(|addr| crate::utils::network_utils::format_ipv6(addr))
                     .collect();
-                
+
                 // Sort IPv6 addresses in lexicographic order
                 ipv6_addresses.sort();
 
@@ -337,19 +323,22 @@ impl TrafficApiHandler {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
-        let start_ms = now_ms.saturating_sub(self.options.traffic_retention_seconds() as u64 * 1000);
+        let start_ms =
+            now_ms.saturating_sub(self.options.traffic_retention_seconds() as u64 * 1000);
         let end_ms = now_ms;
 
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    self.memory_ring_manager.query_metrics_aggregate_all(start_ms, end_ms),
+                    self.memory_ring_manager
+                        .query_metrics_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        self.memory_ring_manager.query_metrics(&mac, start_ms, end_ms),
+                        self.memory_ring_manager
+                            .query_metrics(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -360,30 +349,35 @@ impl TrafficApiHandler {
         } else {
             // mac omitted => aggregate all within window
             (
-                self.memory_ring_manager.query_metrics_aggregate_all(start_ms, end_ms),
+                self.memory_ring_manager
+                    .query_metrics_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
         };
 
         match rows_result {
             Ok(rows) => {
-                let metrics: Vec<MetricsDataPoint> = rows
+                // Convert to compact array format: [ts_ms, total_rx_rate, total_tx_rate, 
+                // local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate, 
+                // total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes, 
+                // wide_rx_bytes, wide_tx_bytes]
+                let metrics: Vec<Vec<u64>> = rows
                     .iter()
-                    .map(|r| MetricsDataPoint {
-                        ts_ms: r.ts_ms,
-                        total_rx_rate: r.total_rx_rate,
-                        total_tx_rate: r.total_tx_rate,
-                        local_rx_rate: r.local_rx_rate,
-                        local_tx_rate: r.local_tx_rate,
-                        wide_rx_rate: r.wide_rx_rate,
-                        wide_tx_rate: r.wide_tx_rate,
-                        total_rx_bytes: r.total_rx_bytes,
-                        total_tx_bytes: r.total_tx_bytes,
-                        local_rx_bytes: r.local_rx_bytes,
-                        local_tx_bytes: r.local_tx_bytes,
-                        wide_rx_bytes: r.wide_rx_bytes,
-                        wide_tx_bytes: r.wide_tx_bytes,
-                    })
+                    .map(|r| vec![
+                        r.ts_ms,
+                        r.total_rx_rate,
+                        r.total_tx_rate,
+                        r.local_rx_rate,
+                        r.local_tx_rate,
+                        r.wide_rx_rate,
+                        r.wide_tx_rate,
+                        r.total_rx_bytes,
+                        r.total_tx_bytes,
+                        r.local_rx_bytes,
+                        r.local_tx_bytes,
+                        r.wide_rx_bytes,
+                        r.wide_tx_bytes,
+                    ])
                     .collect();
 
                 let response = MetricsResponse {
@@ -393,6 +387,7 @@ impl TrafficApiHandler {
                 };
 
                 let api_response = ApiResponse::success(response);
+                // Use compact JSON serialization (minified, no whitespace)
                 let body = serde_json::to_string(&api_response)?;
                 Ok(HttpResponse::ok(body))
             }
@@ -403,7 +398,7 @@ impl TrafficApiHandler {
     /// Handle /api/traffic/bindings endpoint (GET)
     async fn handle_hostname_bindings(&self) -> Result<HttpResponse, anyhow::Error> {
         let bindings_map = self.hostname_bindings.lock().unwrap();
-        
+
         let bindings: Vec<HostnameBinding> = bindings_map
             .iter()
             .map(|(mac, hostname)| {
@@ -422,7 +417,10 @@ impl TrafficApiHandler {
     }
 
     /// Handle /api/traffic/bindings endpoint (POST)
-    async fn handle_set_hostname_binding(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_set_hostname_binding(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         let body = request
             .body
             .as_ref()
@@ -449,18 +447,11 @@ impl TrafficApiHandler {
         }
 
         // Persist to file (storage layer handles empty hostname appropriately)
-        traffic::upsert_hostname_binding(
-            self.options.data_dir(),
-            &mac,
-            hostname,
-        )?;
+        traffic::upsert_hostname_binding(self.options.data_dir(), &mac, hostname)?;
 
         // Log the change
         if hostname.is_empty() {
-            log::info!(
-                "Hostname binding cleared for MAC: {}",
-                format_mac(&mac)
-            );
+            log::info!("Hostname binding cleared for MAC: {}", format_mac(&mac));
         } else {
             log::info!(
                 "Hostname binding set for MAC: {} -> {}",
@@ -477,16 +468,14 @@ impl TrafficApiHandler {
     /// Handle /api/traffic/limits/schedule endpoint (GET)
     async fn handle_scheduled_limits(&self) -> Result<HttpResponse, anyhow::Error> {
         let scheduled_limits = self.scheduled_rate_limits.lock().unwrap();
-        
+
         let limits: Vec<ScheduledRateLimitInfo> = scheduled_limits
             .iter()
-            .map(|rule| {
-                ScheduledRateLimitInfo {
-                    mac: format_mac(&rule.mac),
-                    time_slot: TimeSlotApi::from(&rule.time_slot),
-                    wide_rx_rate_limit: rule.wide_rx_rate_limit,
-                    wide_tx_rate_limit: rule.wide_tx_rate_limit,
-                }
+            .map(|rule| ScheduledRateLimitInfo {
+                mac: format_mac(&rule.mac),
+                time_slot: TimeSlotApi::from(&rule.time_slot),
+                wide_rx_rate_limit: rule.wide_rx_rate_limit,
+                wide_tx_rate_limit: rule.wide_tx_rate_limit,
             })
             .collect();
 
@@ -497,7 +486,10 @@ impl TrafficApiHandler {
     }
 
     /// Handle /api/traffic/limits/schedule endpoint (POST)
-    async fn handle_set_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_set_scheduled_limit(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         let body = request
             .body
             .as_ref()
@@ -522,21 +514,18 @@ impl TrafficApiHandler {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
             // Remove existing rule with same MAC and time slot
             srl.retain(|r| {
-                !(r.mac == scheduled_limit.mac 
-                  && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
-                  && r.time_slot.start_minute == scheduled_limit.time_slot.start_minute
-                  && r.time_slot.end_hour == scheduled_limit.time_slot.end_hour
-                  && r.time_slot.end_minute == scheduled_limit.time_slot.end_minute
-                  && r.time_slot.days_of_week == scheduled_limit.time_slot.days_of_week)
+                !(r.mac == scheduled_limit.mac
+                    && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
+                    && r.time_slot.start_minute == scheduled_limit.time_slot.start_minute
+                    && r.time_slot.end_hour == scheduled_limit.time_slot.end_hour
+                    && r.time_slot.end_minute == scheduled_limit.time_slot.end_minute
+                    && r.time_slot.days_of_week == scheduled_limit.time_slot.days_of_week)
             });
             srl.push(scheduled_limit.clone());
         }
 
         // Persist to file
-        traffic::upsert_scheduled_limit(
-            self.options.data_dir(),
-            &scheduled_limit,
-        )?;
+        traffic::upsert_scheduled_limit(self.options.data_dir(), &scheduled_limit)?;
 
         // Log the change
         let rx_str = if scheduled_limit.wide_rx_rate_limit == 0 {
@@ -567,7 +556,10 @@ impl TrafficApiHandler {
     }
 
     /// Handle /api/traffic/limits/schedule endpoint (DELETE)
-    async fn handle_delete_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_delete_scheduled_limit(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         let body = request
             .body
             .as_ref()
@@ -584,21 +576,17 @@ impl TrafficApiHandler {
         {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
             srl.retain(|r| {
-                !(r.mac == mac 
-                  && r.time_slot.start_hour == time_slot.start_hour
-                  && r.time_slot.start_minute == time_slot.start_minute
-                  && r.time_slot.end_hour == time_slot.end_hour
-                  && r.time_slot.end_minute == time_slot.end_minute
-                  && r.time_slot.days_of_week == time_slot.days_of_week)
+                !(r.mac == mac
+                    && r.time_slot.start_hour == time_slot.start_hour
+                    && r.time_slot.start_minute == time_slot.start_minute
+                    && r.time_slot.end_hour == time_slot.end_hour
+                    && r.time_slot.end_minute == time_slot.end_minute
+                    && r.time_slot.days_of_week == time_slot.days_of_week)
             });
         }
 
         // Remove from file
-        traffic::delete_scheduled_limit(
-            self.options.data_dir(),
-            &mac,
-            &time_slot,
-        )?;
+        traffic::delete_scheduled_limit(self.options.data_dir(), &mac, &time_slot)?;
 
         // Log the change
         log::info!(
@@ -613,5 +601,4 @@ impl TrafficApiHandler {
         let body = serde_json::to_string(&api_response)?;
         Ok(HttpResponse::ok(body))
     }
-
 }
