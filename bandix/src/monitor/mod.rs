@@ -33,6 +33,8 @@ impl TrafficModuleContext {
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
         ));
+
+        // memory_ring_manager.generate_test_data(options.traffic_retention_seconds()).unwrap();
         
         // Load existing ring files into memory at startup (only if persistence is enabled)
         if options.traffic_persist_history() {

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use bandix_common::MacTrafficStats;
-use chrono::{DateTime, Datelike, Local, Timelike};
+use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -262,6 +262,122 @@ impl MemoryRingManager {
             base_dir,
             capacity,
         }
+    }
+
+    /// Generate test data for existing devices or create test devices
+    /// Generates mock traffic data for the specified number of seconds (1 sample per second)
+    /// If no devices exist, creates a few test devices with random MAC addresses
+    #[allow(dead_code,unused)]
+    pub fn generate_test_data(&self, seconds: u32) -> Result<(), anyhow::Error> {
+        if seconds == 0 {
+            return Ok(());
+        }
+
+        let mut rings = self.rings.lock().unwrap();
+        
+        // If no devices exist, create some test devices
+        let test_macs: Vec<[u8; 6]>;
+        if rings.is_empty() {
+            test_macs = vec![
+                [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+                [0x00, 0x11, 0x22, 0x33, 0x44, 0x66],
+                [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
+            ];
+            for mac in &test_macs {
+                rings.insert(*mac, MemoryRing::new(self.capacity));
+            }
+        } else {
+            test_macs = rings.keys().copied().collect();
+        }
+
+        drop(rings);
+
+        // Generate data for each second
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        let start_ms = now_ms - (seconds as u64 * 1000);
+
+        // Track cumulative bytes for each device
+        let mut device_bytes: HashMap<[u8; 6], (u64, u64, u64, u64)> = HashMap::new();
+        
+        for second_offset in 0..seconds {
+            let ts_ms = start_ms + (second_offset as u64 * 1000);
+            
+            let mut batch = Vec::new();
+            for mac in &test_macs {
+                // Generate mock data with some variation
+                // Use a simple hash-like function based on MAC and timestamp for pseudo-randomness
+                let mac_seed = (mac[0] as u64) * 1000000 + (mac[5] as u64) * 1000;
+                
+                // Base rates (bytes per second) - vary by device
+                let base_rx_rate = 100000 + ((mac_seed % 500000) as u64); // 100KB/s to 600KB/s
+                let base_tx_rate = 50000 + ((mac_seed % 200000) as u64);  // 50KB/s to 250KB/s
+                
+                // Add some time-based variation (simulate traffic patterns)
+                let time_variation = (second_offset as f64 * 0.1).sin() * 0.3 + 1.0;
+                let rx_rate = (base_rx_rate as f64 * time_variation) as u64;
+                let tx_rate = (base_tx_rate as f64 * time_variation) as u64;
+                
+                // Get or initialize cumulative bytes for this device
+                let (mut total_rx_bytes, mut total_tx_bytes, _, _) = 
+                    device_bytes.get(mac).copied().unwrap_or((0, 0, 0, 0));
+                
+                // Increment cumulative bytes by current rate (since rate is bytes per second)
+                total_rx_bytes += rx_rate;
+                total_tx_bytes += tx_rate;
+                
+                // Split between local and wide (70% wide, 30% local)
+                let wide_rx_bytes = (total_rx_bytes * 7) / 10;
+                let local_rx_bytes = total_rx_bytes - wide_rx_bytes;
+                let wide_tx_bytes = (total_tx_bytes * 7) / 10;
+                let local_tx_bytes = total_tx_bytes - wide_tx_bytes;
+                
+                // Update cumulative bytes
+                device_bytes.insert(*mac, (total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes));
+                
+                // Wide rates (same proportion)
+                let wide_rx_rate = (rx_rate * 7) / 10;
+                let local_rx_rate = rx_rate - wide_rx_rate;
+                let wide_tx_rate = (tx_rate * 7) / 10;
+                let local_tx_rate = tx_rate - wide_tx_rate;
+                
+                let stats = MacTrafficStats {
+                    ip_address: [192, 168, 1, (mac[5] % 100) as u8 + 10],
+                    ipv6_addresses: [[0; 16]; 16],
+                    ipv6_count: 0,
+                    total_rx_bytes,
+                    total_tx_bytes,
+                    total_rx_packets: total_rx_bytes / 1500, // Approximate packet count
+                    total_tx_packets: total_tx_bytes / 1500,
+                    total_last_rx_bytes: total_rx_bytes,
+                    total_last_tx_bytes: total_tx_bytes,
+                    total_rx_rate: rx_rate,
+                    total_tx_rate: tx_rate,
+                    local_rx_bytes,
+                    local_tx_bytes,
+                    local_rx_rate,
+                    local_tx_rate,
+                    local_last_rx_bytes: local_rx_bytes,
+                    local_last_tx_bytes: local_tx_bytes,
+                    wide_rx_bytes,
+                    wide_tx_bytes,
+                    wide_rx_rate,
+                    wide_tx_rate,
+                    wide_last_rx_bytes: wide_rx_bytes,
+                    wide_last_tx_bytes: wide_tx_bytes,
+                    wide_rx_rate_limit: 0,
+                    wide_tx_rate_limit: 0,
+                    last_online_ts: ts_ms,
+                    last_sample_ts: ts_ms,
+                };
+                
+                batch.push((*mac, stats));
+            }
+            
+            // Insert batch for this timestamp
+            self.insert_metrics_batch(ts_ms, &batch)?;
+        }
+
+        Ok(())
     }
 
     /// Insert data into memory Ring
