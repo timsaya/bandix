@@ -4,7 +4,9 @@ pub mod traffic;
 
 use crate::api::ApiRouter;
 use crate::command::Options;
-use crate::storage::traffic::{BaselineTotals, RealtimeRingManager, MultiLevelRingManager, ScheduledRateLimit};
+use crate::storage::traffic::{
+    BaselineTotals, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit,
+};
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
@@ -29,7 +31,11 @@ impl TrafficModuleContext {
     /// Create traffic module context
     /// Both ingress_ebpf and egress_ebpf are Arc references to the same eBPF object
     /// This ensures both programs share the same maps (MAC_TRAFFIC, MAC_RATE_LIMITS, etc.)
-    pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>) -> Self {
+    pub fn new(
+        options: Options,
+        ingress_ebpf: Arc<aya::Ebpf>,
+        egress_ebpf: Arc<aya::Ebpf>,
+    ) -> Self {
         // Real-time 1-second sampling ring manager
         let realtime_ring_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
@@ -37,34 +43,17 @@ impl TrafficModuleContext {
         ));
 
         // Multi-level sampling ring manager (day/week/month)
-        let multi_level_ring_manager = Arc::new(MultiLevelRingManager::new(
-            options.data_dir().to_string(),
-        ));
+        let multi_level_ring_manager =
+            Arc::new(MultiLevelRingManager::new(options.data_dir().to_string()));
 
         // realtime_ring_manager.generate_test_data(options.traffic_retention_seconds()).unwrap();
-        
-        // Load existing ring files into memory at startup (only if persistence is enabled)
-        if options.traffic_persist_history() {
-            // Load real-time ring files
-            if let Err(e) = realtime_ring_manager.load_from_files() {
-                log::error!("Failed to load ring files into memory at startup: {}", e);
-            } else {
-                log::debug!("Successfully loaded existing ring files into memory");
-            }
-            
-            // Load multi-level ring files
-            if let Err(e) = multi_level_ring_manager.load_from_files() {
-                log::warn!("Failed to load multi-level ring files: {}", e);
-            } else {
-                log::debug!("Successfully loaded multi-level ring files");
-            }
-        } else {
-            log::debug!("Traffic history persistence disabled, starting with empty memory ring");
-        }
-        
+
+        // Note: Loading ring files from disk is done in init_data() after checking for capacity mismatches
+        // This ensures that mismatched files are deleted before loading
+
         // Create shared hostname bindings - this will be used by both traffic and connection modules
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
-        
+
         Self {
             options,
             mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
@@ -113,8 +102,8 @@ impl DnsModuleContext {
     /// Create DNS module context with pre-acquired RingBuf map
     /// This is used when DNS module shares eBPF object with other modules (e.g., traffic)
     pub fn new_with_map(
-        options: Options, 
-        ingress_ebpf: std::sync::Arc<aya::Ebpf>, 
+        options: Options,
+        ingress_ebpf: std::sync::Arc<aya::Ebpf>,
         egress_ebpf: std::sync::Arc<aya::Ebpf>,
         dns_map: aya::maps::Map,
         hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
@@ -180,8 +169,9 @@ impl ModuleType {
                 crate::storage::traffic::ensure_schema(traffic_ctx.options.data_dir())?;
 
                 // Load scheduled rate limits (includes legacy limits converted to scheduled format)
-                let scheduled_limits =
-                    crate::storage::traffic::load_all_scheduled_limits(traffic_ctx.options.data_dir())?;
+                let scheduled_limits = crate::storage::traffic::load_all_scheduled_limits(
+                    traffic_ctx.options.data_dir(),
+                )?;
                 {
                     let mut srl = traffic_ctx.scheduled_rate_limits.lock().unwrap();
                     *srl = scheduled_limits;
@@ -192,13 +182,28 @@ impl ModuleType {
 
                 // Rebuild ring files and load baseline data (only if persistence is enabled)
                 if traffic_ctx.options.traffic_persist_history() {
-                    // Rebuild ring files (if needed) for original manager
+                    // Step 1: Check and delete mismatched ring files (must be done before loading)
                     let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
                         traffic_ctx.options.data_dir(),
                         traffic_ctx.options.traffic_retention_seconds(),
                     )?;
 
-                    // Load baseline data
+                    // Step 2: Load ring files from disk into memory (after mismatch check)
+                    // Load real-time ring files
+                    if let Err(e) = traffic_ctx.realtime_ring_manager.load_from_files() {
+                        log::error!("Failed to load real-time ring files into memory: {}", e);
+                    } else {
+                        log::debug!("Successfully loaded real-time ring files into memory");
+                    }
+
+                    // Load multi-level ring files
+                    if let Err(e) = traffic_ctx.multi_level_ring_manager.load_from_files() {
+                        log::warn!("Failed to load multi-level ring files: {}", e);
+                    } else {
+                        log::debug!("Successfully loaded multi-level ring files");
+                    }
+
+                    // Step 3: Load baseline data
                     let preloaded_baselines = if rebuilt {
                         Vec::new()
                     } else {
@@ -213,6 +218,7 @@ impl ModuleType {
                         }
                     }
                 }
+
                 Ok(())
             }
             (ModuleType::Dns, ModuleContext::Dns(_dns_ctx)) => {
