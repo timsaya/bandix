@@ -10,8 +10,11 @@ Bandix is a network traffic monitoring tool based on eBPF technology, developed 
 - **Multi-module Monitoring**: Supports traffic monitoring, connection statistics, and DNS monitoring
 - **Dual-mode Interface**: Supports both terminal and Web interface display modes
 - **Detailed Traffic Statistics**: Real-time display of upload/download rates and total traffic for each IP
+- **Multi-level Data Storage**: Hierarchical sampling with day/week/month levels, providing statistical metrics (avg, max, min, percentiles)
 - **Connection Statistics**: Monitor TCP/UDP connections per device with state tracking
 - **MAC Address Recognition**: Automatically associates IP addresses with MAC addresses
+- **Scheduled Rate Limiting**: Set time-based rate limits for devices with flexible scheduling
+- **Hostname Bindings**: Custom device hostname mapping for better device identification
 - **High Performance**: Uses Rust and eBPF to ensure minimal impact on system performance during monitoring
 
 ## Technical Features
@@ -45,10 +48,14 @@ sudo ./bandix --iface <network_interface_name> [options]
 - **--iface**: Network interface to monitor (required)
 - **--port**: Web server listening port. Default: `8686`
 - **--data-dir**: Data directory (ring files and rate limit configurations will be stored here). Default: `bandix-data`
+- **--log-level**: Log level: trace, debug, info, warn, error (default: info). Web and DNS logs are always at DEBUG level.
 - **--web-log**: Enable per-request web logging. Default: `false`
 - **--enable-traffic**: Enable traffic monitoring module. Default: `false`
-- **--traffic-retention-seconds**: Retention duration (seconds), i.e., ring file capacity (one slot per second). Default: `600`
+- **--traffic-retention-seconds**: Retention duration (seconds) for real-time metrics, i.e., ring file capacity (one slot per second). Default: `600`
+- **--traffic-flush-interval-seconds**: Traffic data flush interval (seconds), how often to persist memory ring data to disk. Default: `600`
+- **--traffic-persist-history**: Enable traffic history data persistence to disk (disabled by default, data only stored in memory). Default: `false`
 - **--enable-dns**: Enable DNS monitoring module. Default: `false`
+- **--dns-max-records**: Maximum number of DNS records to keep in memory. Default: `10000`
 - **--enable-connection**: Enable connection statistics monitoring module. Default: `false`
 
 ### Example Usage
@@ -107,23 +114,72 @@ Get real-time traffic statistics for all devices.
 }
 ```
 
-#### GET /api/traffic/limits
-Get current rate limits for all devices.
+#### GET /api/traffic/limits/schedule
+Get all scheduled rate limits for devices.
 
-#### POST /api/traffic/limits
-Set rate limits for devices.
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "limits": [
+      {
+        "mac": "00:11:22:33:44:55",
+        "time_slot": {
+          "start": "09:00",
+          "end": "18:00",
+          "days": [1, 2, 3, 4, 5]
+        },
+        "wide_rx_rate_limit": 1048576,
+        "wide_tx_rate_limit": 1048576
+      }
+    ]
+  }
+}
+```
+
+#### POST /api/traffic/limits/schedule
+Set scheduled rate limits for devices.
 
 **Request Body:**
 ```json
 {
   "mac": "00:11:22:33:44:55",
+  "time_slot": {
+    "start": "09:00",
+    "end": "18:00",
+    "days": [1, 2, 3, 4, 5]
+  },
   "wide_rx_rate_limit": 1048576,
   "wide_tx_rate_limit": 1048576
 }
 ```
 
-#### GET /api/traffic/metrics?mac=<mac_address>&duration=<seconds>
-Get historical traffic metrics for a specific device.
+**Time Slot Format:**
+- `start`: Start time in "HH:MM" format (24-hour)
+- `end`: End time in "HH:MM" format (24-hour, can be "24:00" for end of day)
+- `days`: Array of day numbers (1=Monday, 2=Tuesday, ..., 7=Sunday)
+
+#### DELETE /api/traffic/limits/schedule
+Delete a scheduled rate limit.
+
+**Request Body:**
+```json
+{
+  "mac": "00:11:22:33:44:55",
+  "time_slot": {
+    "start": "09:00",
+    "end": "18:00",
+    "days": [1, 2, 3, 4, 5]
+  }
+}
+```
+
+#### GET /api/traffic/metrics?mac=<mac_address>
+Get real-time historical traffic metrics (1-second sampling).
+
+**Query Parameters:**
+- `mac` (optional): MAC address of the device. If omitted or set to "all", returns aggregated data for all devices.
 
 **Response:**
 ```json
@@ -132,24 +188,83 @@ Get historical traffic metrics for a specific device.
   "data": {
     "retention_seconds": 600,
     "mac": "00:11:22:33:44:55",
-    "data": [
+    "metrics": [
+      [1640995200000, 100, 200, 50, 100, 50, 100, 1024, 2048, 512, 1024, 512, 1024]
+    ]
+  }
+}
+```
+
+**Metrics Array Format (13 values per entry):**
+Each array contains: `[ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes, wide_rx_bytes, wide_tx_bytes]`
+
+#### GET /api/traffic/metrics/day?mac=<mac_address>
+Get day-level traffic metrics with statistics (30-second sampling interval, 1-day retention).
+
+**Query Parameters:**
+- `mac` (optional): MAC address of the device. If omitted or set to "all", returns aggregated data for all devices.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "retention_seconds": 86400,
+    "mac": "00:11:22:33:44:55",
+    "metrics": [
+      [1640995200000, 1250000, 5000000, 500000, 2000000, 4000000, 4800000, 1500000, 6000000, 800000, 2500000, 4500000, 5500000, 1073741824, 2147483648]
+    ]
+  }
+}
+```
+
+**Metrics Array Format (15 values per entry):**
+Each array contains: `[ts_ms, wide_rx_rate_avg, wide_rx_rate_max, wide_rx_rate_min, wide_rx_rate_p90, wide_rx_rate_p95, wide_rx_rate_p99, wide_tx_rate_avg, wide_tx_rate_max, wide_tx_rate_min, wide_tx_rate_p90, wide_tx_rate_p95, wide_tx_rate_p99, wide_rx_bytes, wide_tx_bytes]`
+
+#### GET /api/traffic/metrics/week?mac=<mac_address>
+Get week-level traffic metrics with statistics (3-minute sampling interval, 1-week retention).
+
+**Query Parameters:**
+- `mac` (optional): MAC address of the device. If omitted or set to "all", returns aggregated data for all devices.
+
+**Response Format:** Same as `/api/traffic/metrics/day`
+
+#### GET /api/traffic/metrics/month?mac=<mac_address>
+Get month-level traffic metrics with statistics (10-minute sampling interval, 1-month retention).
+
+**Query Parameters:**
+- `mac` (optional): MAC address of the device. If omitted or set to "all", returns aggregated data for all devices.
+
+**Response Format:** Same as `/api/traffic/metrics/day`
+
+**Note:** Multi-level metrics (day/week/month) only contain wide network statistics (external traffic) with percentile calculations (avg, max, min, p90, p95, p99) for rate metrics. They do not include local network traffic or total traffic statistics.
+
+#### GET /api/traffic/bindings
+Get all hostname bindings for devices.
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "bindings": [
       {
-        "ts_ms": 1640995200000,
-        "total_rx_rate": 100,
-        "total_tx_rate": 200,
-        "local_rx_rate": 50,
-        "local_tx_rate": 100,
-        "wide_rx_rate": 50,
-        "wide_tx_rate": 100,
-        "total_rx_bytes": 1024,
-        "total_tx_bytes": 2048,
-        "local_rx_bytes": 512,
-        "local_tx_bytes": 1024,
-        "wide_rx_bytes": 512,
-        "wide_tx_bytes": 1024
+        "mac": "00:11:22:33:44:55",
+        "hostname": "MyDevice"
       }
     ]
   }
+}
+```
+
+#### POST /api/traffic/bindings
+Set or update hostname binding for a device. To remove a binding, send an empty hostname.
+
+**Request Body:**
+```json
+{
+  "mac": "00:11:22:33:44:55",
+  "hostname": "MyDevice"
 }
 ```
 
