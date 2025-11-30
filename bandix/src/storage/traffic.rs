@@ -301,8 +301,8 @@ impl MultilevelRing {
         }
     }
 
-    pub fn insert_stats(&mut self, ts_ms: u64, stats: &DeviceStatsAccumulator) {
-        let idx = calc_slot_index(ts_ms, self.capacity);
+    pub fn insert_stats(&mut self, ts_ms: u64, stats: &DeviceStatsAccumulator, interval_seconds: u64) {
+        let idx = calc_slot_index_with_interval(ts_ms, self.capacity, interval_seconds);
         let mut slot = [0u64; SLOT_U64S_MULTILEVEL];
 
         // ts_ms
@@ -914,13 +914,14 @@ impl MultilevelRingManager {
         ts_ms: u64,
         mac: &[u8; 6],
         stats: &DeviceStatsAccumulator,
+        interval_seconds: u64,
     ) -> Result<(), anyhow::Error> {
         let mut rings = self.rings.lock().unwrap();
         let ring = rings
             .entry(*mac)
             .or_insert_with(|| MultilevelRing::new(self.capacity));
 
-        ring.insert_stats(ts_ms, stats);
+        ring.insert_stats(ts_ms, stats, interval_seconds);
         Ok(())
     }
 
@@ -1177,8 +1178,8 @@ impl MultiLevelRingManager {
                         // Finalize statistics (calculate avg, p90, p95, p99)
                         accumulator.finalize();
 
-                        // Insert statistics into v3 ring manager
-                        manager.insert_stats(accumulator.ts_end_ms, mac, accumulator)?;
+                        // Insert statistics into v3 ring manager with interval_seconds
+                        manager.insert_stats(accumulator.ts_end_ms, mac, accumulator, level.interval_seconds)?;
 
                         // Remove accumulator after flushing
                         accumulators.remove(&key);
@@ -1304,6 +1305,16 @@ fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
 
 fn calc_slot_index(ts_ms: u64, capacity: u32) -> u64 {
     ((ts_ms / 1000) % capacity as u64) as u64
+}
+
+/// Calculate slot index for multilevel rings with sampling interval
+/// This ensures that data is stored correctly based on sampling interval, not just timestamp modulo
+fn calc_slot_index_with_interval(ts_ms: u64, capacity: u32, interval_seconds: u64) -> u64 {
+    let ts_sec = ts_ms / 1000;
+    // Calculate slot index based on sampling interval
+    // For example, with 30s interval: slot = (ts_sec / 30) % capacity
+    // This ensures each sampling point gets a unique slot until capacity is reached
+    ((ts_sec / interval_seconds) % capacity as u64) as u64
 }
 
 fn write_slot(
