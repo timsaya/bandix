@@ -161,29 +161,58 @@ pub struct ScheduledRateLimit {
 }
 
 const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring magic
-const RING_VERSION: u32 = 2; // bump to v2: slot adds last_online_ts
-                             // Default capacity is 3600 (1 hour, 1 sample per second); actual capacity is determined by argument when created
-const DEFAULT_RING_CAPACITY: u32 = 3600;
 
-// Per-slot structure (little-endian):
+// ============================================================================
+// Real-time Ring File Format (for 1-second sampling)
+// ============================================================================
+/// Real-time ring file format version
+/// Version 2: slot adds last_online_ts field
+const RING_VERSION_REALTIME: u32 = 2;
+
+// Per-slot structure for real-time data (little-endian):
 // ts_ms: u64
 // total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
 // last_online_ts: u64
 // Slot size = 14 * 8 = 112 bytes (since v2)
-const SLOT_U64S: usize = 14;
-const SLOT_SIZE: usize = SLOT_U64S * 8;
+const SLOT_U64S_REALTIME: usize = 14;
+const SLOT_SIZE_REALTIME: usize = SLOT_U64S_REALTIME * 8;
+
+// ============================================================================
+// Multi-level Ring File Format (for day/week/month sampling with statistics)
+// ============================================================================
+/// Multi-level ring file format version
+/// Version 3: slot contains statistics (avg, max, min, p90, p95, p99) instead of real-time values
+/// Note: This will be used when implementing file persistence for multilevel rings
+#[allow(dead_code)]
+const RING_VERSION_MULTILEVEL: u32 = 3;
+
+// Per-slot structure for multi-level statistics (little-endian):
+// ts_ms: u64
+// For wide rate metrics (wide_rx_rate, wide_tx_rate):
+//   avg: u64, max: u64, min: u64, p90: u64, p95: u64, p99: u64 (6 * 8 = 48 bytes per metric)
+// wide_rx_bytes: u64, wide_tx_bytes: u64
+// Slot size = 1 + (2 metrics * 6 stats) + 2 bytes = 1 + 12 + 2 = 15 * 8 = 120 bytes (since v3)
+const SLOT_U64S_MULTILEVEL: usize = 15; // 1 + (2 metrics * 6 stats) + 2 bytes = 15
+/// Slot size for multilevel ring files (120 bytes)
+/// Note: This will be used when implementing file persistence for multilevel rings
+#[allow(dead_code)]
+const SLOT_SIZE_MULTILEVEL: usize = SLOT_U64S_MULTILEVEL * 8;
+
+// Common constants
+const DEFAULT_RING_CAPACITY: u32 = 3600; // Default capacity is 3600 (1 hour, 1 sample per second); actual capacity is determined by argument when created
 const HEADER_SIZE: usize = 4 /*magic*/ + 4 /*version*/ + 4 /*capacity*/;
 
-/// In-memory Ring structure
+
+/// In-memory Ring structure for real-time data (1-second sampling)
 #[derive(Debug, Clone)]
-pub struct MemoryRing {
+pub struct RealtimeRing {
     pub capacity: u32,
-    pub slots: Vec<[u64; SLOT_U64S]>,
+    pub slots: Vec<[u64; SLOT_U64S_REALTIME]>,
     pub current_index: u64,
     pub dirty: bool, // Flag indicating whether there is data not yet persisted to disk
 }
 
-impl MemoryRing {
+impl RealtimeRing {
     pub fn new(capacity: u32) -> Self {
         let cap = if capacity == 0 {
             DEFAULT_RING_CAPACITY
@@ -193,13 +222,13 @@ impl MemoryRing {
 
         Self {
             capacity: cap,
-            slots: vec![[0u64; SLOT_U64S]; cap as usize],
+            slots: vec![[0u64; SLOT_U64S_REALTIME]; cap as usize],
             current_index: 0,
             dirty: false,
         }
     }
 
-    pub fn insert(&mut self, ts_ms: u64, data: &[u64; SLOT_U64S]) {
+    pub fn insert(&mut self, ts_ms: u64, data: &[u64; SLOT_U64S_REALTIME]) {
         let idx = calc_slot_index(ts_ms, self.capacity);
         self.slots[idx as usize] = *data;
         self.current_index = idx;
@@ -248,14 +277,118 @@ impl MemoryRing {
     }
 }
 
-/// Memory Ring Manager
-pub struct MemoryRingManager {
-    pub rings: Arc<Mutex<HashMap<[u8; 6], MemoryRing>>>,
+/// In-memory Ring structure for multilevel statistics (30s/3min/10min sampling)
+#[derive(Debug, Clone)]
+pub struct MultilevelRing {
+    pub capacity: u32,
+    pub slots: Vec<[u64; SLOT_U64S_MULTILEVEL]>,
+    pub current_index: u64,
+    pub dirty: bool,
+}
+
+impl MultilevelRing {
+    pub fn new(capacity: u32) -> Self {
+        let cap = if capacity == 0 {
+            DEFAULT_RING_CAPACITY
+        } else {
+            capacity
+        };
+
+        Self {
+            capacity: cap,
+            slots: vec![[0u64; SLOT_U64S_MULTILEVEL]; cap as usize],
+            current_index: 0,
+            dirty: false,
+        }
+    }
+
+    pub fn insert_stats(&mut self, ts_ms: u64, stats: &DeviceStatsAccumulator) {
+        let idx = calc_slot_index(ts_ms, self.capacity);
+        let mut slot = [0u64; SLOT_U64S_MULTILEVEL];
+        
+        // ts_ms
+        slot[0] = ts_ms;
+        
+        // wide_rx_rate: avg, max, min, p90, p95, p99 (indices 1-6)
+        slot[1] = stats.wide_rx_rate.avg;
+        slot[2] = stats.wide_rx_rate.max;
+        slot[3] = stats.wide_rx_rate.min;
+        slot[4] = stats.wide_rx_rate.p90;
+        slot[5] = stats.wide_rx_rate.p95;
+        slot[6] = stats.wide_rx_rate.p99;
+        
+        // wide_tx_rate: avg, max, min, p90, p95, p99 (indices 7-12)
+        slot[7] = stats.wide_tx_rate.avg;
+        slot[8] = stats.wide_tx_rate.max;
+        slot[9] = stats.wide_tx_rate.min;
+        slot[10] = stats.wide_tx_rate.p90;
+        slot[11] = stats.wide_tx_rate.p95;
+        slot[12] = stats.wide_tx_rate.p99;
+        
+        // Total wide traffic bytes (indices 13-14)
+        slot[13] = stats.wide_rx_bytes;
+        slot[14] = stats.wide_tx_bytes;
+        
+        self.slots[idx as usize] = slot;
+        self.current_index = idx;
+        self.dirty = true;
+    }
+
+    pub fn query_stats(&self, start_ms: u64, end_ms: u64) -> Vec<MetricsRowWithStats> {
+        let mut rows = Vec::new();
+
+        for slot in &self.slots {
+            let ts = slot[0];
+            if ts == 0 {
+                continue;
+            }
+            if ts < start_ms || ts > end_ms {
+                continue;
+            }
+
+            rows.push(MetricsRowWithStats {
+                ts_ms: slot[0],
+                // wide_rx_rate stats (indices 1-6)
+                wide_rx_rate_avg: slot[1],
+                wide_rx_rate_max: slot[2],
+                wide_rx_rate_min: slot[3],
+                wide_rx_rate_p90: slot[4],
+                wide_rx_rate_p95: slot[5],
+                wide_rx_rate_p99: slot[6],
+                // wide_tx_rate stats (indices 7-12)
+                wide_tx_rate_avg: slot[7],
+                wide_tx_rate_max: slot[8],
+                wide_tx_rate_min: slot[9],
+                wide_tx_rate_p90: slot[10],
+                wide_tx_rate_p95: slot[11],
+                wide_tx_rate_p99: slot[12],
+                // Total wide traffic bytes (indices 13-14)
+                wide_rx_bytes: slot[13],
+                wide_tx_bytes: slot[14],
+            });
+        }
+
+        rows.sort_by_key(|r| r.ts_ms);
+        rows
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+}
+
+/// Memory Ring Manager for real-time data (1-second sampling)
+pub struct RealtimeRingManager {
+    pub rings: Arc<Mutex<HashMap<[u8; 6], RealtimeRing>>>,
     pub base_dir: String,
     pub capacity: u32,
 }
 
-impl MemoryRingManager {
+impl RealtimeRingManager {
     pub fn new(base_dir: String, capacity: u32) -> Self {
         Self {
             rings: Arc::new(Mutex::new(HashMap::new())),
@@ -284,7 +417,7 @@ impl MemoryRingManager {
                 [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
             ];
             for mac in &test_macs {
-                rings.insert(*mac, MemoryRing::new(self.capacity));
+                rings.insert(*mac, RealtimeRing::new(self.capacity));
             }
         } else {
             test_macs = rings.keys().copied().collect();
@@ -395,9 +528,9 @@ impl MemoryRingManager {
         for (mac, s) in rows.iter() {
             let ring = rings
                 .entry(*mac)
-                .or_insert_with(|| MemoryRing::new(self.capacity));
+                .or_insert_with(|| RealtimeRing::new(self.capacity));
 
-            let rec: [u64; SLOT_U64S] = [
+            let rec: [u64; SLOT_U64S_REALTIME] = [
                 ts_ms,
                 s.total_rx_rate,
                 s.total_tx_rate,
@@ -445,7 +578,7 @@ impl MemoryRingManager {
         use std::collections::BTreeMap;
 
         let rings = self.rings.lock().unwrap();
-        let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S]> = BTreeMap::new();
+        let mut ts_to_agg: BTreeMap<u64, [u64; SLOT_U64S_REALTIME]> = BTreeMap::new();
 
         for (_mac, ring) in rings.iter() {
             for slot in &ring.slots {
@@ -457,7 +590,7 @@ impl MemoryRingManager {
                     continue;
                 }
 
-                let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S]);
+                let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S_REALTIME]);
                 agg[0] = ts; // keep timestamp
                              // Aggregate only metric fields (exclude last_online_ts at index 13)
                 for j in 1..13 {
@@ -503,7 +636,7 @@ impl MemoryRingManager {
     }
 
     /// Persist a single Ring to file
-    fn persist_ring_to_file(&self, mac: &[u8; 6], ring: &MemoryRing) -> Result<(), anyhow::Error> {
+    fn persist_ring_to_file(&self, mac: &[u8; 6], ring: &RealtimeRing) -> Result<(), anyhow::Error> {
         let path = ring_file_path(&self.base_dir, mac);
         let f = init_ring_file(&path, ring.capacity)?;
 
@@ -559,8 +692,8 @@ impl MemoryRingManager {
             // Load from file to memory
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION {
-                        let mut ring = MemoryRing::new(cap);
+                    if ver == RING_VERSION_REALTIME {
+                        let mut ring = RealtimeRing::new(cap);
 
                         for i in 0..(cap as u64) {
                             if let Ok(slot) = read_slot(&f, i) {
@@ -581,6 +714,452 @@ impl MemoryRingManager {
     }
 }
 
+/// Statistics for a metric (average, max, min, p90, p95, p99)
+#[derive(Debug, Clone)]
+pub struct MetricStats {
+    pub samples: Vec<u64>, // Store all samples for percentile calculation
+    pub avg: u64,  // Average value (Mean)
+    pub max: u64,  // Maximum value
+    pub min: u64,  // Minimum value
+    pub p90: u64,  // 90th percentile
+    pub p95: u64,  // 95th percentile
+    pub p99: u64,  // 99th percentile
+}
+
+impl MetricStats {
+    pub fn new() -> Self {
+        Self {
+            samples: Vec::new(),
+            avg: 0,
+            max: 0,
+            min: u64::MAX,
+            p90: 0,
+            p95: 0,
+            p99: 0,
+        }
+    }
+
+    pub fn add_sample(&mut self, value: u64) {
+        self.samples.push(value);
+        
+        if self.samples.len() == 1 {
+            self.min = value;
+            self.max = value;
+        } else {
+            if value < self.min {
+                self.min = value;
+            }
+            if value > self.max {
+                self.max = value;
+            }
+        }
+    }
+
+    pub fn finalize(&mut self) {
+        if self.samples.is_empty() {
+            self.min = 0;
+            self.avg = 0;
+            self.max = 0;
+            self.p90 = 0;
+            self.p95 = 0;
+            self.p99 = 0;
+            return;
+        }
+
+        // Calculate average (Mean)
+        let sum: u64 = self.samples.iter().sum();
+        self.avg = sum / self.samples.len() as u64;
+
+        // Calculate percentiles
+        let mut sorted = self.samples.clone();
+        sorted.sort_unstable();
+        
+        let len = sorted.len();
+        if len > 0 {
+            // P90: index at 90% of sorted array
+            let p90_idx = ((len - 1) as f64 * 0.90) as usize;
+            self.p90 = sorted[p90_idx.min(len - 1)];
+            
+            // P95: index at 95% of sorted array
+            let p95_idx = ((len - 1) as f64 * 0.95) as usize;
+            self.p95 = sorted[p95_idx.min(len - 1)];
+            
+            // P99: index at 99% of sorted array
+            let p99_idx = ((len - 1) as f64 * 0.99) as usize;
+            self.p99 = sorted[p99_idx.min(len - 1)];
+        }
+    }
+}
+
+/// Accumulated statistics for a device during a sampling interval
+/// Only stores wide network statistics and total wide traffic
+#[derive(Debug, Clone)]
+pub struct DeviceStatsAccumulator {
+    pub ts_end_ms: u64,
+    pub wide_rx_rate: MetricStats,  // Wide network receive rate statistics
+    pub wide_tx_rate: MetricStats,  // Wide network transmit rate statistics
+    pub wide_rx_bytes: u64,         // Total wide network receive bytes (cumulative)
+    pub wide_tx_bytes: u64,         // Total wide network transmit bytes (cumulative)
+}
+
+impl DeviceStatsAccumulator {
+    pub fn new(ts_ms: u64) -> Self {
+        Self {
+            ts_end_ms: ts_ms,
+            wide_rx_rate: MetricStats::new(),
+            wide_tx_rate: MetricStats::new(),
+            wide_rx_bytes: 0,
+            wide_tx_bytes: 0,
+        }
+    }
+
+    pub fn add_sample(&mut self, stats: &MacTrafficStats, ts_ms: u64) {
+        self.ts_end_ms = ts_ms;
+        // Only accumulate wide network statistics
+        self.wide_rx_rate.add_sample(stats.wide_rx_rate);
+        self.wide_tx_rate.add_sample(stats.wide_tx_rate);
+        
+        // Keep latest cumulative wide traffic values
+        self.wide_rx_bytes = stats.wide_rx_bytes;
+        self.wide_tx_bytes = stats.wide_tx_bytes;
+    }
+
+    pub fn finalize(&mut self) {
+        self.wide_rx_rate.finalize();
+        self.wide_tx_rate.finalize();
+    }
+}
+
+/// Sampling level configuration
+#[derive(Debug, Clone)]
+pub struct SamplingLevel {
+    /// Sampling interval in seconds
+    pub interval_seconds: u64,
+    /// Retention period in seconds
+    pub retention_seconds: u64,
+    /// Capacity (calculated from retention / interval)
+    pub capacity: u32,
+    /// Subdirectory name for this level
+    pub subdir: String,
+    /// Whether to use statistics (avg/max/min) instead of real-time values
+    pub use_statistics: bool,
+}
+
+impl SamplingLevel {
+    pub fn new(interval_seconds: u64, retention_seconds: u64, subdir: String, use_statistics: bool) -> Self {
+        let capacity = (retention_seconds / interval_seconds) as u32;
+        Self {
+            interval_seconds,
+            retention_seconds,
+            capacity,
+            subdir,
+            use_statistics,
+        }
+    }
+
+    /// Check if timestamp should be sampled at this level
+    /// Returns true if the timestamp aligns with the sampling interval
+    pub fn should_sample(&self, ts_ms: u64) -> bool {
+        let ts_sec = ts_ms / 1000;
+        // Check if timestamp is aligned to the sampling interval
+        // For example, for 30s interval: 0, 30, 60, 90, etc.
+        ts_sec % self.interval_seconds == 0
+    }
+
+}
+
+/// Memory Ring Manager for multilevel statistics (30s/3min/10min sampling)
+pub struct MultilevelRingManager {
+    pub rings: Arc<Mutex<HashMap<[u8; 6], MultilevelRing>>>,
+    pub base_dir: String,
+    pub capacity: u32,
+}
+
+impl MultilevelRingManager {
+    pub fn new(base_dir: String, capacity: u32) -> Self {
+        Self {
+            rings: Arc::new(Mutex::new(HashMap::new())),
+            base_dir,
+            capacity,
+        }
+    }
+
+    pub fn insert_stats(&self, ts_ms: u64, mac: &[u8; 6], stats: &DeviceStatsAccumulator) -> Result<(), anyhow::Error> {
+        let mut rings = self.rings.lock().unwrap();
+        let ring = rings
+            .entry(*mac)
+            .or_insert_with(|| MultilevelRing::new(self.capacity));
+        
+        ring.insert_stats(ts_ms, stats);
+        Ok(())
+    }
+
+    pub fn query_stats(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
+        let rings = self.rings.lock().unwrap();
+        if let Some(ring) = rings.get(mac) {
+            Ok(ring.query_stats(start_ms, end_ms))
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn query_stats_aggregate_all(&self, start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
+        let rings = self.rings.lock().unwrap();
+        let mut all_rows = Vec::new();
+        
+        for (_mac, ring) in rings.iter() {
+            let mut rows = ring.query_stats(start_ms, end_ms);
+            all_rows.append(&mut rows);
+        }
+        
+        // Aggregate by timestamp
+        use std::collections::BTreeMap;
+        let mut ts_to_stats: BTreeMap<u64, MetricsRowWithStats> = BTreeMap::new();
+        
+        for row in all_rows {
+            let entry = ts_to_stats.entry(row.ts_ms).or_insert(MetricsRowWithStats {
+                ts_ms: row.ts_ms,
+                wide_rx_rate_avg: 0, wide_rx_rate_max: 0, wide_rx_rate_min: u64::MAX,
+                wide_rx_rate_p90: 0, wide_rx_rate_p95: 0, wide_rx_rate_p99: 0,
+                wide_tx_rate_avg: 0, wide_tx_rate_max: 0, wide_tx_rate_min: u64::MAX,
+                wide_tx_rate_p90: 0, wide_tx_rate_p95: 0, wide_tx_rate_p99: 0,
+                wide_rx_bytes: 0, wide_tx_bytes: 0,
+            });
+            
+            // Aggregate: sum for avg/bytes, max for max/p90/p95/p99, min for min
+            entry.wide_rx_rate_avg = entry.wide_rx_rate_avg.saturating_add(row.wide_rx_rate_avg);
+            entry.wide_rx_rate_max = entry.wide_rx_rate_max.max(row.wide_rx_rate_max);
+            entry.wide_rx_rate_min = entry.wide_rx_rate_min.min(row.wide_rx_rate_min);
+            entry.wide_rx_rate_p90 = entry.wide_rx_rate_p90.max(row.wide_rx_rate_p90);
+            entry.wide_rx_rate_p95 = entry.wide_rx_rate_p95.max(row.wide_rx_rate_p95);
+            entry.wide_rx_rate_p99 = entry.wide_rx_rate_p99.max(row.wide_rx_rate_p99);
+            
+            entry.wide_tx_rate_avg = entry.wide_tx_rate_avg.saturating_add(row.wide_tx_rate_avg);
+            entry.wide_tx_rate_max = entry.wide_tx_rate_max.max(row.wide_tx_rate_max);
+            entry.wide_tx_rate_min = entry.wide_tx_rate_min.min(row.wide_tx_rate_min);
+            entry.wide_tx_rate_p90 = entry.wide_tx_rate_p90.max(row.wide_tx_rate_p90);
+            entry.wide_tx_rate_p95 = entry.wide_tx_rate_p95.max(row.wide_tx_rate_p95);
+            entry.wide_tx_rate_p99 = entry.wide_tx_rate_p99.max(row.wide_tx_rate_p99);
+            
+            entry.wide_rx_bytes = entry.wide_rx_bytes.saturating_add(row.wide_rx_bytes);
+            entry.wide_tx_bytes = entry.wide_tx_bytes.saturating_add(row.wide_tx_bytes);
+        }
+        
+        // Fix min values that are still u64::MAX
+        for stats in ts_to_stats.values_mut() {
+            if stats.wide_rx_rate_min == u64::MAX { stats.wide_rx_rate_min = 0; }
+            if stats.wide_tx_rate_min == u64::MAX { stats.wide_tx_rate_min = 0; }
+        }
+        
+        Ok(ts_to_stats.into_values().collect())
+    }
+
+    /// Persist a single RingV3 to file
+    fn persist_ring_to_file_multilevel(&self, mac: &[u8; 6], ring: &MultilevelRing) -> Result<(), anyhow::Error> {
+        let path = ring_file_path_v3(&self.base_dir, mac);
+        let f = init_ring_file_v3(&path, ring.capacity)?;
+
+        for (idx, slot) in ring.slots.iter().enumerate() {
+            if slot[0] != 0 {
+                // Only write non-empty slots
+                write_slot_v3(&f, idx as u64, slot)?;
+            }
+        }
+
+        f.sync_all()?;
+        Ok(())
+    }
+
+    pub async fn flush_dirty_rings(&self) -> Result<(), anyhow::Error> {
+        let mut rings = self.rings.lock().unwrap();
+        for (mac, ring) in rings.iter_mut() {
+            if ring.is_dirty() {
+                self.persist_ring_to_file_multilevel(mac, ring)?;
+                ring.mark_clean();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_from_files(&self) -> Result<(), anyhow::Error> {
+        let dir = Path::new(&self.base_dir);
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let mut rings = self.rings.lock().unwrap();
+
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("ring") {
+                continue;
+            }
+
+            // Parse MAC from filename
+            let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if fname.len() != 12 {
+                continue;
+            }
+            let mut mac = [0u8; 6];
+            let mut ok = true;
+            for i in 0..6 {
+                if let Ok(v) = u8::from_str_radix(&fname[i * 2..i * 2 + 2], 16) {
+                    mac[i] = v;
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+
+            // Load from file to memory
+            if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
+                if let Ok((ver, cap)) = read_header(&mut f) {
+                    if ver == RING_VERSION_MULTILEVEL {
+                        let mut ring = MultilevelRing::new(cap);
+
+                        for i in 0..(cap as u64) {
+                            if let Ok(slot) = read_slot_v3(&f, i) {
+                                if slot[0] != 0 {
+                                    ring.slots[i as usize] = slot;
+                                }
+                            }
+                        }
+
+                        ring.mark_clean(); // Just loaded from file, mark as clean
+                        rings.insert(mac, ring);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Multi-level Ring Manager for hierarchical sampling
+pub struct MultiLevelRingManager {
+    pub levels: Vec<SamplingLevel>,
+    pub managers: Vec<MultilevelRingManager>,
+    // Accumulators for statistics: (level_index, mac) -> DeviceStatsAccumulator
+    pub accumulators: Arc<Mutex<HashMap<(usize, [u8; 6]), DeviceStatsAccumulator>>>,
+}
+
+impl MultiLevelRingManager {
+    /// Create a new multi-level ring manager with default levels:
+    /// - Level 1: 30s interval, 1 day retention (use statistics)
+    /// - Level 2: 3min interval, 1 week retention (use statistics)
+    /// - Level 3: 10min interval, 1 month retention (use statistics)
+    pub fn new(base_dir: String) -> Self {
+        let levels = vec![
+            SamplingLevel::new(30, 24 * 3600, "day".to_string(), true),      // 1 day, 30s interval, use stats
+            SamplingLevel::new(180, 7 * 24 * 3600, "week".to_string(), true), // 1 week, 3min interval, use stats
+            SamplingLevel::new(600, 30 * 24 * 3600, "month".to_string(), true), // 1 month, 10min interval, use stats
+        ];
+
+        let managers: Vec<MultilevelRingManager> = levels
+            .iter()
+            .map(|level| {
+                MultilevelRingManager::new(
+                    Path::new(&base_dir).join("metrics").join(&level.subdir).to_string_lossy().to_string(),
+                    level.capacity,
+                )
+            })
+            .collect();
+
+        Self {
+            levels,
+            managers,
+            accumulators: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Insert metrics batch into appropriate levels based on sampling intervals
+    /// For levels using statistics, accumulates data during the interval and writes stats at sampling time
+    pub fn insert_metrics_batch(
+        &self,
+        ts_ms: u64,
+        rows: &Vec<([u8; 6], MacTrafficStats)>,
+    ) -> Result<(), anyhow::Error> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut accumulators = self.accumulators.lock().unwrap();
+
+        // Process each level
+        for (level_idx, (level, manager)) in self.levels.iter().zip(self.managers.iter()).enumerate() {
+            if level.use_statistics {
+                // For statistics-based levels, accumulate data during the interval
+                for (mac, stats) in rows.iter() {
+                    let key = (level_idx, *mac);
+                    
+                    // Get or create accumulator for this device and level
+                    let accumulator = accumulators.entry(key).or_insert_with(|| {
+                        DeviceStatsAccumulator::new(ts_ms)
+                    });
+                    
+                    // Add sample to accumulator
+                    accumulator.add_sample(stats, ts_ms);
+                    
+                    // Check if we should flush (at sampling interval boundary)
+                    if level.should_sample(ts_ms) {
+                        // Finalize statistics (calculate avg, p90, p95, p99)
+                        accumulator.finalize();
+                        
+                        // Insert statistics into v3 ring manager
+                        manager.insert_stats(accumulator.ts_end_ms, mac, accumulator)?;
+                        
+                        // Remove accumulator after flushing
+                        accumulators.remove(&key);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+
+    /// Flush dirty data to disk for all levels
+    pub async fn flush_dirty_rings(&self) -> Result<(), anyhow::Error> {
+        for manager in &self.managers {
+            manager.flush_dirty_rings().await?;
+        }
+        Ok(())
+    }
+
+    /// Load data from files to memory at startup
+    pub fn load_from_files(&self) -> Result<(), anyhow::Error> {
+        for manager in &self.managers {
+            manager.load_from_files()?;
+        }
+        Ok(())
+    }
+
+    /// Get the manager for a specific level by subdirectory name
+    pub fn get_manager_by_level(&self, level_name: &str) -> Option<&MultilevelRingManager> {
+        self.levels
+            .iter()
+            .zip(self.managers.iter())
+            .find(|(level, _)| level.subdir == level_name)
+            .map(|(_, manager)| manager)
+    }
+
+    /// Get the sampling level for a specific level by subdirectory name
+    pub fn get_level_by_name(&self, level_name: &str) -> Option<&SamplingLevel> {
+        self.levels
+            .iter()
+            .find(|level| level.subdir == level_name)
+    }
+}
+
 fn ring_dir(base: &str) -> PathBuf {
     Path::new(base).join("metrics")
 }
@@ -590,6 +1169,10 @@ fn limits_path(base: &str) -> PathBuf {
 // bindings_path moved to storage::hostname module
 fn ring_file_path(base: &str, mac: &[u8; 6]) -> PathBuf {
     ring_dir(base).join(format!("{}.ring", mac_to_filename(mac)))
+}
+
+fn ring_file_path_v3(base: &str, mac: &[u8; 6]) -> PathBuf {
+    Path::new(base).join(format!("{}.ring", mac_to_filename(mac)))
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), anyhow::Error> {
@@ -602,7 +1185,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), anyhow::Error> {
 fn write_header(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&RING_MAGIC)?;
-    f.write_all(&RING_VERSION.to_le_bytes())?;
+    f.write_all(&RING_VERSION_REALTIME.to_le_bytes())?;
     f.write_all(&capacity.to_le_bytes())?;
     Ok(())
 }
@@ -636,7 +1219,7 @@ fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
     } else {
         capacity
     };
-    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE as u64);
+    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE_REALTIME as u64);
 
     if metadata.len() != expected_size {
         // Reinitialize
@@ -671,7 +1254,7 @@ fn reinit_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
     } else {
         capacity
     };
-    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE as u64);
+    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE_REALTIME as u64);
 
     // Force reinitialize regardless of current size/header
     f.set_len(0)?;
@@ -691,9 +1274,9 @@ fn calc_slot_index(ts_ms: u64, capacity: u32) -> u64 {
     ((ts_ms / 1000) % capacity as u64) as u64
 }
 
-fn write_slot(mut f: &File, idx: u64, data: &[u64; SLOT_U64S]) -> Result<(), anyhow::Error> {
-    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE as u64);
-    let mut bytes = [0u8; SLOT_SIZE];
+fn write_slot(mut f: &File, idx: u64, data: &[u64; SLOT_U64S_REALTIME]) -> Result<(), anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_REALTIME as u64);
+    let mut bytes = [0u8; SLOT_SIZE_REALTIME];
     for (i, v) in data.iter().enumerate() {
         let b = v.to_le_bytes();
         bytes[i * 8..(i + 1) * 8].copy_from_slice(&b);
@@ -703,13 +1286,100 @@ fn write_slot(mut f: &File, idx: u64, data: &[u64; SLOT_U64S]) -> Result<(), any
     Ok(())
 }
 
-fn read_slot(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S], anyhow::Error> {
-    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE as u64);
-    let mut bytes = [0u8; SLOT_SIZE];
+fn read_slot(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_REALTIME], anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_REALTIME as u64);
+    let mut bytes = [0u8; SLOT_SIZE_REALTIME];
     f.seek(SeekFrom::Start(offset))?;
     f.read_exact(&mut bytes)?;
-    let mut out = [0u64; SLOT_U64S];
-    for i in 0..SLOT_U64S {
+    let mut out = [0u64; SLOT_U64S_REALTIME];
+    for i in 0..SLOT_U64S_REALTIME {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        out[i] = u64::from_le_bytes(b);
+    }
+    Ok(out)
+}
+
+// ============================================================================
+// Multi-level Ring File I/O Functions (v3 format)
+// ============================================================================
+
+fn write_header_v3(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&RING_MAGIC)?;
+    f.write_all(&RING_VERSION_MULTILEVEL.to_le_bytes())?;
+    f.write_all(&capacity.to_le_bytes())?;
+    Ok(())
+}
+
+fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
+    ensure_parent_dir(path)?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+
+    let metadata = f.metadata()?;
+    let cap = if capacity == 0 {
+        DEFAULT_RING_CAPACITY
+    } else {
+        capacity
+    };
+    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE_MULTILEVEL as u64);
+
+    if metadata.len() != expected_size {
+        // Reinitialize
+        f.set_len(0)?;
+        write_header_v3(&mut f, cap)?;
+        // Write zeroed slot area
+        let zero_chunk = vec![0u8; 4096];
+        let mut remaining = expected_size - HEADER_SIZE as u64;
+        while remaining > 0 {
+            let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
+            f.write_all(&zero_chunk[..to_write])?;
+            remaining -= to_write as u64;
+        }
+        f.flush()?;
+    } else {
+        // Validate header
+        let (ver, _) = read_header(&mut f)?;
+        if ver != RING_VERSION_MULTILEVEL {
+            // File exists but wrong version, reinitialize
+            f.set_len(0)?;
+            write_header_v3(&mut f, cap)?;
+            let zero_chunk = vec![0u8; 4096];
+            let mut remaining = expected_size - HEADER_SIZE as u64;
+            while remaining > 0 {
+                let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
+                f.write_all(&zero_chunk[..to_write])?;
+                remaining -= to_write as u64;
+            }
+            f.flush()?;
+        }
+    }
+    Ok(f)
+}
+
+fn write_slot_v3(mut f: &File, idx: u64, data: &[u64; SLOT_U64S_MULTILEVEL]) -> Result<(), anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_MULTILEVEL as u64);
+    let mut bytes = vec![0u8; SLOT_SIZE_MULTILEVEL];
+    for (i, v) in data.iter().enumerate() {
+        let b = v.to_le_bytes();
+        bytes[i * 8..(i + 1) * 8].copy_from_slice(&b);
+    }
+    f.seek(SeekFrom::Start(offset))?;
+    f.write_all(&bytes)?;
+    Ok(())
+}
+
+fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_MULTILEVEL], anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_MULTILEVEL as u64);
+    let mut bytes = vec![0u8; SLOT_SIZE_MULTILEVEL];
+    f.seek(SeekFrom::Start(offset))?;
+    f.read_exact(&mut bytes)?;
+    let mut out = [0u64; SLOT_U64S_MULTILEVEL];
+    for i in 0..SLOT_U64S_MULTILEVEL {
         let mut b = [0u8; 8];
         b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
         out[i] = u64::from_le_bytes(b);
@@ -720,8 +1390,16 @@ fn read_slot(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S], anyhow::Error> 
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     // Create directory and hostname binding files
     // Note: rate_limits.txt is deprecated and no longer created
+    // Create metrics directories for multi-level sampling
     fs::create_dir_all(ring_dir(base_dir))
         .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
+    // Create subdirectories for each sampling level
+    fs::create_dir_all(Path::new(base_dir).join("metrics").join("day"))
+        .with_context(|| format!("Failed to create day metrics dir under {}", base_dir))?;
+    fs::create_dir_all(Path::new(base_dir).join("metrics").join("week"))
+        .with_context(|| format!("Failed to create week metrics dir under {}", base_dir))?;
+    fs::create_dir_all(Path::new(base_dir).join("metrics").join("month"))
+        .with_context(|| format!("Failed to create month metrics dir under {}", base_dir))?;
     let bindings = crate::storage::hostname::bindings_path(base_dir);
     if !bindings.exists() {
         File::create(&bindings)?;
@@ -882,6 +1560,31 @@ pub struct MetricsRow {
     pub wide_tx_bytes: u64,
 }
 
+/// Metrics row with statistics (for multi-level sampling)
+#[derive(Debug, Clone, Copy)]
+/// Metrics row with statistics (for multi-level sampling)
+/// Only contains wide network statistics and total wide traffic
+pub struct MetricsRowWithStats {
+    pub ts_ms: u64,
+    // Wide network receive rate statistics (avg, max, min, p90, p95, p99)
+    pub wide_rx_rate_avg: u64,   // Mean: typical bandwidth usage
+    pub wide_rx_rate_max: u64,   // Max: peak load or burst traffic
+    pub wide_rx_rate_min: u64,   // Min: idle or low load state
+    pub wide_rx_rate_p90: u64,   // 90th percentile
+    pub wide_rx_rate_p95: u64,   // 95th percentile
+    pub wide_rx_rate_p99: u64,   // 99th percentile
+    // Wide network transmit rate statistics (avg, max, min, p90, p95, p99)
+    pub wide_tx_rate_avg: u64,   // Mean: typical bandwidth usage
+    pub wide_tx_rate_max: u64,   // Max: peak load or burst traffic
+    pub wide_tx_rate_min: u64,   // Min: idle or low load state
+    pub wide_tx_rate_p90: u64,   // 90th percentile
+    pub wide_tx_rate_p95: u64,   // 95th percentile
+    pub wide_tx_rate_p99: u64,   // 99th percentile
+    // Total wide network traffic (cumulative bytes)
+    pub wide_rx_bytes: u64,      // Total wide network receive bytes
+    pub wide_tx_bytes: u64,      // Total wide network transmit bytes
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineTotals {
     pub total_rx_bytes: u64,
@@ -931,10 +1634,10 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
 
         let mut f = OpenOptions::new().read(true).open(&path)?;
         let (ver, cap) = read_header(&mut f)?;
-        if ver != RING_VERSION {
+        if ver != RING_VERSION_REALTIME {
             continue;
         }
-        let mut best: Option<[u64; SLOT_U64S]> = None;
+        let mut best: Option<[u64; SLOT_U64S_REALTIME]> = None;
         for i in 0..(cap as u64) {
             let rec = read_slot(&f, i)?;
             if rec[0] == 0 {

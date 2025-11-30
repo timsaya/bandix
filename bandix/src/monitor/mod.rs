@@ -4,7 +4,7 @@ pub mod traffic;
 
 use crate::api::ApiRouter;
 use crate::command::Options;
-use crate::storage::traffic::{BaselineTotals, MemoryRingManager, ScheduledRateLimit};
+use crate::storage::traffic::{BaselineTotals, RealtimeRingManager, MultiLevelRingManager, ScheduledRateLimit};
 use bandix_common::MacTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,8 @@ pub struct TrafficModuleContext {
     pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
-    pub memory_ring_manager: Arc<MemoryRingManager>,
+    pub realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
+    pub multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month)
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
 }
@@ -29,19 +30,33 @@ impl TrafficModuleContext {
     /// Both ingress_ebpf and egress_ebpf are Arc references to the same eBPF object
     /// This ensures both programs share the same maps (MAC_TRAFFIC, MAC_RATE_LIMITS, etc.)
     pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>) -> Self {
-        let memory_ring_manager = Arc::new(MemoryRingManager::new(
+        // Real-time 1-second sampling ring manager
+        let realtime_ring_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
         ));
 
-        // memory_ring_manager.generate_test_data(options.traffic_retention_seconds()).unwrap();
+        // Multi-level sampling ring manager (day/week/month)
+        let multi_level_ring_manager = Arc::new(MultiLevelRingManager::new(
+            options.data_dir().to_string(),
+        ));
+
+        // realtime_ring_manager.generate_test_data(options.traffic_retention_seconds()).unwrap();
         
         // Load existing ring files into memory at startup (only if persistence is enabled)
         if options.traffic_persist_history() {
-            if let Err(e) = memory_ring_manager.load_from_files() {
+            // Load real-time ring files
+            if let Err(e) = realtime_ring_manager.load_from_files() {
                 log::error!("Failed to load ring files into memory at startup: {}", e);
             } else {
                 log::debug!("Successfully loaded existing ring files into memory");
+            }
+            
+            // Load multi-level ring files
+            if let Err(e) = multi_level_ring_manager.load_from_files() {
+                log::warn!("Failed to load multi-level ring files: {}", e);
+            } else {
+                log::debug!("Successfully loaded multi-level ring files");
             }
         } else {
             log::debug!("Traffic history persistence disabled, starting with empty memory ring");
@@ -56,7 +71,8 @@ impl TrafficModuleContext {
             baselines: Arc::new(Mutex::new(StdHashMap::new())),
             scheduled_rate_limits: Arc::new(Mutex::new(Vec::new())),
             hostname_bindings,
-            memory_ring_manager,
+            realtime_ring_manager,
+            multi_level_ring_manager,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
         }
@@ -130,7 +146,8 @@ impl Clone for ModuleContext {
                 baselines: Arc::clone(&ctx.baselines),
                 scheduled_rate_limits: Arc::clone(&ctx.scheduled_rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
-                memory_ring_manager: Arc::clone(&ctx.memory_ring_manager),
+                realtime_ring_manager: Arc::clone(&ctx.realtime_ring_manager),
+                multi_level_ring_manager: Arc::clone(&ctx.multi_level_ring_manager),
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
             }),
@@ -175,7 +192,7 @@ impl ModuleType {
 
                 // Rebuild ring files and load baseline data (only if persistence is enabled)
                 if traffic_ctx.options.traffic_persist_history() {
-                    // Rebuild ring files (if needed)
+                    // Rebuild ring files (if needed) for original manager
                     let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
                         traffic_ctx.options.data_dir(),
                         traffic_ctx.options.traffic_retention_seconds(),
@@ -224,7 +241,8 @@ impl ModuleType {
                     Arc::clone(&traffic_ctx.mac_stats),
                     Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
-                    Arc::clone(&traffic_ctx.memory_ring_manager),
+                    Arc::clone(&traffic_ctx.realtime_ring_manager),
+                    Arc::clone(&traffic_ctx.multi_level_ring_manager),
                     traffic_ctx.options.clone(),
                 ));
 

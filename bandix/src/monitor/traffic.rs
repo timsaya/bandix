@@ -70,8 +70,13 @@ impl TrafficMonitor {
                     // Flush dirty rings to disk at configured interval
                     log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...", 
                                ctx.options.traffic_flush_interval_seconds());
-                    if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
+                    // Flush original ring manager
+                    if let Err(e) = ctx.realtime_ring_manager.flush_dirty_rings().await {
                         log::error!("Failed to flush dirty rings to disk: {}", e);
+                    }
+                    // Flush multi-level ring manager
+                    if let Err(e) = ctx.multi_level_ring_manager.flush_dirty_rings().await {
+                        log::error!("Failed to flush multi-level rings to disk: {}", e);
                     } else {
                         log::debug!("Successfully flushed dirty rings to disk");
                     }
@@ -80,8 +85,11 @@ impl TrafficMonitor {
                     log::debug!("Traffic monitoring module received shutdown signal, stopping...");
                     // Flush all dirty data before shutdown
                     log::debug!("Flushing all dirty rings before shutdown...");
-                    if let Err(e) = ctx.memory_ring_manager.flush_dirty_rings().await {
+                    if let Err(e) = ctx.realtime_ring_manager.flush_dirty_rings().await {
                         log::error!("Failed to flush dirty rings during shutdown: {}", e);
+                    }
+                    if let Err(e) = ctx.multi_level_ring_manager.flush_dirty_rings().await {
+                        log::error!("Failed to flush multi-level rings during shutdown: {}", e);
                     }
                     break;
                 }
@@ -146,8 +154,14 @@ impl TrafficMonitor {
             stats.iter().map(|(k, v)| (*k, *v)).collect()
         };
 
-        if let Err(e) = ctx.memory_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
+        // Insert into original 1-second sampling ring (always)
+        if let Err(e) = ctx.realtime_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
             log::error!("metrics persist to memory ring error: {}", e);
+        }
+
+        // Insert into multi-level sampling rings (day/week/month) based on sampling intervals
+        if let Err(e) = ctx.multi_level_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
+            log::error!("metrics persist to multi-level ring error: {}", e);
         }
     }
 }

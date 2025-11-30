@@ -1,6 +1,8 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
-use crate::storage::traffic::{self, MemoryRingManager, ScheduledRateLimit, TimeSlot};
+use crate::storage::traffic::{
+    self, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
+};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
 use serde::{Deserialize, Serialize};
@@ -40,8 +42,8 @@ pub struct DevicesResponse {
 
 /// Metrics response structure
 /// metrics is a Vec of arrays, each array contains:
-/// [ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate, 
-///  wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes, 
+/// [ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate,
+///  wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes,
 ///  local_rx_bytes, local_tx_bytes, wide_rx_bytes, wide_tx_bytes]
 #[derive(Serialize, Deserialize)]
 pub struct MetricsResponse {
@@ -154,7 +156,8 @@ pub struct TrafficApiHandler {
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-    memory_ring_manager: Arc<MemoryRingManager>,
+    realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
+    multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month)
     options: Options,
 }
 
@@ -163,14 +166,16 @@ impl TrafficApiHandler {
         mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
         scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-        memory_ring_manager: Arc<MemoryRingManager>,
+        realtime_ring_manager: Arc<RealtimeRingManager>,
+        multi_level_ring_manager: Arc<MultiLevelRingManager>,
         options: Options,
     ) -> Self {
         Self {
             mac_stats,
             scheduled_rate_limits,
             hostname_bindings,
-            memory_ring_manager,
+            realtime_ring_manager,
+            multi_level_ring_manager,
             options,
         }
     }
@@ -206,6 +211,27 @@ impl TrafficApiHandler {
             "/api/traffic/metrics" => {
                 if request.method == "GET" {
                     self.handle_metrics(request).await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/metrics/day" => {
+                if request.method == "GET" {
+                    self.handle_metrics_level(request, "day").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/metrics/week" => {
+                if request.method == "GET" {
+                    self.handle_metrics_level(request, "week").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/metrics/month" => {
+                if request.method == "GET" {
+                    self.handle_metrics_level(request, "month").await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
@@ -330,14 +356,14 @@ impl TrafficApiHandler {
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    self.memory_ring_manager
+                    self.realtime_ring_manager
                         .query_metrics_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        self.memory_ring_manager
+                        self.realtime_ring_manager
                             .query_metrics(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
@@ -349,7 +375,7 @@ impl TrafficApiHandler {
         } else {
             // mac omitted => aggregate all within window
             (
-                self.memory_ring_manager
+                self.realtime_ring_manager
                     .query_metrics_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
@@ -357,27 +383,29 @@ impl TrafficApiHandler {
 
         match rows_result {
             Ok(rows) => {
-                // Convert to compact array format: [ts_ms, total_rx_rate, total_tx_rate, 
-                // local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate, 
-                // total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes, 
+                // Convert to compact array format: [ts_ms, total_rx_rate, total_tx_rate,
+                // local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate,
+                // total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes,
                 // wide_rx_bytes, wide_tx_bytes]
                 let metrics: Vec<Vec<u64>> = rows
                     .iter()
-                    .map(|r| vec![
-                        r.ts_ms,
-                        r.total_rx_rate,
-                        r.total_tx_rate,
-                        r.local_rx_rate,
-                        r.local_tx_rate,
-                        r.wide_rx_rate,
-                        r.wide_tx_rate,
-                        r.total_rx_bytes,
-                        r.total_tx_bytes,
-                        r.local_rx_bytes,
-                        r.local_tx_bytes,
-                        r.wide_rx_bytes,
-                        r.wide_tx_bytes,
-                    ])
+                    .map(|r| {
+                        vec![
+                            r.ts_ms,
+                            r.total_rx_rate,
+                            r.total_tx_rate,
+                            r.local_rx_rate,
+                            r.local_tx_rate,
+                            r.wide_rx_rate,
+                            r.wide_tx_rate,
+                            r.total_rx_bytes,
+                            r.total_tx_bytes,
+                            r.local_rx_bytes,
+                            r.local_tx_bytes,
+                            r.wide_rx_bytes,
+                            r.wide_tx_bytes,
+                        ]
+                    })
                     .collect();
 
                 let response = MetricsResponse {
@@ -600,5 +628,118 @@ impl TrafficApiHandler {
         let api_response = ApiResponse::success(());
         let body = serde_json::to_string(&api_response)?;
         Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/metrics/{level} endpoint (day/week/month)
+    async fn handle_metrics_level(
+        &self,
+        request: &HttpRequest,
+        level: &str,
+    ) -> Result<HttpResponse, anyhow::Error> {
+        // Get the specific level's configuration
+        let sampling_level = match self.multi_level_ring_manager.get_level_by_name(level) {
+            Some(level) => level,
+            None => {
+                return Ok(HttpResponse::error(
+                    400,
+                    format!("Invalid level: {}", level),
+                ));
+            }
+        };
+
+        let mac_opt = request.query_params.get("mac").cloned();
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        let retention_seconds = sampling_level.retention_seconds;
+        let start_ms = now_ms.saturating_sub(retention_seconds * 1000);
+        let end_ms = now_ms;
+
+        // Get the specific level's manager (day/week/month)
+        let level_manager = match self.multi_level_ring_manager.get_manager_by_level(level) {
+            Some(manager) => manager,
+            None => {
+                return Ok(HttpResponse::error(
+                    500,
+                    format!("Internal error: level '{}' manager not found", level),
+                ));
+            }
+        };
+
+        // Query statistics from the specific level's manager only
+        let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
+            if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                // Aggregate query from specific level
+                (
+                    level_manager.query_stats_aggregate_all(start_ms, end_ms),
+                    "all".to_string(),
+                )
+            } else {
+                match crate::utils::network_utils::parse_mac_address(&mac_str) {
+                    Ok(mac) => {
+                        // Query from specific level
+                        (
+                            level_manager.query_stats(&mac, start_ms, end_ms),
+                            format_mac(&mac),
+                        )
+                    }
+                    Err(e) => {
+                        return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e)));
+                    }
+                }
+            }
+        } else {
+            // mac omitted => aggregate all within window
+            (
+                level_manager.query_stats_aggregate_all(start_ms, end_ms),
+                "all".to_string(),
+            )
+        };
+
+        match rows_result {
+            Ok(rows) => {
+                // Convert to array format with statistics:
+                // [ts_ms,
+                //  wide_rx_rate_avg, wide_rx_rate_max, wide_rx_rate_min, wide_rx_rate_p90, wide_rx_rate_p95, wide_rx_rate_p99,
+                //  wide_tx_rate_avg, wide_tx_rate_max, wide_tx_rate_min, wide_tx_rate_p90, wide_tx_rate_p95, wide_tx_rate_p99,
+                //  wide_rx_bytes, wide_tx_bytes]
+                let metrics: Vec<Vec<u64>> = rows
+                    .iter()
+                    .map(|r| {
+                        vec![
+                            r.ts_ms,
+                            r.wide_rx_rate_avg,
+                            r.wide_rx_rate_max,
+                            r.wide_rx_rate_min,
+                            r.wide_rx_rate_p90,
+                            r.wide_rx_rate_p95,
+                            r.wide_rx_rate_p99,
+                            r.wide_tx_rate_avg,
+                            r.wide_tx_rate_max,
+                            r.wide_tx_rate_min,
+                            r.wide_tx_rate_p90,
+                            r.wide_tx_rate_p95,
+                            r.wide_tx_rate_p99,
+                            r.wide_rx_bytes,
+                            r.wide_tx_bytes,
+                        ]
+                    })
+                    .collect();
+
+                let response = MetricsResponse {
+                    retention_seconds: retention_seconds as u64,
+                    mac: mac_label,
+                    metrics,
+                };
+
+                let api_response = ApiResponse::success(response);
+                let body = serde_json::to_string(&api_response)?;
+                Ok(HttpResponse::ok(body))
+            }
+            Err(e) => Ok(HttpResponse::error(500, e.to_string())),
+        }
     }
 }
