@@ -72,17 +72,21 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     if is_ingress {
         // Ingress: throttle upload traffic (local -> external)
         if src_is_local && !dst_is_local {
-            let upload_limit = get_rate_limit(&src_mac, false);
-            if should_throttle(&src_mac, data_len, upload_limit, false) {
-                return Ok(TC_ACT_SHOT);
+            let limits = get_rate_limits(&src_mac);
+            if limits.1 > 0 { // Check upload limit
+                if should_throttle(&src_mac, data_len, limits, false) {
+                    return Ok(TC_ACT_SHOT);
+                }
             }
         }
     } else {
         // Egress: throttle download traffic (external -> local)
         if dst_is_local && !src_is_local {
-            let download_limit = get_rate_limit(&dst_mac, true);
-            if should_throttle(&dst_mac, data_len, download_limit, true) {
-                return Ok(TC_ACT_SHOT);
+            let limits = get_rate_limits(&dst_mac);
+            if limits.0 > 0 { // Check download limit
+                if should_throttle(&dst_mac, data_len, limits, true) {
+                    return Ok(TC_ACT_SHOT);
+                }
             }
         }
     }
@@ -137,17 +141,21 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     if is_ingress {
         // Ingress: throttle upload traffic (local -> external)
         if src_is_local && !dst_is_local {
-            let upload_limit = get_rate_limit(&src_mac, false);
-            if should_throttle(&src_mac, data_len, upload_limit, false) {
-                return Ok(TC_ACT_SHOT);
+            let limits = get_rate_limits(&src_mac);
+            if limits.1 > 0 { // Check upload limit
+                if should_throttle(&src_mac, data_len, limits, false) {
+                    return Ok(TC_ACT_SHOT);
+                }
             }
         }
     } else {
         // Egress: throttle download traffic (external -> local)
         if dst_is_local && !src_is_local {
-            let download_limit = get_rate_limit(&dst_mac, true);
-            if should_throttle(&dst_mac, data_len, download_limit, true) {
-                return Ok(TC_ACT_SHOT);
+            let limits = get_rate_limits(&dst_mac);
+            if limits.0 > 0 { // Check download limit
+                if should_throttle(&dst_mac, data_len, limits, true) {
+                    return Ok(TC_ACT_SHOT);
+                }
             }
         }
     }
@@ -265,8 +273,10 @@ fn monitor_traffic_v6(
 // ============================================================================
 
 #[inline]
-fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> bool {
-    
+fn should_throttle(mac: &[u8; 6], data_len: u64, limits: (u64, u64), is_rx: bool) -> bool {
+    let (limit_rx, limit_tx) = limits;
+    let limit = if is_rx { limit_rx } else { limit_tx };
+
     if limit == 0 {
         return false; // No limit
     }
@@ -277,14 +287,20 @@ fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> boo
             let now = get_current_time();
             let elapsed = now.saturating_sub((*b)[2]); // Prevent time wrap-around
 
-            // Calculate tokens to add
-            let tokens_to_add = (elapsed * limit) / 1_000_000_000;
+            // Calculate tokens to add for RX
+            if limit_rx > 0 {
+                let rx_tokens_to_add = (elapsed * limit_rx) / 1_000_000_000;
+                (*b)[0] = min((*b)[0].saturating_add(rx_tokens_to_add), limit_rx);
+            }
 
-            // Update tokens in bucket (limit max to 1 second limit)
+            // Calculate tokens to add for TX
+            if limit_tx > 0 {
+                let tx_tokens_to_add = (elapsed * limit_tx) / 1_000_000_000;
+                (*b)[1] = min((*b)[1].saturating_add(tx_tokens_to_add), limit_tx);
+            }
+
+            // Check if enough tokens available for current direction
             let idx = if is_rx { 0 } else { 1 };
-            (*b)[idx] = min((*b)[idx].saturating_add(tokens_to_add), limit);
-
-            // Check if enough tokens available
             if (*b)[idx] < data_len {
                 // Not enough tokens, need to throttle
                 (*b)[2] = now; // Update timestamp
@@ -299,9 +315,10 @@ fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> boo
         None => {
             // First time seeing this MAC, initialize token bucket
             let now = get_current_time();
-            let mut bucket_state = [limit, limit, now];
+            // Start with full buckets for both directions
+            let mut bucket_state = [limit_rx, limit_tx, now];
 
-            // Consume tokens
+            // Consume tokens for current direction
             let idx = if is_rx { 0 } else { 1 };
             if bucket_state[idx] < data_len {
                 // Initial tokens insufficient, need to throttle
@@ -317,18 +334,12 @@ fn should_throttle(mac: &[u8; 6], data_len: u64, limit: u64, is_rx: bool) -> boo
 }
 
 #[inline]
-fn get_rate_limit(mac: &[u8; 6], is_rx: bool) -> u64 {
+fn get_rate_limits(mac: &[u8; 6]) -> (u64, u64) {
     unsafe {
         let limits = MAC_RATE_LIMITS.get(mac);
         match limits {
-            Some(limit) => {
-                if is_rx {
-                    limit[0] // Upload limit
-                } else {
-                    limit[1] // Download limit
-                }
-            }
-            None => 0, // No limit
+            Some(limit) => (limit[0], limit[1]), // [rx_limit, tx_limit]
+            None => (0, 0),
         }
     }
 }
