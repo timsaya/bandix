@@ -306,7 +306,7 @@ impl ConnectionMonitor {
         ctx: &mut ConnectionModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1)); // Update every 1 seconds
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3)); // Update every 3 second
 
         loop {
             tokio::select! {
