@@ -22,7 +22,7 @@ pub struct TrafficModuleContext {
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
     pub realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
-    pub multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month)
+    pub multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month/year)
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
 }
@@ -42,7 +42,7 @@ impl TrafficModuleContext {
             options.traffic_retention_seconds(),
         ));
 
-        // Multi-level sampling ring manager (day/week/month)
+        // Multi-level sampling ring manager (day/week/month/year)
         let multi_level_ring_manager =
             Arc::new(MultiLevelRingManager::new(options.data_dir().to_string()));
 

@@ -159,7 +159,7 @@ impl TrafficMonitor {
             log::error!("metrics persist to memory ring error: {}", e);
         }
 
-        // Insert into multi-level sampling rings (day/week/month) based on sampling intervals
+        // Insert into multi-level sampling rings (day/week/month/year) based on sampling intervals
         if let Err(e) = ctx.multi_level_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
             log::error!("metrics persist to multi-level ring error: {}", e);
         }

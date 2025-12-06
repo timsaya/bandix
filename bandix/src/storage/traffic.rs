@@ -190,7 +190,7 @@ const SLOT_U64S_REALTIME: usize = SLOT_U64S_REALTIME_V3; // Current version
 const SLOT_SIZE_REALTIME: usize = SLOT_U64S_REALTIME * 8;
 
 // ============================================================================
-// Multi-level Ring File Format (for day/week/month sampling with statistics)
+// Multi-level Ring File Format (for day/week/month/year sampling with statistics)
 // ============================================================================
 /// Multi-level ring file format version
 /// Version 3: slot contains statistics (avg, max, min, p90, p95, p99) instead of real-time values
@@ -288,7 +288,7 @@ impl RealtimeRing {
     }
 }
 
-/// In-memory Ring structure for multilevel statistics (30s/3min/10min sampling)
+/// In-memory Ring structure for multilevel statistics (30s/3min/10min/1h sampling)
 #[derive(Debug, Clone)]
 pub struct MultilevelRing {
     pub capacity: u32,
@@ -930,7 +930,7 @@ impl SamplingLevel {
     }
 }
 
-/// Memory Ring Manager for multilevel statistics (30s/3min/10min sampling)
+/// Memory Ring Manager for multilevel statistics (30s/3min/10min/1h sampling)
 pub struct MultilevelRingManager {
     pub rings: Arc<Mutex<HashMap<[u8; 6], MultilevelRing>>>,
     pub base_dir: String,
@@ -974,6 +974,217 @@ impl MultilevelRingManager {
         } else {
             Ok(Vec::new())
         }
+    }
+
+    /// Query statistics for all devices grouped by MAC address
+    /// Returns a map of MAC address to aggregated statistics within the time range
+    pub fn query_stats_by_device(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<HashMap<[u8; 6], MetricsRowWithStats>, anyhow::Error> {
+        let rings = self.rings.lock().unwrap();
+        let mut device_stats: HashMap<[u8; 6], MetricsRowWithStats> = HashMap::new();
+
+        for (mac, ring) in rings.iter() {
+            let rows = ring.query_stats(start_ms, end_ms);
+            
+            // Aggregate all rows for this device into a single stats entry
+            let mut aggregated = MetricsRowWithStats {
+                ts_ms: start_ms, // Use start time as reference
+                wide_rx_rate_avg: 0,
+                wide_rx_rate_max: 0,
+                wide_rx_rate_min: u64::MAX,
+                wide_rx_rate_p90: 0,
+                wide_rx_rate_p95: 0,
+                wide_rx_rate_p99: 0,
+                wide_tx_rate_avg: 0,
+                wide_tx_rate_max: 0,
+                wide_tx_rate_min: u64::MAX,
+                wide_tx_rate_p90: 0,
+                wide_tx_rate_p95: 0,
+                wide_tx_rate_p99: 0,
+                wide_rx_bytes: 0,
+                wide_tx_bytes: 0,
+            };
+
+            if rows.is_empty() {
+                continue;
+            }
+
+            // For bytes: calculate the increment within the time range
+            // Since wide_rx_bytes and wide_tx_bytes are cumulative values,
+            // if there's only one sample, use its value (total up to that point)
+            // if there are multiple samples, use the difference (increment in the time range)
+            // For rates: aggregate statistics
+            let first_row = &rows[0];
+            let last_row = &rows[rows.len() - 1];
+            
+            if rows.len() == 1 {
+                // Only one sample: use the cumulative value directly
+                aggregated.wide_rx_bytes = last_row.wide_rx_bytes;
+                aggregated.wide_tx_bytes = last_row.wide_tx_bytes;
+            } else {
+                // Multiple samples: calculate increment (difference between last and first)
+                aggregated.wide_rx_bytes = last_row.wide_rx_bytes.saturating_sub(first_row.wide_rx_bytes);
+                aggregated.wide_tx_bytes = last_row.wide_tx_bytes.saturating_sub(first_row.wide_tx_bytes);
+            }
+
+            // Aggregate rate statistics: sum for avg, max for max/p90/p95/p99, min for min
+            for row in &rows {
+                aggregated.wide_rx_rate_avg = aggregated.wide_rx_rate_avg.saturating_add(row.wide_rx_rate_avg);
+                aggregated.wide_rx_rate_max = aggregated.wide_rx_rate_max.max(row.wide_rx_rate_max);
+                aggregated.wide_rx_rate_min = aggregated.wide_rx_rate_min.min(row.wide_rx_rate_min);
+                aggregated.wide_rx_rate_p90 = aggregated.wide_rx_rate_p90.max(row.wide_rx_rate_p90);
+                aggregated.wide_rx_rate_p95 = aggregated.wide_rx_rate_p95.max(row.wide_rx_rate_p95);
+                aggregated.wide_rx_rate_p99 = aggregated.wide_rx_rate_p99.max(row.wide_rx_rate_p99);
+
+                aggregated.wide_tx_rate_avg = aggregated.wide_tx_rate_avg.saturating_add(row.wide_tx_rate_avg);
+                aggregated.wide_tx_rate_max = aggregated.wide_tx_rate_max.max(row.wide_tx_rate_max);
+                aggregated.wide_tx_rate_min = aggregated.wide_tx_rate_min.min(row.wide_tx_rate_min);
+                aggregated.wide_tx_rate_p90 = aggregated.wide_tx_rate_p90.max(row.wide_tx_rate_p90);
+                aggregated.wide_tx_rate_p95 = aggregated.wide_tx_rate_p95.max(row.wide_tx_rate_p95);
+                aggregated.wide_tx_rate_p99 = aggregated.wide_tx_rate_p99.max(row.wide_tx_rate_p99);
+            }
+
+            // Average the rate averages
+            let count = rows.len() as u64;
+            if count > 0 {
+                aggregated.wide_rx_rate_avg /= count;
+                aggregated.wide_tx_rate_avg /= count;
+            }
+
+            // Fix min values
+            if aggregated.wide_rx_rate_min == u64::MAX {
+                aggregated.wide_rx_rate_min = 0;
+            }
+            if aggregated.wide_tx_rate_min == u64::MAX {
+                aggregated.wide_tx_rate_min = 0;
+            }
+
+            device_stats.insert(*mac, aggregated);
+        }
+
+        Ok(device_stats)
+    }
+
+    /// Query time series increments for a specific device
+    /// Returns a list of increments (current value - previous value) for each time point
+    pub fn query_time_series_increments(
+        &self,
+        mac: &[u8; 6],
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
+        // Returns Vec<(ts_ms, rx_bytes_increment, tx_bytes_increment)>
+        let rings = self.rings.lock().unwrap();
+        if let Some(ring) = rings.get(mac) {
+            let rows = ring.query_stats(start_ms, end_ms);
+            
+            if rows.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut increments = Vec::new();
+            let mut prev_rx = rows[0].wide_rx_bytes;
+            let mut prev_tx = rows[0].wide_tx_bytes;
+
+            // First point: use its value as baseline (increment is 0 or use first value)
+            // For the first point, we can't calculate increment, so we skip it or use 0
+            // Actually, let's include it with increment = 0, or we can use the first value as increment
+            
+            // For subsequent points, calculate increment
+            for (idx, row) in rows.iter().enumerate() {
+                if idx == 0 {
+                    // First point: no increment, but we can include it with 0 increment
+                    // Or skip it - let's skip the first point since we can't calculate increment
+                    prev_rx = row.wide_rx_bytes;
+                    prev_tx = row.wide_tx_bytes;
+                    continue;
+                }
+
+                // Calculate increment (handle wrap-around)
+                let rx_inc = if row.wide_rx_bytes >= prev_rx {
+                    row.wide_rx_bytes - prev_rx
+                } else {
+                    // Handle potential wrap-around (unlikely for cumulative bytes, but safe)
+                    row.wide_rx_bytes
+                };
+
+                let tx_inc = if row.wide_tx_bytes >= prev_tx {
+                    row.wide_tx_bytes - prev_tx
+                } else {
+                    row.wide_tx_bytes
+                };
+
+                increments.push((row.ts_ms, rx_inc, tx_inc));
+
+                prev_rx = row.wide_rx_bytes;
+                prev_tx = row.wide_tx_bytes;
+            }
+
+            Ok(increments)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Query time series increments for all devices (aggregated)
+    pub fn query_time_series_increments_aggregate(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
+        // Returns Vec<(ts_ms, rx_bytes_increment, tx_bytes_increment)>
+        let rings = self.rings.lock().unwrap();
+        let mut all_rows_by_ts: std::collections::BTreeMap<u64, (u64, u64)> = std::collections::BTreeMap::new();
+
+        // Collect all rows from all devices, aggregate by timestamp
+        for (_mac, ring) in rings.iter() {
+            let rows = ring.query_stats(start_ms, end_ms);
+            for row in rows {
+                let entry = all_rows_by_ts.entry(row.ts_ms).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(row.wide_rx_bytes);
+                entry.1 = entry.1.saturating_add(row.wide_tx_bytes);
+            }
+        }
+
+        if all_rows_by_ts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut increments = Vec::new();
+        let mut prev_rx = 0u64;
+        let mut prev_tx = 0u64;
+        let mut is_first = true;
+
+        for (_ts_ms, (rx_bytes, tx_bytes)) in all_rows_by_ts.iter() {
+            if is_first {
+                prev_rx = *rx_bytes;
+                prev_tx = *tx_bytes;
+                is_first = false;
+                continue;
+            }
+
+            let rx_inc = if *rx_bytes >= prev_rx {
+                *rx_bytes - prev_rx
+            } else {
+                *rx_bytes
+            };
+
+            let tx_inc = if *tx_bytes >= prev_tx {
+                *tx_bytes - prev_tx
+            } else {
+                *tx_bytes
+            };
+
+            increments.push((*_ts_ms, rx_inc, tx_inc));
+
+            prev_rx = *rx_bytes;
+            prev_tx = *tx_bytes;
+        }
+
+        Ok(increments)
     }
 
     pub fn query_stats_aggregate_all(
@@ -1152,11 +1363,13 @@ impl MultiLevelRingManager {
     /// - Level 1: 30s interval, 1 day retention (use statistics)
     /// - Level 2: 3min interval, 1 week retention (use statistics)
     /// - Level 3: 10min interval, 1 month retention (use statistics)
+    /// - Level 4: 1h interval, 365 days retention (use statistics)
     pub fn new(base_dir: String) -> Self {
         let levels = vec![
             SamplingLevel::new(30, 24 * 3600, "day".to_string(), true), // 1 day, 30s interval, use stats
             SamplingLevel::new(180, 7 * 24 * 3600, "week".to_string(), true), // 1 week, 3min interval, use stats
             SamplingLevel::new(600, 30 * 24 * 3600, "month".to_string(), true), // 1 month, 10min interval, use stats
+            SamplingLevel::new(3600, 365 * 24 * 3600, "year".to_string(), true), // 365 days, 1h interval, use stats
         ];
 
         let managers: Vec<MultilevelRingManager> = levels

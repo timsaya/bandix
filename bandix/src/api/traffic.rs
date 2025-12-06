@@ -52,6 +52,51 @@ pub struct MetricsResponse {
     pub metrics: Vec<Vec<u64>>,
 }
 
+/// Device usage ranking entry
+#[derive(Serialize, Deserialize)]
+pub struct DeviceUsageRanking {
+    pub mac: String,
+    pub hostname: String,
+    pub ip: String,
+    pub total_bytes: u64,        // Total bytes (rx + tx) in the time range
+    pub rx_bytes: u64,            // Receive bytes
+    pub tx_bytes: u64,            // Transmit bytes
+    pub percentage: f64,          // Percentage of total usage
+    pub rank: usize,              // Ranking position (1-based)
+}
+
+/// Device usage ranking response structure
+#[derive(Serialize, Deserialize)]
+pub struct DeviceUsageRankingResponse {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub total_bytes: u64,         // Total bytes across all devices
+    pub device_count: usize,      // Number of devices
+    pub rankings: Vec<DeviceUsageRanking>,
+}
+
+/// Time series increment entry (hourly or daily)
+#[derive(Serialize, Deserialize)]
+pub struct TimeSeriesIncrement {
+    pub ts_ms: u64,               // Timestamp (start of hour or day)
+    pub rx_bytes: u64,            // Receive bytes increment in this period
+    pub tx_bytes: u64,            // Transmit bytes increment in this period
+    pub total_bytes: u64,         // Total bytes increment (rx + tx)
+}
+
+/// Time series increment response structure
+#[derive(Serialize, Deserialize)]
+pub struct TimeSeriesIncrementResponse {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub aggregation: String,      // "hourly" or "daily"
+    pub mac: String,              // MAC address (or "all" for aggregate)
+    pub increments: Vec<TimeSeriesIncrement>,
+    pub total_rx_bytes: u64,      // Total RX bytes in the range
+    pub total_tx_bytes: u64,      // Total TX bytes in the range
+    pub total_bytes: u64,         // Total bytes in the range
+}
+
 /// Hostname binding information for API response
 #[derive(Serialize, Deserialize)]
 pub struct HostnameBinding {
@@ -158,7 +203,7 @@ pub struct TrafficApiHandler {
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
-    multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month)
+    multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month/year)
     options: Options,
 }
 
@@ -190,7 +235,15 @@ impl TrafficApiHandler {
             "/api/traffic/devices",
             "/api/traffic/limits/schedule",
             "/api/traffic/metrics",
+            "/api/traffic/metrics/hour",
+            "/api/traffic/metrics/day",
+            "/api/traffic/metrics/week",
+            "/api/traffic/metrics/month",
+            "/api/traffic/metrics/year",
             "/api/traffic/bindings",
+            "/api/traffic/usage/ranking",
+            "/api/traffic/usage/increments",
+            
         ]
     }
 
@@ -235,6 +288,27 @@ impl TrafficApiHandler {
             "/api/traffic/metrics/month" => {
                 if request.method == "GET" {
                     self.handle_metrics_level(request, "month").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/metrics/year" => {
+                if request.method == "GET" {
+                    self.handle_metrics_level(request, "year").await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/usage/ranking" => {
+                if request.method == "GET" {
+                    self.handle_usage_ranking(request).await
+                } else {
+                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
+                }
+            }
+            "/api/traffic/usage/increments" => {
+                if request.method == "GET" {
+                    self.handle_usage_increments(request).await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
@@ -674,7 +748,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/metrics/{level} endpoint (day/week/month)
+    /// Handle /api/traffic/metrics/{level} endpoint (day/week/month/year)
     async fn handle_metrics_level(
         &self,
         request: &HttpRequest,
@@ -702,7 +776,7 @@ impl TrafficApiHandler {
         let start_ms = now_ms.saturating_sub(retention_seconds * 1000);
         let end_ms = now_ms;
 
-        // Get the specific level's manager (day/week/month)
+        // Get the specific level's manager (day/week/month/year)
         let level_manager = match self.multi_level_ring_manager.get_manager_by_level(level) {
             Some(manager) => manager,
             None => {
@@ -786,4 +860,287 @@ impl TrafficApiHandler {
             Err(e) => Ok(HttpResponse::error(500, e.to_string())),
         }
     }
+
+    /// Handle /api/traffic/usage/ranking endpoint
+    /// Query device usage ranking within a specified time range from year-level data
+    /// Query parameters:
+    ///   - start_ms: Start timestamp in milliseconds (optional, defaults to 365 days ago)
+    ///   - end_ms: End timestamp in milliseconds (optional, defaults to now)
+    async fn handle_usage_ranking(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        // Get year-level manager
+        let year_manager = match self.multi_level_ring_manager.get_manager_by_level("year") {
+            Some(manager) => manager,
+            None => {
+                return Ok(HttpResponse::error(
+                    500,
+                    "Internal error: year level manager not found".to_string(),
+                ));
+            }
+        };
+
+        // Parse time range from query parameters
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        let start_ms = request
+            .query_params
+            .get("start_ms")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                // Default to 365 days ago
+                now_ms.saturating_sub(365 * 24 * 3600 * 1000)
+            });
+
+        let end_ms = request
+            .query_params
+            .get("end_ms")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(now_ms);
+
+        // Validate time range
+        if start_ms >= end_ms {
+            return Ok(HttpResponse::error(
+                400,
+                "Invalid time range: start_ms must be less than end_ms".to_string(),
+            ));
+        }
+
+        // Query statistics for all devices
+        let device_stats = match year_manager.query_stats_by_device(start_ms, end_ms) {
+            Ok(stats) => stats,
+            Err(e) => {
+                return Ok(HttpResponse::error(500, format!("Failed to query stats: {}", e)));
+            }
+        };
+
+        if device_stats.is_empty() {
+            let response = DeviceUsageRankingResponse {
+                start_ms,
+                end_ms,
+                total_bytes: 0,
+                device_count: 0,
+                rankings: Vec::new(),
+            };
+            let api_response = ApiResponse::success(response);
+            let body = serde_json::to_string(&api_response)?;
+            return Ok(HttpResponse::ok(body));
+        }
+
+        // Get hostname bindings and device info
+        let bindings_map = self.hostname_bindings.lock().unwrap();
+        let stats_map = self.mac_stats.lock().unwrap();
+        let baselines_map = self.baselines.lock().unwrap();
+
+        // Calculate total bytes and create ranking entries
+        let mut rankings: Vec<DeviceUsageRanking> = Vec::new();
+        let mut total_bytes = 0u64;
+
+        for (mac, stats) in device_stats.iter() {
+            let total_device_bytes = stats.wide_rx_bytes + stats.wide_tx_bytes;
+            total_bytes = total_bytes.saturating_add(total_device_bytes);
+
+            // Get device info (hostname, IP)
+            let mac_str = format_mac(mac);
+            let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
+
+            // Get IP address from current stats or baseline
+            let ip_address = if let Some(current_stats) = stats_map.get(mac) {
+                current_stats.ip_address
+            } else if let Some(baseline) = baselines_map.get(mac) {
+                baseline.ip_address
+            } else {
+                [0, 0, 0, 0]
+            };
+
+            let ip_str = format!(
+                "{}.{}.{}.{}",
+                ip_address[0], ip_address[1], ip_address[2], ip_address[3]
+            );
+
+            rankings.push(DeviceUsageRanking {
+                mac: mac_str,
+                hostname,
+                ip: ip_str,
+                total_bytes: total_device_bytes,
+                rx_bytes: stats.wide_rx_bytes,
+                tx_bytes: stats.wide_tx_bytes,
+                percentage: 0.0, // Will calculate after sorting
+                rank: 0,         // Will set after sorting
+            });
+        }
+
+        // Sort by total_bytes descending
+        rankings.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+
+        // Calculate percentages and set ranks
+        for (idx, ranking) in rankings.iter_mut().enumerate() {
+            ranking.rank = idx + 1;
+            if total_bytes > 0 {
+                ranking.percentage = (ranking.total_bytes as f64 / total_bytes as f64) * 100.0;
+            }
+        }
+
+        let response = DeviceUsageRankingResponse {
+            start_ms,
+            end_ms,
+            total_bytes,
+            device_count: rankings.len(),
+            rankings,
+        };
+
+        let api_response = ApiResponse::success(response);
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Handle /api/traffic/usage/increments endpoint
+    /// Query time series increments (hourly or daily) from year-level data
+    /// Query parameters:
+    ///   - mac: MAC address (optional, defaults to "all" for aggregate)
+    ///   - start_ms: Start timestamp in milliseconds (optional, defaults to 365 days ago)
+    ///   - end_ms: End timestamp in milliseconds (optional, defaults to now)
+    ///   - aggregation: "hourly" or "daily" (optional, defaults to "hourly")
+    async fn handle_usage_increments(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        // Get year-level manager
+        let year_manager = match self.multi_level_ring_manager.get_manager_by_level("year") {
+            Some(manager) => manager,
+            None => {
+                return Ok(HttpResponse::error(
+                    500,
+                    "Internal error: year level manager not found".to_string(),
+                ));
+            }
+        };
+
+        // Parse aggregation mode
+        let aggregation = request
+            .query_params
+            .get("aggregation")
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| "hourly".to_string());
+
+        if aggregation != "hourly" && aggregation != "daily" {
+            return Ok(HttpResponse::error(
+                400,
+                "Invalid aggregation: must be 'hourly' or 'daily'".to_string(),
+            ));
+        }
+
+        // Parse time range
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        let start_ms = request
+            .query_params
+            .get("start_ms")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                now_ms.saturating_sub(365 * 24 * 3600 * 1000)
+            });
+
+        let end_ms = request
+            .query_params
+            .get("end_ms")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(now_ms);
+
+        if start_ms >= end_ms {
+            return Ok(HttpResponse::error(
+                400,
+                "Invalid time range: start_ms must be less than end_ms".to_string(),
+            ));
+        }
+
+        // Query increments
+        let hourly_increments = if let Some(mac_str) = request.query_params.get("mac") {
+            if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                year_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
+            } else {
+                match crate::utils::network_utils::parse_mac_address(mac_str) {
+                    Ok(mac) => year_manager.query_time_series_increments(&mac, start_ms, end_ms)?,
+                    Err(e) => {
+                        return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e)));
+                    }
+                }
+            }
+        } else {
+            year_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
+        };
+
+        let mac_label = request
+            .query_params
+            .get("mac")
+            .cloned()
+            .unwrap_or_else(|| "all".to_string());
+
+        // Process increments based on aggregation mode
+        let increments = if aggregation == "daily" {
+            // Aggregate hourly increments into daily totals
+            aggregate_to_daily(hourly_increments)
+        } else {
+            // Use hourly increments as-is
+            hourly_increments
+                .into_iter()
+                .map(|(ts_ms, rx_bytes, tx_bytes)| TimeSeriesIncrement {
+                    ts_ms,
+                    rx_bytes,
+                    tx_bytes,
+                    total_bytes: rx_bytes + tx_bytes,
+                })
+                .collect()
+        };
+
+        // Calculate totals
+        let total_rx_bytes: u64 = increments.iter().map(|inc| inc.rx_bytes).sum();
+        let total_tx_bytes: u64 = increments.iter().map(|inc| inc.tx_bytes).sum();
+        let total_bytes = total_rx_bytes + total_tx_bytes;
+
+        let response = TimeSeriesIncrementResponse {
+            start_ms,
+            end_ms,
+            aggregation: aggregation.clone(),
+            mac: mac_label,
+            increments,
+            total_rx_bytes,
+            total_tx_bytes,
+            total_bytes,
+        };
+
+        let api_response = ApiResponse::success(response);
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+}
+
+/// Aggregate hourly increments into daily totals
+/// Groups increments by day (00:00:00 of each day)
+fn aggregate_to_daily(hourly_increments: Vec<(u64, u64, u64)>) -> Vec<TimeSeriesIncrement> {
+    use std::collections::BTreeMap;
+    
+    // Group by day (timestamp at 00:00:00 of each day)
+    let mut daily_map: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+    
+    for (ts_ms, rx_bytes, tx_bytes) in hourly_increments {
+        // Convert timestamp to start of day (00:00:00) in milliseconds
+        // 86400000 = 24 * 60 * 60 * 1000 (milliseconds per day)
+        let day_start_ms = (ts_ms / 86400000) * 86400000;
+        
+        let entry = daily_map.entry(day_start_ms).or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(rx_bytes);
+        entry.1 = entry.1.saturating_add(tx_bytes);
+    }
+    
+    daily_map
+        .into_iter()
+        .map(|(ts_ms, (rx_bytes, tx_bytes))| TimeSeriesIncrement {
+            ts_ms,
+            rx_bytes,
+            tx_bytes,
+            total_bytes: rx_bytes + tx_bytes,
+        })
+        .collect()
 }
