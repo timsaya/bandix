@@ -376,6 +376,7 @@ impl TrafficMonitor {
 
             // Lookup baseline for current MAC (default zeros)
             let b = baseline_map.get(mac).copied().unwrap_or(BaselineTotals {
+                ip_address: [0, 0, 0, 0],
                 total_rx_bytes: 0,
                 total_tx_bytes: 0,
                 local_rx_bytes: 0,

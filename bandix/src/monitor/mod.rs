@@ -245,6 +245,7 @@ impl ModuleType {
                 // Create traffic API handler
                 let handler = ApiHandler::Traffic(TrafficApiHandler::new(
                     Arc::clone(&traffic_ctx.mac_stats),
+                    Arc::clone(&traffic_ctx.baselines),
                     Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
                     Arc::clone(&traffic_ctx.realtime_ring_manager),

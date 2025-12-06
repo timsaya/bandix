@@ -1,7 +1,7 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::storage::traffic::{
-    self, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
+    self, BaselineTotals, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
 };
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
@@ -154,6 +154,7 @@ pub struct DeleteScheduledLimitRequest {
 #[derive(Clone)]
 pub struct TrafficApiHandler {
     mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+    baselines: Arc<Mutex<HashMap<[u8; 6], BaselineTotals>>>, // Historical device baselines
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
@@ -164,6 +165,7 @@ pub struct TrafficApiHandler {
 impl TrafficApiHandler {
     pub fn new(
         mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
+        baselines: Arc<Mutex<HashMap<[u8; 6], BaselineTotals>>>,
         scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         realtime_ring_manager: Arc<RealtimeRingManager>,
@@ -172,6 +174,7 @@ impl TrafficApiHandler {
     ) -> Self {
         Self {
             mac_stats,
+            baselines,
             scheduled_rate_limits,
             hostname_bindings,
             realtime_ring_manager,
@@ -251,47 +254,87 @@ impl TrafficApiHandler {
     /// Handle /api/devices endpoint
     async fn handle_devices(&self) -> Result<HttpResponse, anyhow::Error> {
         let stats_map = self.mac_stats.lock().unwrap();
+        let baselines_map = self.baselines.lock().unwrap();
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
         // Get IPv6 neighbor table from system
         let ipv6_neighbors = crate::utils::network_utils::get_ipv6_neighbors().unwrap_or_default();
 
-        // Only show devices actually collected by eBPF (last_sample_ts > 0)
-        let filtered: Vec<(&[u8; 6], &MacTrafficStats)> = stats_map
-            .iter()
-            .filter(|(_mac, stats)| stats.last_sample_ts > 0)
-            .collect();
+        // Collect all devices: current (from mac_stats) and historical (from baselines)
+        use std::collections::HashSet;
+        let mut all_macs: HashSet<[u8; 6]> = HashSet::new();
+        
+        // Add current devices (with last_sample_ts > 0)
+        for (mac, stats) in stats_map.iter() {
+            if stats.last_sample_ts > 0 {
+                all_macs.insert(*mac);
+            }
+        }
+        
+        // Add historical devices (from baselines)
+        for mac in baselines_map.keys() {
+            all_macs.insert(*mac);
+        }
 
-        let devices: Vec<DeviceInfo> = filtered
+        let devices: Vec<DeviceInfo> = all_macs
             .into_iter()
-            .map(|(mac, stats)| {
+            .map(|mac| {
                 // Format MAC address
-                let mac_str = format_mac(mac);
+                let mac_str = format_mac(&mac);
+
+                // Try to get current stats, otherwise use baseline
+                let (ip_address, total_rx_bytes, total_tx_bytes, total_rx_rate, total_tx_rate,
+                     wide_rx_rate_limit, wide_tx_rate_limit, local_rx_bytes, local_tx_bytes,
+                     local_rx_rate, local_tx_rate, wide_rx_bytes, wide_tx_bytes,
+                     wide_rx_rate, wide_tx_rate, last_online_ts, ipv6_count, ipv6_addresses_from_stats) = 
+                    if let Some(stats) = stats_map.get(&mac) {
+                        // Current device - use stats from mac_stats
+                        (stats.ip_address, stats.total_rx_bytes, stats.total_tx_bytes,
+                         stats.total_rx_rate, stats.total_tx_rate,
+                         stats.wide_rx_rate_limit, stats.wide_tx_rate_limit,
+                         stats.local_rx_bytes, stats.local_tx_bytes,
+                         stats.local_rx_rate, stats.local_tx_rate,
+                         stats.wide_rx_bytes, stats.wide_tx_bytes,
+                         stats.wide_rx_rate, stats.wide_tx_rate,
+                         stats.last_online_ts, stats.ipv6_count, stats.ipv6_addresses)
+                    } else if let Some(baseline) = baselines_map.get(&mac) {
+                        // Historical device - use baseline data, rates are 0 (offline)
+                        (baseline.ip_address, baseline.total_rx_bytes, baseline.total_tx_bytes,
+                         0, 0, // rates are 0 for offline devices
+                         0, 0, // rate limits are 0 for offline devices
+                         baseline.local_rx_bytes, baseline.local_tx_bytes,
+                         0, 0, // rates are 0 for offline devices
+                         baseline.wide_rx_bytes, baseline.wide_tx_bytes,
+                         0, 0, // rates are 0 for offline devices
+                         baseline.last_online_ts, 0, [[0u8; 16]; 16])
+                    } else {
+                        // Should not happen, but provide defaults
+                        ([0, 0, 0, 0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [[0u8; 16]; 16])
+                    };
 
                 // Format IP address
                 let ip_str = format!(
                     "{}.{}.{}.{}",
-                    stats.ip_address[0],
-                    stats.ip_address[1],
-                    stats.ip_address[2],
-                    stats.ip_address[3]
+                    ip_address[0],
+                    ip_address[1],
+                    ip_address[2],
+                    ip_address[3]
                 );
 
                 // Get IPv6 addresses for this MAC
-                // Combine addresses from both eBPF stats and system neighbor table
-                let mut ipv6_addresses_set: std::collections::HashSet<[u8; 16]> =
-                    std::collections::HashSet::new();
+                // Combine addresses from eBPF stats, baseline, and system neighbor table
+                let mut ipv6_addresses_set: HashSet<[u8; 16]> = HashSet::new();
 
-                // First, add IPv6 addresses from eBPF stats
-                for i in 0..(stats.ipv6_count as usize) {
-                    let addr = stats.ipv6_addresses[i];
+                // First, add IPv6 addresses from eBPF stats (if current device)
+                for i in 0..(ipv6_count as usize) {
+                    let addr = ipv6_addresses_from_stats[i];
                     if addr != [0u8; 16] {
                         ipv6_addresses_set.insert(addr);
                     }
                 }
 
                 // Then, add IPv6 addresses from system neighbor table
-                if let Some(addrs) = ipv6_neighbors.get(mac) {
+                if let Some(addrs) = ipv6_neighbors.get(&mac) {
                     for addr in addrs {
                         if *addr != [0u8; 16] {
                             ipv6_addresses_set.insert(*addr);
@@ -309,30 +352,31 @@ impl TrafficApiHandler {
                 ipv6_addresses.sort();
 
                 // Get hostname from bindings, fallback to empty string if not found
-                let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
+                let hostname = bindings_map.get(&mac).cloned().unwrap_or_default();
 
                 DeviceInfo {
                     ip: ip_str,
                     ipv6_addresses,
                     mac: mac_str,
                     hostname,
-                    total_rx_bytes: stats.total_rx_bytes,
-                    total_tx_bytes: stats.total_tx_bytes,
-                    total_rx_rate: stats.total_rx_rate,
-                    total_tx_rate: stats.total_tx_rate,
-                    wide_rx_rate_limit: stats.wide_rx_rate_limit,
-                    wide_tx_rate_limit: stats.wide_tx_rate_limit,
-                    local_rx_bytes: stats.local_rx_bytes,
-                    local_tx_bytes: stats.local_tx_bytes,
-                    local_rx_rate: stats.local_rx_rate,
-                    local_tx_rate: stats.local_tx_rate,
-                    wide_rx_bytes: stats.wide_rx_bytes,
-                    wide_tx_bytes: stats.wide_tx_bytes,
-                    wide_rx_rate: stats.wide_rx_rate,
-                    wide_tx_rate: stats.wide_tx_rate,
-                    last_online_ts: stats.last_online_ts,
+                    total_rx_bytes,
+                    total_tx_bytes,
+                    total_rx_rate,
+                    total_tx_rate,
+                    wide_rx_rate_limit,
+                    wide_tx_rate_limit,
+                    local_rx_bytes,
+                    local_tx_bytes,
+                    local_rx_rate,
+                    local_tx_rate,
+                    wide_rx_bytes,
+                    wide_tx_bytes,
+                    wide_rx_rate,
+                    wide_tx_rate,
+                    last_online_ts,
                 }
             })
+            .filter(|device| device.last_online_ts > 0) // Filter out devices that never had transmit traffic
             .collect();
 
         let response = DevicesResponse { devices };

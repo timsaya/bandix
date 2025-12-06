@@ -167,14 +167,26 @@ const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring magic
 // ============================================================================
 /// Real-time ring file format version
 /// Version 2: slot adds last_online_ts field
-const RING_VERSION_REALTIME: u32 = 2;
+/// Version 3: slot adds ip_address field (IPv4 address stored as u64, low 32 bits)
+const RING_VERSION_REALTIME_V2: u32 = 2;
+const RING_VERSION_REALTIME_V3: u32 = 3;
+const RING_VERSION_REALTIME: u32 = RING_VERSION_REALTIME_V3; // Current version
 
 // Per-slot structure for real-time data (little-endian):
-// ts_ms: u64
-// total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
-// last_online_ts: u64
-// Slot size = 14 * 8 = 112 bytes (since v2)
-const SLOT_U64S_REALTIME: usize = 14;
+// Version 2:
+//   ts_ms: u64
+//   total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
+//   last_online_ts: u64
+//   Slot size = 14 * 8 = 112 bytes
+// Version 3:
+//   ts_ms: u64
+//   total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
+//   last_online_ts: u64
+//   ip_address: u64 (IPv4 address stored in low 32 bits, high 32 bits are 0)
+//   Slot size = 15 * 8 = 120 bytes
+const SLOT_U64S_REALTIME_V2: usize = 14;
+const SLOT_U64S_REALTIME_V3: usize = 15;
+const SLOT_U64S_REALTIME: usize = SLOT_U64S_REALTIME_V3; // Current version
 const SLOT_SIZE_REALTIME: usize = SLOT_U64S_REALTIME * 8;
 
 // ============================================================================
@@ -537,6 +549,15 @@ impl RealtimeRingManager {
                 .entry(*mac)
                 .or_insert_with(|| RealtimeRing::new(self.capacity));
 
+            // Convert IPv4 address [u8; 4] to u64 (stored in low 32 bits)
+            let ip_address_u64 = u64::from_le_bytes([
+                s.ip_address[0],
+                s.ip_address[1],
+                s.ip_address[2],
+                s.ip_address[3],
+                0, 0, 0, 0,
+            ]);
+
             let rec: [u64; SLOT_U64S_REALTIME] = [
                 ts_ms,
                 s.total_rx_rate,
@@ -552,6 +573,7 @@ impl RealtimeRingManager {
                 s.wide_rx_bytes,
                 s.wide_tx_bytes,
                 s.last_online_ts,
+                ip_address_u64, // IPv4 address (v3)
             ];
 
             ring.insert(ts_ms, &rec);
@@ -703,7 +725,7 @@ impl RealtimeRingManager {
             // Load from file to memory
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_REALTIME {
+                    if ver == RING_VERSION_REALTIME_V2 || ver == RING_VERSION_REALTIME_V3 {
                         if cap != self.capacity {
                             log::warn!(
                                 "Skipping ring file {:?} with capacity {} (expected {}), file should have been deleted",
@@ -717,9 +739,24 @@ impl RealtimeRingManager {
                         let mut ring = RealtimeRing::new(self.capacity);
 
                         for i in 0..(self.capacity as u64) {
-                            if let Ok(slot) = read_slot(&f, i) {
-                                if slot[0] != 0 {
-                                    ring.slots[i as usize] = slot;
+                            if ver == RING_VERSION_REALTIME_V2 {
+                                // Read v2 slot and convert to v3
+                                if let Ok(v2_slot) = read_slot_v2(&f, i) {
+                                    if v2_slot[0] != 0 {
+                                        let mut v3_slot = [0u64; SLOT_U64S_REALTIME];
+                                        for j in 0..SLOT_U64S_REALTIME_V2 {
+                                            v3_slot[j] = v2_slot[j];
+                                        }
+                                        // IP address remains 0 for v2 data
+                                        ring.slots[i as usize] = v3_slot;
+                                    }
+                                }
+                            } else {
+                                // Read v3 slot
+                                if let Ok(slot) = read_slot(&f, i) {
+                                    if slot[0] != 0 {
+                                        ring.slots[i as usize] = slot;
+                                    }
                                 }
                             }
                         }
@@ -1244,10 +1281,10 @@ fn ensure_parent_dir(path: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn write_header(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
+fn write_header(f: &mut File, capacity: u32, version: u32) -> Result<(), anyhow::Error> {
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&RING_MAGIC)?;
-    f.write_all(&RING_VERSION_REALTIME.to_le_bytes())?;
+    f.write_all(&version.to_le_bytes())?;
     f.write_all(&capacity.to_le_bytes())?;
     Ok(())
 }
@@ -1286,7 +1323,7 @@ fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
     if metadata.len() != expected_size {
         // Reinitialize
         f.set_len(0)?;
-        write_header(&mut f, cap)?;
+        write_header(&mut f, cap, RING_VERSION_REALTIME)?;
         // Write zeroed slot area
         let zero_chunk = vec![0u8; 4096];
         let mut remaining = expected_size - HEADER_SIZE as u64;
@@ -1298,7 +1335,40 @@ fn init_ring_file(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
         f.flush()?;
     } else {
         // Validate header
-        let _ = read_header(&mut f)?;
+        let (ver, _cap) = read_header(&mut f)?;
+        // If file is v2 format, upgrade to v3 by rewriting with new format
+        if ver == RING_VERSION_REALTIME_V2 {
+            log::info!("Upgrading ring file from v2 to v3 format");
+            // Read all v2 slots
+            let mut v2_slots = Vec::new();
+            for i in 0..(cap as u64) {
+                if let Ok(slot) = read_slot_v2(&f, i) {
+                    if slot[0] != 0 {
+                        v2_slots.push((i, slot));
+                    }
+                }
+            }
+            // Rewrite file as v3
+            f.set_len(0)?;
+            write_header(&mut f, cap, RING_VERSION_REALTIME)?;
+            let zero_chunk = vec![0u8; 4096];
+            let mut remaining = expected_size - HEADER_SIZE as u64;
+            while remaining > 0 {
+                let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
+                f.write_all(&zero_chunk[..to_write])?;
+                remaining -= to_write as u64;
+            }
+            // Write v2 slots as v3 (with IP address = 0)
+            for (idx, v2_slot) in v2_slots {
+                let mut v3_slot = [0u64; SLOT_U64S_REALTIME];
+                for i in 0..SLOT_U64S_REALTIME_V2 {
+                    v3_slot[i] = v2_slot[i];
+                }
+                // IP address remains 0 (unknown for old data)
+                write_slot(&f, idx, &v3_slot)?;
+            }
+            f.flush()?;
+        }
     }
     Ok(f)
 }
@@ -1333,9 +1403,26 @@ fn write_slot(
     Ok(())
 }
 
+// Read slot for v2 format (14 u64s)
+fn read_slot_v2(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_REALTIME_V2], anyhow::Error> {
+    let slot_size_v2 = SLOT_U64S_REALTIME_V2 * 8;
+    let offset = HEADER_SIZE as u64 + idx * (slot_size_v2 as u64);
+    let mut bytes = vec![0u8; slot_size_v2];
+    f.seek(SeekFrom::Start(offset))?;
+    f.read_exact(&mut bytes)?;
+    let mut out = [0u64; SLOT_U64S_REALTIME_V2];
+    for i in 0..SLOT_U64S_REALTIME_V2 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        out[i] = u64::from_le_bytes(b);
+    }
+    Ok(out)
+}
+
+// Read slot for v3 format (15 u64s)
 fn read_slot(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_REALTIME], anyhow::Error> {
     let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_REALTIME as u64);
-    let mut bytes = [0u8; SLOT_SIZE_REALTIME];
+    let mut bytes = vec![0u8; SLOT_SIZE_REALTIME];
     f.seek(SeekFrom::Start(offset))?;
     f.read_exact(&mut bytes)?;
     let mut out = [0u64; SLOT_U64S_REALTIME];
@@ -1651,6 +1738,7 @@ pub struct MetricsRowWithStats {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineTotals {
+    pub ip_address: [u8; 4], // IPv4 address from ring file
     pub total_rx_bytes: u64,
     pub total_tx_bytes: u64,
     pub local_rx_bytes: u64,
@@ -1698,23 +1786,51 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
 
         let mut f = OpenOptions::new().read(true).open(&path)?;
         let (ver, cap) = read_header(&mut f)?;
-        if ver != RING_VERSION_REALTIME {
+        if ver != RING_VERSION_REALTIME_V2 && ver != RING_VERSION_REALTIME_V3 {
             continue;
         }
-        let mut best: Option<[u64; SLOT_U64S_REALTIME]> = None;
+        let mut best: Option<([u64; SLOT_U64S_REALTIME], u32)> = None;
         for i in 0..(cap as u64) {
-            let rec = read_slot(&f, i)?;
-            if rec[0] == 0 {
-                continue;
-            }
-            if best.as_ref().map(|b| rec[0] > b[0]).unwrap_or(true) {
-                best = Some(rec);
+            let rec = if ver == RING_VERSION_REALTIME_V2 {
+                // Read v2 and convert to v3
+                if let Ok(v2_rec) = read_slot_v2(&f, i) {
+                    if v2_rec[0] == 0 {
+                        continue;
+                    }
+                    let mut v3_rec = [0u64; SLOT_U64S_REALTIME];
+                    for j in 0..SLOT_U64S_REALTIME_V2 {
+                        v3_rec[j] = v2_rec[j];
+                    }
+                    // IP address remains 0
+                    v3_rec
+                } else {
+                    continue;
+                }
+            } else {
+                // Read v3
+                if let Ok(v3_rec) = read_slot(&f, i) {
+                    if v3_rec[0] == 0 {
+                        continue;
+                    }
+                    v3_rec
+                } else {
+                    continue;
+                }
+            };
+            
+            if best.as_ref().map(|(b, _)| rec[0] > b[0]).unwrap_or(true) {
+                best = Some((rec, ver));
             }
         }
-        if let Some(rec) = best {
+        if let Some((rec, _ver)) = best {
+            // Extract IPv4 address from u64 (low 32 bits)
+            let ip_bytes = rec[14].to_le_bytes();
+            let ip_address = [ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]];
+            
             out.push((
                 mac,
                 BaselineTotals {
+                    ip_address,
                     total_rx_bytes: rec[7],
                     total_tx_bytes: rec[8],
                     local_rx_bytes: rec[9],
