@@ -5,6 +5,7 @@ use crate::storage::traffic::{
 };
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::MacTrafficStats;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -71,6 +72,8 @@ pub struct DeviceUsageRankingResponse {
     pub start_ms: u64,
     pub end_ms: u64,
     pub total_bytes: u64,         // Total bytes across all devices
+    pub total_rx_bytes: u64,      // Total receive bytes across all devices
+    pub total_tx_bytes: u64,      // Total transmit bytes across all devices
     pub device_count: usize,      // Number of devices
     pub rankings: Vec<DeviceUsageRanking>,
 }
@@ -920,6 +923,8 @@ impl TrafficApiHandler {
                 start_ms,
                 end_ms,
                 total_bytes: 0,
+                total_rx_bytes: 0,
+                total_tx_bytes: 0,
                 device_count: 0,
                 rankings: Vec::new(),
             };
@@ -936,10 +941,14 @@ impl TrafficApiHandler {
         // Calculate total bytes and create ranking entries
         let mut rankings: Vec<DeviceUsageRanking> = Vec::new();
         let mut total_bytes = 0u64;
+        let mut total_rx_bytes = 0u64;
+        let mut total_tx_bytes = 0u64;
 
         for (mac, stats) in device_stats.iter() {
             let total_device_bytes = stats.wide_rx_bytes + stats.wide_tx_bytes;
             total_bytes = total_bytes.saturating_add(total_device_bytes);
+            total_rx_bytes = total_rx_bytes.saturating_add(stats.wide_rx_bytes);
+            total_tx_bytes = total_tx_bytes.saturating_add(stats.wide_tx_bytes);
 
             // Get device info (hostname, IP)
             let mac_str = format_mac(mac);
@@ -986,6 +995,8 @@ impl TrafficApiHandler {
             start_ms,
             end_ms,
             total_bytes,
+            total_rx_bytes,
+            total_tx_bytes,
             device_count: rankings.len(),
             rankings,
         };
@@ -1080,7 +1091,7 @@ impl TrafficApiHandler {
         // Process increments based on aggregation mode
         let increments = if aggregation == "daily" {
             // Aggregate hourly increments into daily totals
-            aggregate_to_daily(hourly_increments)
+            aggregate_to_daily(hourly_increments, start_ms, end_ms)
         } else {
             // Use hourly increments as-is
             hourly_increments
@@ -1117,25 +1128,40 @@ impl TrafficApiHandler {
 }
 
 /// Aggregate hourly increments into daily totals
-/// Groups increments by day (00:00:00 of each day)
-fn aggregate_to_daily(hourly_increments: Vec<(u64, u64, u64)>) -> Vec<TimeSeriesIncrement> {
+/// Groups increments by day (00:00:00 UTC of each day)
+/// Filters out days that are not within the requested time range [start_ms, end_ms)
+fn aggregate_to_daily(
+    hourly_increments: Vec<(u64, u64, u64)>,
+    start_ms: u64,
+    end_ms: u64,
+) -> Vec<TimeSeriesIncrement> {
     use std::collections::BTreeMap;
     
-    // Group by day (timestamp at 00:00:00 of each day)
+    // Group by day (timestamp at 00:00:00 UTC of each day)
     let mut daily_map: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
     
     for (ts_ms, rx_bytes, tx_bytes) in hourly_increments {
-        // Convert timestamp to start of day (00:00:00) in milliseconds
-        // 86400000 = 24 * 60 * 60 * 1000 (milliseconds per day)
-        let day_start_ms = (ts_ms / 86400000) * 86400000;
+        // Convert timestamp to start of day (00:00:00 UTC) in milliseconds
+        // Use chrono to properly handle UTC timezone
+        let ts_secs = (ts_ms / 1000) as i64;
+        let dt = DateTime::<Utc>::from_timestamp(ts_secs, 0)
+            .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+        
+        // Get the date at 00:00:00 UTC
+        let day_start_dt = dt.date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let day_start_utc = DateTime::<Utc>::from_naive_utc_and_offset(day_start_dt, Utc);
+        let day_start_ms = day_start_utc.timestamp_millis() as u64;
         
         let entry = daily_map.entry(day_start_ms).or_insert((0, 0));
         entry.0 = entry.0.saturating_add(rx_bytes);
         entry.1 = entry.1.saturating_add(tx_bytes);
     }
     
+    // Filter out days that are not within the requested time range
+    // A day is included if its start timestamp (00:00:00 UTC) is within [start_ms, end_ms)
     daily_map
         .into_iter()
+        .filter(|(ts_ms, _)| *ts_ms >= start_ms && *ts_ms < end_ms)
         .map(|(ts_ms, (rx_bytes, tx_bytes))| TimeSeriesIncrement {
             ts_ms,
             rx_bytes,
