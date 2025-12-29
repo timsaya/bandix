@@ -185,7 +185,7 @@ impl TrafficMonitor {
         false
     }
 
-    fn collect_mac_ipv4_mapping(
+    fn read_ipv4_mapping_from_ebpf(
         &self,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u8; 4]>, anyhow::Error> {
@@ -205,7 +205,7 @@ impl TrafficMonitor {
         Ok(mac_ip_mapping)
     }
 
-    fn collect_mac_ipv6_mapping(
+    fn read_ipv6_mapping_from_ebpf(
         &self,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u8; 16]>, anyhow::Error> {
@@ -225,7 +225,7 @@ impl TrafficMonitor {
         Ok(mac_ipv6_mapping)
     }
 
-    fn collect_traffic_data(
+    fn read_traffic_data_from_ebpf(
         &self,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u64; 4]>, anyhow::Error> {
@@ -279,9 +279,9 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
-        let mac_ipv4_mapping = self.collect_mac_ipv4_mapping(ebpf)?;
-        let mac_ipv6_mapping = self.collect_mac_ipv6_mapping(ebpf)?;
-        let traffic_data = self.collect_traffic_data(ebpf)?;
+        let mac_ipv4_mapping = self.read_ipv4_mapping_from_ebpf(ebpf)?;
+        let mac_ipv6_mapping = self.read_ipv6_mapping_from_ebpf(ebpf)?;
+        let traffic_data = self.read_traffic_data_from_ebpf(ebpf)?;
 
         let raw_device_traffic =
             self.build_raw_device_traffic(&traffic_data, &mac_ipv4_mapping)?;
