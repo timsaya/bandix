@@ -3,12 +3,12 @@ use crate::storage::traffic::BaselineTotals;
 use anyhow::Result;
 use aya::maps::HashMap;
 use aya::maps::MapData;
-use bandix_common::MacTrafficStats;
+use bandix_common::DeviceTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-struct TrafficData {
+struct RawTrafficData {
     pub ip_address: [u8; 4],
     pub local_tx_bytes: u64, // Local network send bytes
     pub local_rx_bytes: u64, // Local network receive bytes
@@ -24,29 +24,28 @@ impl TrafficMonitor {
         TrafficMonitor
     }
 
-    /// Start traffic monitoring (includes internal loop)
     pub async fn start(
         &self,
         ctx: &mut TrafficModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        // Start internal loop
         self.start_monitoring_loop(ctx, shutdown_notify).await
     }
 
-    /// Traffic monitoring internal loop
     async fn start_monitoring_loop(
         &self,
         ctx: &mut TrafficModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-        
+
         // Only create flush interval if persistence is enabled
         if ctx.options.traffic_persist_history() {
-            self.start_monitoring_loop_with_persist(ctx, interval, shutdown_notify).await
+            self.start_monitoring_loop_with_persist(ctx, interval, shutdown_notify)
+                .await
         } else {
-            self.start_monitoring_loop_memory_only(ctx, interval, shutdown_notify).await
+            self.start_monitoring_loop_memory_only(ctx, interval, shutdown_notify)
+                .await
         }
     }
 
@@ -58,7 +57,7 @@ impl TrafficMonitor {
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            ctx.options.traffic_flush_interval_seconds() as u64
+            ctx.options.traffic_flush_interval_seconds() as u64,
         ));
 
         loop {
@@ -68,7 +67,7 @@ impl TrafficMonitor {
                 }
                 _ = flush_interval.tick() => {
                     // Flush dirty rings to disk at configured interval
-                    log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...", 
+                    log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...",
                                ctx.options.traffic_flush_interval_seconds());
                     // Flush original ring manager
                     if let Err(e) = ctx.realtime_ring_manager.flush_dirty_rings().await {
@@ -99,7 +98,6 @@ impl TrafficMonitor {
         Ok(())
     }
 
-    /// Traffic monitoring loop with memory-only (no persistence)
     async fn start_monitoring_loop_memory_only(
         &self,
         ctx: &mut TrafficModuleContext,
@@ -121,9 +119,7 @@ impl TrafficMonitor {
         Ok(())
     }
 
-    /// Process one monitoring cycle (extract eBPF data and update stats)
     async fn process_monitoring_cycle(&self, ctx: &mut TrafficModuleContext) {
-        // Get eBPF program (ingress and egress share the same eBPF object and maps)
         let ingress_ebpf = match ctx.ingress_ebpf.as_ref() {
             Some(ebpf) => Arc::clone(ebpf),
             None => {
@@ -132,35 +128,37 @@ impl TrafficMonitor {
             }
         };
 
-        // Process traffic data (using ingress_ebpf since both share the same maps)
         if let Err(e) = self.process_traffic_data(ctx, &ingress_ebpf) {
             log::error!("Failed to process traffic data: {}", e);
         }
 
-        // Update rate limits (using ingress_ebpf since both share the same maps)
         if let Err(e) = self.apply_rate_limits(ctx, &ingress_ebpf) {
             log::error!("Failed to update rate limits: {}", e);
         }
 
-        // Execute metrics persistence to memory ring
-        use std::time::{SystemTime, UNIX_EPOCH};
         let ts_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(std::time::Duration::from_secs(0))
             .as_millis() as u64;
 
-        let snapshot: Vec<([u8; 6], MacTrafficStats)> = {
-            let stats = ctx.mac_stats.lock().unwrap();
+        let snapshot: Vec<([u8; 6], DeviceTrafficStats)> = {
+            let stats = ctx.device_traffic_stats.lock().unwrap();
             stats.iter().map(|(k, v)| (*k, *v)).collect()
         };
 
         // Insert into original 1-second sampling ring (always)
-        if let Err(e) = ctx.realtime_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
+        if let Err(e) = ctx
+            .realtime_ring_manager
+            .insert_metrics_batch(ts_ms, &snapshot)
+        {
             log::error!("metrics persist to memory ring error: {}", e);
         }
 
         // Insert into multi-level sampling rings (day/week/month/year) based on sampling intervals
-        if let Err(e) = ctx.multi_level_ring_manager.insert_metrics_batch(ts_ms, &snapshot) {
+        if let Err(e) = ctx
+            .multi_level_ring_manager
+            .insert_metrics_batch(ts_ms, &snapshot)
+        {
             log::error!("metrics persist to multi-level ring error: {}", e);
         }
     }
@@ -187,7 +185,7 @@ impl TrafficMonitor {
         false
     }
 
-    fn collect_mac_ip_mapping(
+    fn collect_mac_ipv4_mapping(
         &self,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u8; 4]>, anyhow::Error> {
@@ -195,8 +193,7 @@ impl TrafficMonitor {
 
         // Since ingress and egress share the same eBPF object and maps, we only need to read once
         let mac_ip_mapping_map = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
-            ebpf
-                .map("MAC_IPV4_MAPPING")
+            ebpf.map("MAC_IPV4_MAPPING")
                 .ok_or(anyhow::anyhow!("Cannot find MAC_IPV4_MAPPING map"))?,
         )?;
 
@@ -216,8 +213,7 @@ impl TrafficMonitor {
 
         // Since ingress and egress share the same eBPF object and maps, we only need to read once
         let mac_ipv6_mapping_map = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
-            ebpf
-                .map("MAC_IPV6_MAPPING")
+            ebpf.map("MAC_IPV6_MAPPING")
                 .ok_or(anyhow::anyhow!("Cannot find MAC_IPV6_MAPPING map"))?,
         )?;
 
@@ -237,8 +233,7 @@ impl TrafficMonitor {
 
         // Since ingress and egress share the same eBPF object and maps, we only need to read once
         let traffic_map = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
-            ebpf
-                .map("MAC_TRAFFIC")
+            ebpf.map("MAC_TRAFFIC")
                 .ok_or(anyhow::anyhow!("Cannot find MAC_TRAFFIC map"))?,
         )?;
 
@@ -254,18 +249,18 @@ impl TrafficMonitor {
         Ok(traffic_data)
     }
 
-    fn merge(
+    fn build_device_traffic_data(
         &self,
         traffic_data: &StdHashMap<[u8; 6], [u64; 4]>,
         mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
-    ) -> Result<StdHashMap<[u8; 6], TrafficData>, anyhow::Error> {
+    ) -> Result<StdHashMap<[u8; 6], RawTrafficData>, anyhow::Error> {
         let mut traffic = StdHashMap::new();
 
         for (mac, ip) in mac_ip_mapping.iter() {
             if let Some(data) = traffic_data.get(mac) {
                 traffic.insert(
                     *mac,
-                    TrafficData {
+                    RawTrafficData {
                         ip_address: *ip,
                         local_tx_bytes: data[0], // Local network send
                         local_rx_bytes: data[1], // Local network receive
@@ -284,25 +279,25 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
-        let mac_ip_mapping = self.collect_mac_ip_mapping(ebpf)?;
+        let mac_ipv4_mapping = self.collect_mac_ipv4_mapping(ebpf)?;
         let mac_ipv6_mapping = self.collect_mac_ipv6_mapping(ebpf)?;
         let traffic_data = self.collect_traffic_data(ebpf)?;
 
-        let device_traffic_stats = self.merge(&traffic_data, &mac_ip_mapping)?;
+        let raw_device_traffic =
+            self.build_device_traffic_data(&traffic_data, &mac_ipv4_mapping)?;
 
-        // Get current timestamp
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
 
-        let mut stats_map = ctx.mac_stats.lock().unwrap();
+        let mut stats_map = ctx.device_traffic_stats.lock().unwrap();
         let baseline_map = ctx.baselines.lock().unwrap();
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
-        for (mac, traffic_data) in device_traffic_stats.iter() {
-            let stats = stats_map.entry(*mac).or_insert_with(|| MacTrafficStats {
-                ip_address: traffic_data.ip_address,
+        for (mac, raw_traffic) in raw_device_traffic.iter() {
+            let stats = stats_map.entry(*mac).or_insert_with(|| DeviceTrafficStats {
+                ip_address: raw_traffic.ip_address,
                 ipv6_addresses: [[0; 16]; 16],
                 ipv6_count: 0,
                 // Total traffic statistics
@@ -336,17 +331,19 @@ impl TrafficMonitor {
             });
 
             // Calculate current effective rate limit from scheduled rules
-            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac) {
+            if let Some(limits) =
+                crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac)
+            {
                 stats.wide_rx_rate_limit = limits[0];
                 stats.wide_tx_rate_limit = limits[1];
             }
 
             // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
             // overwrite with the latest IP collected by eBPF to avoid staying at 0.0.0.0.
-            if traffic_data.ip_address != [0, 0, 0, 0]
-                && stats.ip_address != traffic_data.ip_address
+            if raw_traffic.ip_address != [0, 0, 0, 0]
+                && stats.ip_address != raw_traffic.ip_address
             {
-                stats.ip_address = traffic_data.ip_address;
+                stats.ip_address = raw_traffic.ip_address;
             }
 
             // Update IPv6 addresses from eBPF map
@@ -361,7 +358,7 @@ impl TrafficMonitor {
                             break;
                         }
                     }
-                    
+
                     // Add new IPv6 address if not found and we have space (up to 16)
                     if !found && (stats.ipv6_count as usize) < 16 {
                         stats.ipv6_addresses[stats.ipv6_count as usize] = *ipv6_addr;
@@ -371,8 +368,8 @@ impl TrafficMonitor {
             }
 
             // Calculate total traffic
-            let total_rx_bytes = traffic_data.local_rx_bytes + traffic_data.wide_rx_bytes;
-            let total_tx_bytes = traffic_data.local_tx_bytes + traffic_data.wide_tx_bytes;
+            let total_rx_bytes = raw_traffic.local_rx_bytes + raw_traffic.wide_rx_bytes;
+            let total_tx_bytes = raw_traffic.local_tx_bytes + raw_traffic.wide_tx_bytes;
 
             // Lookup baseline for current MAC (default zeros)
             let b = baseline_map.get(mac).copied().unwrap_or(BaselineTotals {
@@ -391,12 +388,12 @@ impl TrafficMonitor {
             stats.total_tx_bytes = total_tx_bytes + b.total_tx_bytes;
 
             // Update local network traffic with baseline added
-            stats.local_rx_bytes = traffic_data.local_rx_bytes + b.local_rx_bytes;
-            stats.local_tx_bytes = traffic_data.local_tx_bytes + b.local_tx_bytes;
+            stats.local_rx_bytes = raw_traffic.local_rx_bytes + b.local_rx_bytes;
+            stats.local_tx_bytes = raw_traffic.local_tx_bytes + b.local_tx_bytes;
 
             // Update cross-network traffic with baseline added
-            stats.wide_rx_bytes = traffic_data.wide_rx_bytes + b.wide_rx_bytes;
-            stats.wide_tx_bytes = traffic_data.wide_tx_bytes + b.wide_tx_bytes;
+            stats.wide_rx_bytes = raw_traffic.wide_rx_bytes + b.wide_rx_bytes;
+            stats.wide_tx_bytes = raw_traffic.wide_tx_bytes + b.wide_tx_bytes;
 
             // If we have baseline last_online_ts and current value is zero, seed it to avoid startup gap
             if stats.last_online_ts == 0 && b.last_online_ts > 0 {
@@ -473,24 +470,28 @@ impl TrafficMonitor {
     ) -> Result<(), anyhow::Error> {
         // Calculate current effective rate limits from scheduled rules
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
-        
+
         // Collect all unique MAC addresses from scheduled limits
         use std::collections::HashSet;
         let macs: HashSet<[u8; 6]> = scheduled_limits.iter().map(|r| r.mac).collect();
-        
+
         // Calculate current effective limits for each MAC
-        let mut effective_limits: std::collections::HashMap<[u8; 6], [u64; 2]> = std::collections::HashMap::new();
+        let mut effective_limits: std::collections::HashMap<[u8; 6], [u64; 2]> =
+            std::collections::HashMap::new();
         for mac in macs {
-            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac) {
+            if let Some(limits) =
+                crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac)
+            {
                 effective_limits.insert(mac, limits);
             }
         }
         drop(scheduled_limits);
 
         // Get ingress eBPF reference (both ingress and egress share the same eBPF object and maps)
-        let ingress_ebpf = ctx.ingress_ebpf.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Ingress eBPF program not initialized")
-        })?;
+        let ingress_ebpf = ctx
+            .ingress_ebpf
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Ingress eBPF program not initialized"))?;
 
         // Get mutable access to the eBPF object using unsafe
         // This is safe because eBPF maps are thread-safe and we're only updating the map,
@@ -509,7 +510,8 @@ impl TrafficMonitor {
         )?;
 
         // Collect all MACs currently in eBPF map
-        let mut existing_macs_in_ebpf: std::collections::HashSet<[u8; 6]> = std::collections::HashSet::new();
+        let mut existing_macs_in_ebpf: std::collections::HashSet<[u8; 6]> =
+            std::collections::HashSet::new();
         for entry in mac_rate_limits.iter() {
             if let Ok((mac, _)) = entry {
                 existing_macs_in_ebpf.insert(mac);
@@ -518,18 +520,14 @@ impl TrafficMonitor {
 
         // Apply effective limits to eBPF map (update or add)
         for (mac, lim) in effective_limits.iter() {
-            mac_rate_limits
-                .insert(mac, &[lim[0], lim[1]], 0)
-                .unwrap();
+            mac_rate_limits.insert(mac, &[lim[0], lim[1]], 0).unwrap();
             existing_macs_in_ebpf.remove(mac);
         }
 
         // Clear limits for MACs that no longer have matching rules
         // Set to [0, 0] to remove rate limiting (unlimited)
         for mac in existing_macs_in_ebpf.iter() {
-            mac_rate_limits
-                .insert(mac, &[0, 0], 0)
-                .unwrap();
+            mac_rate_limits.insert(mac, &[0, 0], 0).unwrap();
         }
 
         Ok(())
