@@ -249,7 +249,7 @@ impl TrafficMonitor {
         Ok(traffic_data)
     }
 
-    fn build_device_traffic_data(
+    fn build_raw_device_traffic(
         &self,
         traffic_data: &StdHashMap<[u8; 6], [u64; 4]>,
         mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
@@ -284,7 +284,7 @@ impl TrafficMonitor {
         let traffic_data = self.collect_traffic_data(ebpf)?;
 
         let raw_device_traffic =
-            self.build_device_traffic_data(&traffic_data, &mac_ipv4_mapping)?;
+            self.build_raw_device_traffic(&traffic_data, &mac_ipv4_mapping)?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
