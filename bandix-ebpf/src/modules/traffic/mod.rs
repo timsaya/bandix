@@ -11,7 +11,7 @@ use network_types::eth::EthHdr;
 use network_types::ip::{Ipv4Hdr, Ipv6Hdr};
 
 use crate::utils::{is_subnet_ip, is_subnet_ipv6, ptr_at, min, get_current_time, subnet::IPV4_SUBNET_INFO};
-use maps::{MAC_IPV4_MAPPING, MAC_IPV6_MAPPING, MAC_TRAFFIC, MAC_RATE_LIMITS, RATE_BUCKETS};
+use maps::{MAC_TRAFFIC, MAC_RATE_LIMITS, RATE_BUCKETS};
 
 // ============================================================================
 // Public Entry Points
@@ -230,14 +230,12 @@ fn monitor_traffic(
         // source ip is in local network, this is local network traffic
         let is_local_traffic = dst_is_local;
         update_traffic_stats(&src_mac, data_len, false, is_local_traffic);
-        let _ = MAC_IPV4_MAPPING.insert(&src_mac, &src_ip, 0);
     }
 
     if dst_is_local {
         // destination ip is in local network, this is local network traffic
         let is_local_traffic = src_is_local;
         update_traffic_stats(&dst_mac, data_len, true, is_local_traffic);
-        let _ = MAC_IPV4_MAPPING.insert(&dst_mac, &dst_ip, 0);
     }
 }
 
@@ -257,14 +255,12 @@ fn monitor_traffic_v6(
         // source ip is in local network
         let is_local_traffic = dst_is_local;
         update_traffic_stats(&src_mac, data_len, false, is_local_traffic);
-        let _ = MAC_IPV6_MAPPING.insert(&src_mac, &src_ip, 0);
     }
 
     if dst_is_local {
         // destination ip is in local network
         let is_local_traffic = src_is_local;
         update_traffic_stats(&dst_mac, data_len, true, is_local_traffic);
-        let _ = MAC_IPV6_MAPPING.insert(&dst_mac, &dst_ip, 0);
     }
 }
 

@@ -1,5 +1,4 @@
 use crate::monitor::TrafficModuleContext;
-use crate::storage::traffic::BaselineTotals;
 use anyhow::Result;
 use aya::maps::HashMap;
 use aya::maps::MapData;
@@ -10,10 +9,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 struct RawTrafficData {
     pub ip_address: [u8; 4],
-    pub local_tx_bytes: u64, // Local network send bytes
-    pub local_rx_bytes: u64, // Local network receive bytes
-    pub wide_tx_bytes: u64,  // Cross-network send bytes
-    pub wide_rx_bytes: u64,  // Cross-network receive bytes
+    pub ipv6_addresses: [[u8; 16]; 16], // IPv6 addresses (up to 16)
+    pub lan_tx_bytes: u64,              // Local network send bytes
+    pub lan_rx_bytes: u64,              // Local network receive bytes
+    pub wan_tx_bytes: u64,              // Cross-network send bytes
+    pub wan_rx_bytes: u64,              // Cross-network receive bytes
 }
 
 /// Specific implementation of Traffic monitoring module
@@ -66,15 +66,9 @@ impl TrafficMonitor {
                     self.process_monitoring_cycle(ctx).await;
                 }
                 _ = flush_interval.tick() => {
-                    // Flush dirty rings to disk at configured interval
                     log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...",
                                ctx.options.traffic_flush_interval_seconds());
-                    // Flush original ring manager
-                    if let Err(e) = ctx.realtime_ring_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush dirty rings to disk: {}", e);
-                    }
-                    // Flush multi-level ring manager
-                    if let Err(e) = ctx.multi_level_ring_manager.flush_dirty_rings().await {
+                    if let Err(e) = ctx.long_term_manager.flush_dirty_rings().await {
                         log::error!("Failed to flush multi-level rings to disk: {}", e);
                     } else {
                         log::debug!("Successfully flushed dirty rings to disk");
@@ -82,12 +76,8 @@ impl TrafficMonitor {
                 }
                 _ = shutdown_notify.notified() => {
                     log::debug!("Traffic monitoring module received shutdown signal, stopping...");
-                    // Flush all dirty data before shutdown
                     log::debug!("Flushing all dirty rings before shutdown...");
-                    if let Err(e) = ctx.realtime_ring_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush dirty rings during shutdown: {}", e);
-                    }
-                    if let Err(e) = ctx.multi_level_ring_manager.flush_dirty_rings().await {
+                    if let Err(e) = ctx.long_term_manager.flush_dirty_rings().await {
                         log::error!("Failed to flush multi-level rings during shutdown: {}", e);
                     }
                     break;
@@ -146,17 +136,15 @@ impl TrafficMonitor {
             stats.iter().map(|(k, v)| (*k, *v)).collect()
         };
 
-        // Insert into original 1-second sampling ring (always)
         if let Err(e) = ctx
-            .realtime_ring_manager
+            .realtime_manager
             .insert_metrics_batch(ts_ms, &snapshot)
         {
             log::error!("metrics persist to memory ring error: {}", e);
         }
 
-        // Insert into multi-level sampling rings (day/week/month/year) based on sampling intervals
         if let Err(e) = ctx
-            .multi_level_ring_manager
+            .long_term_manager
             .insert_metrics_batch(ts_ms, &snapshot)
         {
             log::error!("metrics persist to multi-level ring error: {}", e);
@@ -185,47 +173,7 @@ impl TrafficMonitor {
         false
     }
 
-    fn read_ipv4_mapping_from_ebpf(
-        &self,
-        ebpf: &Arc<aya::Ebpf>,
-    ) -> Result<StdHashMap<[u8; 6], [u8; 4]>, anyhow::Error> {
-        let mut mac_ip_mapping = StdHashMap::new();
-
-        // Since ingress and egress share the same eBPF object and maps, we only need to read once
-        let mac_ip_mapping_map = HashMap::<&MapData, [u8; 6], [u8; 4]>::try_from(
-            ebpf.map("MAC_IPV4_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find MAC_IPV4_MAPPING map"))?,
-        )?;
-
-        for entry in mac_ip_mapping_map.iter() {
-            let (key, value) = entry.unwrap();
-            mac_ip_mapping.insert(key, value);
-        }
-
-        Ok(mac_ip_mapping)
-    }
-
-    fn read_ipv6_mapping_from_ebpf(
-        &self,
-        ebpf: &Arc<aya::Ebpf>,
-    ) -> Result<StdHashMap<[u8; 6], [u8; 16]>, anyhow::Error> {
-        let mut mac_ipv6_mapping = StdHashMap::new();
-
-        // Since ingress and egress share the same eBPF object and maps, we only need to read once
-        let mac_ipv6_mapping_map = HashMap::<&MapData, [u8; 6], [u8; 16]>::try_from(
-            ebpf.map("MAC_IPV6_MAPPING")
-                .ok_or(anyhow::anyhow!("Cannot find MAC_IPV6_MAPPING map"))?,
-        )?;
-
-        for entry in mac_ipv6_mapping_map.iter() {
-            let (key, value) = entry.unwrap();
-            mac_ipv6_mapping.insert(key, value);
-        }
-
-        Ok(mac_ipv6_mapping)
-    }
-
-    fn read_traffic_data_from_ebpf(
+    fn collect_traffic_data(
         &self,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<StdHashMap<[u8; 6], [u64; 4]>, anyhow::Error> {
@@ -252,20 +200,36 @@ impl TrafficMonitor {
     fn build_raw_device_traffic(
         &self,
         traffic_data: &StdHashMap<[u8; 6], [u64; 4]>,
-        mac_ip_mapping: &StdHashMap<[u8; 6], [u8; 4]>,
+        device_manager: &crate::device::DeviceManager,
     ) -> Result<StdHashMap<[u8; 6], RawTrafficData>, anyhow::Error> {
         let mut traffic = StdHashMap::new();
 
-        for (mac, ip) in mac_ip_mapping.iter() {
-            if let Some(data) = traffic_data.get(mac) {
+        // Get all devices from DeviceManager
+        let devices = device_manager.get_all_devices();
+        let devices_map: StdHashMap<[u8; 6], crate::device::ArpLine> =
+            devices.into_iter().map(|d| (d.mac, d)).collect();
+
+        // Build traffic data for each MAC address that has traffic
+        for (mac, data) in traffic_data.iter() {
+            if let Some(device_info) = devices_map.get(mac) {
+                let mut ipv6_addresses = [[0u8; 16]; 16];
+
+                // Copy IPv6 addresses from device info (up to 16)
+                for (i, ipv6_addr) in device_info.ipv6_addresses.iter().enumerate().take(16) {
+                    if *ipv6_addr != [0u8; 16] {
+                        ipv6_addresses[i] = *ipv6_addr;
+                    }
+                }
+
                 traffic.insert(
                     *mac,
                     RawTrafficData {
-                        ip_address: *ip,
-                        local_tx_bytes: data[0], // Local network send
-                        local_rx_bytes: data[1], // Local network receive
-                        wide_tx_bytes: data[2],  // Cross-network send
-                        wide_rx_bytes: data[3],  // Cross-network receive
+                        ip_address: device_info.ip,
+                        ipv6_addresses,
+                        lan_tx_bytes: data[0], // Local network send
+                        lan_rx_bytes: data[1], // Local network receive
+                        wan_tx_bytes: data[2], // Cross-network send
+                        wan_rx_bytes: data[3], // Cross-network receive
                     },
                 );
             }
@@ -279,165 +243,93 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
-        let mac_ipv4_mapping = self.read_ipv4_mapping_from_ebpf(ebpf)?;
-        let mac_ipv6_mapping = self.read_ipv6_mapping_from_ebpf(ebpf)?;
-        let traffic_data = self.read_traffic_data_from_ebpf(ebpf)?;
+        let traffic_data = self.collect_traffic_data(ebpf)?;
 
         let raw_device_traffic =
-            self.build_raw_device_traffic(&traffic_data, &mac_ipv4_mapping)?;
+            self.build_raw_device_traffic(&traffic_data, &ctx.device_manager)?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
 
-        let mut stats_map = ctx.device_traffic_stats.lock().unwrap();
-        let baseline_map = ctx.baselines.lock().unwrap();
+        let mut device_traffic_stats_map = ctx.device_traffic_stats.lock().unwrap();
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
         for (mac, raw_traffic) in raw_device_traffic.iter() {
-            let stats = stats_map.entry(*mac).or_insert_with(|| DeviceTrafficStats {
-                ip_address: raw_traffic.ip_address,
-                ipv6_addresses: [[0; 16]; 16],
-                ipv6_count: 0,
-                // Total traffic statistics
-                total_rx_bytes: 0,
-                total_tx_bytes: 0,
-                total_rx_packets: 0,
-                total_tx_packets: 0,
-                total_last_rx_bytes: 0,
-                total_last_tx_bytes: 0,
-                total_rx_rate: 0,
-                total_tx_rate: 0,
-                // Cross-network rate limits
-                wide_rx_rate_limit: 0,
-                wide_tx_rate_limit: 0,
-                // Local network traffic statistics
-                local_rx_bytes: 0,
-                local_tx_bytes: 0,
-                local_rx_rate: 0,
-                local_tx_rate: 0,
-                local_last_rx_bytes: 0,
-                local_last_tx_bytes: 0,
-                // Cross-network traffic statistics
-                wide_rx_bytes: 0,
-                wide_tx_bytes: 0,
-                wide_rx_rate: 0,
-                wide_tx_rate: 0,
-                wide_last_rx_bytes: 0,
-                wide_last_tx_bytes: 0,
-                last_online_ts: 0,
-                last_sample_ts: 0,
+            let stats = device_traffic_stats_map.entry(*mac).or_insert_with(|| {
+                DeviceTrafficStats::from_ip(raw_traffic.ip_address, raw_traffic.ipv6_addresses)
             });
 
             // Calculate current effective rate limit from scheduled rules
             if let Some(limits) =
                 crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac)
             {
-                stats.wide_rx_rate_limit = limits[0];
-                stats.wide_tx_rate_limit = limits[1];
+                stats.wan_rx_rate_limit = limits[0];
+                stats.wan_tx_rate_limit = limits[1];
             }
 
             // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
             // overwrite with the latest IP collected by eBPF to avoid staying at 0.0.0.0.
-            if raw_traffic.ip_address != [0, 0, 0, 0]
-                && stats.ip_address != raw_traffic.ip_address
+            if raw_traffic.ip_address != [0, 0, 0, 0] && stats.ip_address != raw_traffic.ip_address
             {
                 stats.ip_address = raw_traffic.ip_address;
             }
 
-            // Update IPv6 addresses from eBPF map
-            if let Some(ipv6_addr) = mac_ipv6_mapping.get(mac) {
-                // Check if this IPv6 address is not all zeros
-                if *ipv6_addr != [0u8; 16] {
-                    // Check if this IPv6 address already exists in the array
-                    let mut found = false;
-                    for i in 0..(stats.ipv6_count as usize) {
-                        if stats.ipv6_addresses[i] == *ipv6_addr {
-                            found = true;
-                            break;
+            // Update IPv6 addresses from DeviceManager
+            // Merge new IPv6 addresses from DeviceManager into existing ones
+            if let Some(device_info) = ctx.device_manager.get_device_by_mac(mac) {
+                for ipv6_addr in device_info.ipv6_addresses.iter() {
+                    // Check if this IPv6 address is not all zeros
+                    if *ipv6_addr != [0u8; 16] {
+                        // Check if this IPv6 address already exists in the array
+                        let mut found = false;
+                        let current_count = stats.ipv6_count() as usize;
+                        for i in 0..current_count {
+                            if stats.ipv6_addresses[i] == *ipv6_addr {
+                                found = true;
+                                break;
+                            }
                         }
-                    }
 
-                    // Add new IPv6 address if not found and we have space (up to 16)
-                    if !found && (stats.ipv6_count as usize) < 16 {
-                        stats.ipv6_addresses[stats.ipv6_count as usize] = *ipv6_addr;
-                        stats.ipv6_count += 1;
+                        // Add new IPv6 address if not found and we have space (up to 16)
+                        if !found && current_count < 16 {
+                            stats.ipv6_addresses[current_count] = *ipv6_addr;
+                        }
                     }
                 }
             }
 
-            // Calculate total traffic
-            let total_rx_bytes = raw_traffic.local_rx_bytes + raw_traffic.wide_rx_bytes;
-            let total_tx_bytes = raw_traffic.local_tx_bytes + raw_traffic.wide_tx_bytes;
-
-            // Lookup baseline for current MAC (default zeros)
-            let b = baseline_map.get(mac).copied().unwrap_or(BaselineTotals {
-                ip_address: [0, 0, 0, 0],
-                total_rx_bytes: 0,
-                total_tx_bytes: 0,
-                local_rx_bytes: 0,
-                local_tx_bytes: 0,
-                wide_rx_bytes: 0,
-                wide_tx_bytes: 0,
-                last_online_ts: 0,
-            });
-
-            // Update total bytes with baseline added
-            stats.total_rx_bytes = total_rx_bytes + b.total_rx_bytes;
-            stats.total_tx_bytes = total_tx_bytes + b.total_tx_bytes;
-
-            // Update local network traffic with baseline added
-            stats.local_rx_bytes = raw_traffic.local_rx_bytes + b.local_rx_bytes;
-            stats.local_tx_bytes = raw_traffic.local_tx_bytes + b.local_tx_bytes;
-
-            // Update cross-network traffic with baseline added
-            stats.wide_rx_bytes = raw_traffic.wide_rx_bytes + b.wide_rx_bytes;
-            stats.wide_tx_bytes = raw_traffic.wide_tx_bytes + b.wide_tx_bytes;
-
-            // If we have baseline last_online_ts and current value is zero, seed it to avoid startup gap
-            if stats.last_online_ts == 0 && b.last_online_ts > 0 {
-                stats.last_online_ts = b.last_online_ts;
-            }
+            // Update traffic bytes (baseline already applied during initialization)
+            // eBPF provides incremental values since last reset, so we add them to existing baseline
+            stats.lan_rx_bytes += raw_traffic.lan_rx_bytes;
+            stats.lan_tx_bytes += raw_traffic.lan_tx_bytes;
+            stats.wan_rx_bytes += raw_traffic.wan_rx_bytes;
+            stats.wan_tx_bytes += raw_traffic.wan_tx_bytes;
 
             // Calculate rate (bytes/sec)
             if stats.last_sample_ts > 0 {
                 let time_diff = now.saturating_sub(stats.last_sample_ts);
                 if time_diff > 0 {
-                    // Calculate total receive rate
-                    let rx_diff = stats
-                        .total_rx_bytes
-                        .saturating_sub(stats.total_last_rx_bytes);
-                    stats.total_rx_rate = (rx_diff * 1000) / time_diff; // Convert to bytes/sec
-
-                    // Calculate total send rate
-                    let tx_diff = stats
-                        .total_tx_bytes
-                        .saturating_sub(stats.total_last_tx_bytes);
-                    stats.total_tx_rate = (tx_diff * 1000) / time_diff; // Convert to bytes/sec
-
                     // Calculate local network receive rate
-                    let local_rx_diff = stats
-                        .local_rx_bytes
-                        .saturating_sub(stats.local_last_rx_bytes);
-                    stats.local_rx_rate = (local_rx_diff * 1000) / time_diff;
+                    let lan_rx_diff = stats.lan_rx_bytes.saturating_sub(stats.lan_last_rx_bytes);
+                    stats.lan_rx_rate = (lan_rx_diff * 1000) / time_diff;
 
                     // Calculate local network send rate
-                    let local_tx_diff = stats
-                        .local_tx_bytes
-                        .saturating_sub(stats.local_last_tx_bytes);
-                    stats.local_tx_rate = (local_tx_diff * 1000) / time_diff;
+                    let lan_tx_diff = stats.lan_tx_bytes.saturating_sub(stats.lan_last_tx_bytes);
+                    stats.lan_tx_rate = (lan_tx_diff * 1000) / time_diff;
 
                     // Calculate cross-network receive rate
-                    let wide_rx_diff = stats.wide_rx_bytes.saturating_sub(stats.wide_last_rx_bytes);
-                    stats.wide_rx_rate = (wide_rx_diff * 1000) / time_diff;
+                    let wan_rx_diff = stats.wan_rx_bytes.saturating_sub(stats.wan_last_rx_bytes);
+                    stats.wan_rx_rate = (wan_rx_diff * 1000) / time_diff;
 
                     // Calculate cross-network send rate
-                    let wide_tx_diff = stats.wide_tx_bytes.saturating_sub(stats.wide_last_tx_bytes);
-                    stats.wide_tx_rate = (wide_tx_diff * 1000) / time_diff;
+                    let wan_tx_diff = stats.wan_tx_bytes.saturating_sub(stats.wan_last_tx_bytes);
+                    stats.wan_tx_rate = (wan_tx_diff * 1000) / time_diff;
 
                     // Update last active time only if any transmit traffic increased
-                    if tx_diff > 0 || local_tx_diff > 0 || wide_tx_diff > 0 {
+                    let total_tx_diff = lan_tx_diff + wan_tx_diff;
+                    if total_tx_diff > 0 {
                         stats.last_online_ts = now;
                     }
                 }
@@ -445,18 +337,16 @@ impl TrafficMonitor {
 
             // If first sample and there is transmit traffic, set last active time
             if stats.last_sample_ts == 0 {
-                if stats.total_tx_bytes > 0 || stats.local_tx_bytes > 0 || stats.wide_tx_bytes > 0 {
+                if stats.total_tx_bytes() > 0 {
                     stats.last_online_ts = now;
                 }
             }
 
             // Save current values as basis for next calculation
-            stats.total_last_rx_bytes = stats.total_rx_bytes;
-            stats.total_last_tx_bytes = stats.total_tx_bytes;
-            stats.local_last_rx_bytes = stats.local_rx_bytes;
-            stats.local_last_tx_bytes = stats.local_tx_bytes;
-            stats.wide_last_rx_bytes = stats.wide_rx_bytes;
-            stats.wide_last_tx_bytes = stats.wide_tx_bytes;
+            stats.lan_last_rx_bytes = stats.lan_rx_bytes;
+            stats.lan_last_tx_bytes = stats.lan_tx_bytes;
+            stats.wan_last_rx_bytes = stats.wan_rx_bytes;
+            stats.wan_last_tx_bytes = stats.wan_tx_bytes;
             stats.last_sample_ts = now;
         }
 

@@ -4,10 +4,9 @@ pub mod traffic;
 
 use crate::api::ApiRouter;
 use crate::command::Options;
-use crate::storage::traffic::{
-    BaselineTotals, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit,
-};
-use bandix_common::MacTrafficStats;
+use crate::device::DeviceManager;
+use crate::storage::traffic::{MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit};
+use bandix_common::DeviceTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 
@@ -17,12 +16,13 @@ pub use connection::ConnectionModuleContext;
 /// Traffic module context
 pub struct TrafficModuleContext {
     pub options: Options,
-    pub mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-    pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
+    pub device_traffic_stats: Arc<Mutex<StdHashMap<[u8; 6], DeviceTrafficStats>>>,
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
-    pub realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
-    pub multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month/year)
+    pub realtime_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling (memory-only)
+    pub long_term_manager: Arc<MultiLevelRingManager>, // Long-term sampling (day/week/month/year, persisted)
+    pub device_manager: Arc<DeviceManager>, // Device discovery manager (ARP table)
+    pub device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // Centralized device registry
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
 }
@@ -35,33 +35,29 @@ impl TrafficModuleContext {
         options: Options,
         ingress_ebpf: Arc<aya::Ebpf>,
         egress_ebpf: Arc<aya::Ebpf>,
+        device_manager: Arc<DeviceManager>,
     ) -> Self {
-        // Real-time 1-second sampling ring manager
-        let realtime_ring_manager = Arc::new(RealtimeRingManager::new(
+        let realtime_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
         ));
 
-        // Multi-level sampling ring manager (day/week/month/year)
-        let multi_level_ring_manager =
+        let long_term_manager =
             Arc::new(MultiLevelRingManager::new(options.data_dir().to_string()));
 
-        // realtime_ring_manager.generate_test_data(options.traffic_retention_seconds()).unwrap();
-
-        // Note: Loading ring files from disk is done in init_data() after checking for capacity mismatches
-        // This ensures that mismatched files are deleted before loading
-
-        // Create shared hostname bindings - this will be used by both traffic and connection modules
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
+
+        let device_registry = device_manager.get_registry();
 
         Self {
             options,
-            mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
-            baselines: Arc::new(Mutex::new(StdHashMap::new())),
+            device_traffic_stats: Arc::new(Mutex::new(StdHashMap::new())),
             scheduled_rate_limits: Arc::new(Mutex::new(Vec::new())),
             hostname_bindings,
-            realtime_ring_manager,
-            multi_level_ring_manager,
+            realtime_manager,
+            long_term_manager,
+            device_manager,
+            device_registry,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
         }
@@ -131,12 +127,13 @@ impl Clone for ModuleContext {
         match self {
             ModuleContext::Traffic(ctx) => ModuleContext::Traffic(TrafficModuleContext {
                 options: ctx.options.clone(),
-                mac_stats: Arc::clone(&ctx.mac_stats),
-                baselines: Arc::clone(&ctx.baselines),
+                device_traffic_stats: Arc::clone(&ctx.device_traffic_stats),
                 scheduled_rate_limits: Arc::clone(&ctx.scheduled_rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
-                realtime_ring_manager: Arc::clone(&ctx.realtime_ring_manager),
-                multi_level_ring_manager: Arc::clone(&ctx.multi_level_ring_manager),
+                realtime_manager: Arc::clone(&ctx.realtime_manager),
+                long_term_manager: Arc::clone(&ctx.long_term_manager),
+                device_manager: Arc::clone(&ctx.device_manager),
+                device_registry: Arc::clone(&ctx.device_registry),
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
             }),
@@ -172,50 +169,17 @@ impl ModuleType {
                 let scheduled_limits = crate::storage::traffic::load_all_scheduled_limits(
                     traffic_ctx.options.data_dir(),
                 )?;
+
                 {
                     let mut srl = traffic_ctx.scheduled_rate_limits.lock().unwrap();
                     *srl = scheduled_limits;
                 }
 
-                // Note: hostname bindings are now loaded and shared in command.rs,
-                // so we don't need to load them here again
-
-                // Rebuild ring files and load baseline data (only if persistence is enabled)
                 if traffic_ctx.options.traffic_persist_history() {
-                    // Step 1: Check and delete mismatched ring files (must be done before loading)
-                    let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
-                        traffic_ctx.options.data_dir(),
-                        traffic_ctx.options.traffic_retention_seconds(),
-                    )?;
-
-                    // Step 2: Load ring files from disk into memory (after mismatch check)
-                    // Load real-time ring files
-                    if let Err(e) = traffic_ctx.realtime_ring_manager.load_from_files() {
-                        log::error!("Failed to load real-time ring files into memory: {}", e);
-                    } else {
-                        log::debug!("Successfully loaded real-time ring files into memory");
-                    }
-
-                    // Load multi-level ring files
-                    if let Err(e) = traffic_ctx.multi_level_ring_manager.load_from_files() {
+                    if let Err(e) = traffic_ctx.long_term_manager.load_from_files() {
                         log::warn!("Failed to load multi-level ring files: {}", e);
                     } else {
                         log::debug!("Successfully loaded multi-level ring files");
-                    }
-
-                    // Step 3: Load baseline data
-                    let preloaded_baselines = if rebuilt {
-                        Vec::new()
-                    } else {
-                        crate::storage::traffic::load_latest_totals(traffic_ctx.options.data_dir())?
-                    };
-
-                    // Apply preloaded baseline data
-                    {
-                        let mut b = traffic_ctx.baselines.lock().unwrap();
-                        for (mac, base) in preloaded_baselines {
-                            b.insert(mac, base);
-                        }
                     }
                 }
 
@@ -244,12 +208,12 @@ impl ModuleType {
 
                 // Create traffic API handler
                 let handler = ApiHandler::Traffic(TrafficApiHandler::new(
-                    Arc::clone(&traffic_ctx.mac_stats),
-                    Arc::clone(&traffic_ctx.baselines),
+                    Arc::clone(&traffic_ctx.device_traffic_stats),
                     Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
-                    Arc::clone(&traffic_ctx.realtime_ring_manager),
-                    Arc::clone(&traffic_ctx.multi_level_ring_manager),
+                    Arc::clone(&traffic_ctx.realtime_manager),
+                    Arc::clone(&traffic_ctx.long_term_manager),
+                    Arc::clone(&traffic_ctx.device_registry),
                     traffic_ctx.options.clone(),
                 ));
 
@@ -334,7 +298,6 @@ pub struct MonitorManager {
 }
 
 impl MonitorManager {
-    /// Create a new MonitorManager from module contexts (modules are inferred from contexts)
     pub fn from_contexts(contexts: &[ModuleContext]) -> Self {
         let modules: Vec<ModuleType> = contexts
             .iter()
@@ -373,7 +336,6 @@ impl MonitorManager {
     ) -> Result<Vec<tokio::task::JoinHandle<()>>, anyhow::Error> {
         let mut tasks = Vec::new();
 
-        // Create a vector of module types to avoid borrowing self in async tasks
         let module_types: Vec<ModuleType> = self.modules.clone();
 
         for (module, ctx) in module_types.into_iter().zip(contexts.into_iter()) {

@@ -1,34 +1,27 @@
+use crate::command::SubnetInfo;
+use crate::storage::device_registry::DeviceRegistry;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
 use std::net::Ipv4Addr;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-/// Subnet information for interface reuse
-#[derive(Debug, Clone)]
-pub struct SubnetInfo {
-    pub interface_ip: [u8; 4],
-    pub subnet_mask: [u8; 4],
-    pub interface_mac: [u8; 6],
-    pub ipv6_addresses: Vec<([u8; 16], u8)>,
-}
-
 /// Device information from ARP table
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceInfo {
+pub struct ArpLine {
     pub mac: [u8; 6],
-    pub ip: [u8; 4],                   // IPv4 address
-    pub ipv6_addresses: Vec<[u8; 16]>, // IPv6 addresses (can have multiple)
+    pub ip: [u8; 4],
+    pub ipv6_addresses: Vec<[u8; 16]>,
 }
 
-/// Device manager that maintains a list of valid devices from ARP table
-/// Only includes devices with valid ARP entries (REACHABLE, STALE, etc.)
-/// Excludes incomplete or invalid entries
 pub struct DeviceManager {
-    /// Mapping from MAC address to DeviceInfo
-    devices: Arc<Mutex<HashMap<[u8; 6], DeviceInfo>>>,
+    /// Current ARP table snapshot (online devices)
+    arp_table: Arc<Mutex<Vec<ArpLine>>>,
+    /// Central device registry (maintains historical IP addresses)
+    device_registry: Arc<DeviceRegistry>,
     /// Network interface name
     iface: String,
     /// Subnet information for the monitored interface
@@ -41,9 +34,14 @@ pub struct DeviceManager {
 
 impl DeviceManager {
     /// Create a new device manager with interface and subnet info
-    pub fn new(iface: String, subnet_info: SubnetInfo) -> Self {
+    pub fn new(
+        iface: String,
+        subnet_info: SubnetInfo,
+        device_registry: Arc<DeviceRegistry>,
+    ) -> Self {
         Self {
-            devices: Arc::new(Mutex::new(HashMap::new())),
+            arp_table: Arc::new(Mutex::new(Vec::new())),
+            device_registry,
             iface,
             subnet_info,
             last_refresh: Arc::new(Mutex::new(SystemTime::UNIX_EPOCH)),
@@ -51,43 +49,62 @@ impl DeviceManager {
         }
     }
 
-    /// Load devices from ARP table at startup
-    /// Only loads valid entries (excludes incomplete and invalid entries)
-    pub fn load_initial_devices(&self) -> Result<usize> {
-        // Refresh ARP/neighbor cache before reading to remove stale entries
-        self.refresh_arp_cache()?;
+    /// Get mutable reference to device by MAC address
+    fn get_device_by_mac_mut<'a>(
+        devices: &'a mut Vec<ArpLine>,
+        mac: &[u8; 6],
+    ) -> Option<&'a mut ArpLine> {
+        devices.iter_mut().find(|device| device.mac == *mac)
+    }
 
-        let devices = self.read_arp_table()?;
-        let count = devices.len();
+    /// Get reference to device registry
+    pub fn get_registry(&self) -> Arc<DeviceRegistry> {
+        Arc::clone(&self.device_registry)
+    }
 
-        // Update internal cache
-        {
-            let mut devices_map = self.devices.lock().unwrap();
-            devices_map.clear();
+    pub fn load_initial_devices(&self, data_dir: &str) -> Result<()> {
+        let registry_path = Path::new(data_dir).join("devices.json");
 
-            for device in devices.iter() {
-                devices_map.insert(device.mac, device.clone());
-            }
+        if let Err(e) = self.device_registry.load_from_file(registry_path) {
+            log::warn!("Failed to load device registry: {}", e);
         }
 
+        log::info!(
+            "Waiting for neighbor rediscovery and loading initial devices from ARP table..."
+        );
+        self.refresh_arp_cache()?;
+        let arp_table = self.read_arp_table()?;
+        let arp_table_clone = arp_table.clone();
+
         {
+            let mut devices_list = self.arp_table.lock().unwrap();
+            *devices_list = arp_table;
+
             let mut last_refresh = self.last_refresh.lock().unwrap();
             *last_refresh = SystemTime::now();
         }
 
-        log::info!("Loaded {} valid devices from ARP table", count);
-        Ok(count)
+        for arp_line in arp_table_clone.iter() {
+            self.device_registry.register_device(
+                arp_line.mac,
+                Some(arp_line.ip),
+                &arp_line.ipv6_addresses.clone(),
+            );
+        }
+
+        log::info!(
+            "Loaded {} valid devices from ARP table, total devices in registry: {}",
+            arp_table_clone.len(),
+            self.device_registry.device_count()
+        );
+        Ok(())
     }
 
-    /// Read ARP table from /proc/net/arp
-    /// Only includes valid entries (excludes incomplete, 00:00:00:00:00:00, etc.)
-    fn read_arp_table(&self) -> Result<Vec<DeviceInfo>> {
+    fn read_arp_table(&self) -> Result<Vec<ArpLine>> {
         let mut devices = Vec::new();
 
-        // Get IPv6 neighbor table (MAC -> IPv6 addresses) filtered by interface
-        let mut ipv6_neighbors = std::collections::HashMap::new();
+        let mut ipv6_neighbors: HashMap<[u8; 6], Vec<[u8; 16]>> = std::collections::HashMap::new();
 
-        // Filter IPv6 neighbors by our interface
         if let Ok(output) = std::process::Command::new("ip")
             .args(["-6", "neigh", "show", "dev", &self.iface])
             .output()
@@ -180,7 +197,7 @@ impl DeviceManager {
             let ipv6_addresses = ipv6_neighbors.get(&mac).cloned().unwrap_or_default();
 
             // Add to devices list
-            devices.push(DeviceInfo {
+            devices.push(ArpLine {
                 mac,
                 ip: ip_bytes,
                 ipv6_addresses,
@@ -188,35 +205,18 @@ impl DeviceManager {
         }
 
         // Also add local machine IP-MAC mappings from the monitored interface
-        // This ensures that connections from/to the local machine are also counted
-        let mac = self.subnet_info.interface_mac;
-        let ip_bytes = self.subnet_info.interface_ip;
+        let interface_mac = self.subnet_info.interface_mac;
+        let interface_ipv4 = self.subnet_info.interface_ip;
+        let interface_ipv6_addresses = ipv6_neighbors
+            .get(&interface_mac)
+            .cloned()
+            .unwrap_or_default();
 
-        // Skip loopback addresses (127.x.x.x)
-        if ip_bytes[0] != 127 {
-            // Check if this device is already in the list
-            let mut found = false;
-            for device in devices.iter() {
-                if device.mac == mac {
-                    found = true;
-                    break;
-                }
-            }
-
-            if !found {
-                // Get IPv6 addresses for this MAC
-                let ipv6_addresses = ipv6_neighbors
-                    .get(&mac)
-                    .cloned()
-                    .unwrap_or_default();
-
-                devices.push(DeviceInfo {
-                    mac,
-                    ip: ip_bytes,
-                    ipv6_addresses,
-                });
-            }
-        }
+        devices.push(ArpLine {
+            mac: interface_mac,
+            ip: interface_ipv4,
+            ipv6_addresses: interface_ipv6_addresses,
+        });
 
         Ok(devices)
     }
@@ -235,10 +235,12 @@ impl DeviceManager {
 
         // Incremental update: add new devices and update existing ones
         {
-            let mut devices_map = self.devices.lock().unwrap();
+            let mut devices_list = self.arp_table.lock().unwrap();
 
             for device in new_devices.iter() {
-                if let Some(existing_device) = devices_map.get_mut(&device.mac) {
+                if let Some(existing_device) =
+                    Self::get_device_by_mac_mut(&mut devices_list, &device.mac)
+                {
                     // Device exists, update its information if changed
                     let mut changed = false;
                     if existing_device.ip != device.ip {
@@ -255,9 +257,14 @@ impl DeviceManager {
                     }
                 } else {
                     // New device, add it
-                    devices_map.insert(device.mac, device.clone());
+                    devices_list.push(device.clone());
                     added_count += 1;
                 }
+
+                // Update registry with current ARP table data
+                let ipv6_array: Vec<[u8; 16]> = device.ipv6_addresses.clone();
+                self.device_registry
+                    .register_device(device.mac, Some(device.ip), &ipv6_array);
             }
         }
 
@@ -278,38 +285,36 @@ impl DeviceManager {
     /// Check if a MAC address is in the device list
     #[allow(dead_code)]
     pub fn is_valid_mac(&self, mac: &[u8; 6]) -> bool {
-        let devices = self.devices.lock().unwrap();
-        devices.contains_key(mac)
+        let devices = self.arp_table.lock().unwrap();
+        devices.iter().any(|device| device.mac == *mac)
     }
 
     /// Check if a MAC-IP combination is valid
     /// Returns true if both MAC and IP are in the device list and match
     pub fn is_valid_device(&self, mac: &[u8; 6], ip: &[u8; 4]) -> bool {
-        let devices = self.devices.lock().unwrap();
-        if let Some(device) = devices.get(mac) {
-            device.ip == *ip
-        } else {
-            false
-        }
+        let devices = self.arp_table.lock().unwrap();
+        devices
+            .iter()
+            .any(|device| device.mac == *mac && device.ip == *ip)
     }
 
     /// Get device info by MAC address
     #[allow(dead_code)]
-    pub fn get_device_by_mac(&self, mac: &[u8; 6]) -> Option<DeviceInfo> {
-        let devices = self.devices.lock().unwrap();
-        devices.get(mac).cloned()
+    pub fn get_device_by_mac(&self, mac: &[u8; 6]) -> Option<ArpLine> {
+        let devices = self.arp_table.lock().unwrap();
+        devices.iter().find(|device| device.mac == *mac).cloned()
     }
 
     /// Get all devices
     #[allow(dead_code)]
-    pub fn get_all_devices(&self) -> Vec<DeviceInfo> {
-        let devices = self.devices.lock().unwrap();
-        devices.values().cloned().collect()
+    pub fn get_all_devices(&self) -> Vec<ArpLine> {
+        let devices = self.arp_table.lock().unwrap();
+        devices.clone()
     }
 
     /// Get device count
     pub fn device_count(&self) -> usize {
-        let devices = self.devices.lock().unwrap();
+        let devices = self.arp_table.lock().unwrap();
         devices.len()
     }
 
@@ -324,13 +329,31 @@ impl DeviceManager {
         }
     }
 
+    /// Force refresh ARP table if enough time has passed since last refresh
+    /// Returns true if refresh was performed, false if skipped due to recent refresh
+    pub fn force_refresh_if_needed(&self) -> Result<bool> {
+        let should_refresh = {
+            let last_refresh = self.last_refresh.lock().unwrap();
+            if let Ok(elapsed) = last_refresh.elapsed() {
+                elapsed >= self.refresh_interval
+            } else {
+                // System time went backwards, refresh anyway
+                true
+            }
+        };
+
+        if should_refresh {
+            self.refresh_arp_table()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Refresh ARP/neighbor cache by flushing old entries
-    /// This forces the system to rediscover neighbors and removes stale entries
     fn refresh_arp_cache(&self) -> Result<()> {
         log::debug!("Refreshing ARP/neighbor cache by flushing old entries...");
 
-        // Flush all neighbor cache entries (both IPv4 and IPv6)
-        // Note: This will temporarily disrupt network connectivity until neighbors are rediscovered
         if let Err(e) = std::process::Command::new("ip")
             .args(["-s", "-s", "neigh", "flush", "all"])
             .output()
@@ -339,7 +362,6 @@ impl DeviceManager {
         }
 
         // Wait for neighbors to be rediscovered
-        // ARP requests are typically sent immediately, but we give some time for responses
         log::debug!("Waiting for neighbor rediscovery...");
         thread::sleep(Duration::from_secs(5));
 

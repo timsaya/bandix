@@ -1,5 +1,6 @@
 mod api;
 mod command;
+mod device;
 mod ebpf;
 mod monitor;
 mod storage;

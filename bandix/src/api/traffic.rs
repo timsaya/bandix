@@ -1,13 +1,14 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::storage::traffic::{
-    self, BaselineTotals, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
+    self, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
 };
 use crate::utils::format_utils::{format_bytes, format_mac};
-use bandix_common::MacTrafficStats;
+use bandix_common::DeviceTrafficStats;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,20 +19,25 @@ pub struct DeviceInfo {
     pub ipv6_addresses: Vec<String>,
     pub mac: String,
     pub hostname: String,
+
     pub total_rx_bytes: u64,
     pub total_tx_bytes: u64,
     pub total_rx_rate: u64,
     pub total_tx_rate: u64,
-    pub wide_rx_rate_limit: u64,
-    pub wide_tx_rate_limit: u64,
-    pub local_rx_bytes: u64,
-    pub local_tx_bytes: u64,
-    pub local_rx_rate: u64,
-    pub local_tx_rate: u64,
-    pub wide_rx_bytes: u64,
-    pub wide_tx_bytes: u64,
-    pub wide_rx_rate: u64,
-    pub wide_tx_rate: u64,
+
+    pub wan_rx_rate_limit: u64,
+    pub wan_tx_rate_limit: u64,
+
+    pub lan_rx_bytes: u64,
+    pub lan_tx_bytes: u64,
+    pub lan_rx_rate: u64,
+    pub lan_tx_rate: u64,
+
+    pub wan_rx_bytes: u64,
+    pub wan_tx_bytes: u64,
+    pub wan_rx_rate: u64,
+    pub wan_tx_rate: u64,
+
     pub last_online_ts: u64,
 }
 
@@ -43,9 +49,9 @@ pub struct DevicesResponse {
 
 /// Metrics response structure
 /// metrics is a Vec of arrays, each array contains:
-/// [ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate,
-///  wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes,
-///  local_rx_bytes, local_tx_bytes, wide_rx_bytes, wide_tx_bytes]
+/// [ts_ms, total_rx_rate, total_tx_rate, lan_rx_rate, lan_tx_rate,
+///  wan_rx_rate, wan_tx_rate, total_rx_bytes, total_tx_bytes,
+///  lan_rx_bytes, lan_tx_bytes, wan_rx_bytes, wan_tx_bytes]
 #[derive(Serialize, Deserialize)]
 pub struct MetricsResponse {
     pub retention_seconds: u64,
@@ -59,11 +65,11 @@ pub struct DeviceUsageRanking {
     pub mac: String,
     pub hostname: String,
     pub ip: String,
-    pub total_bytes: u64,        // Total bytes (rx + tx) in the time range
-    pub rx_bytes: u64,            // Receive bytes
-    pub tx_bytes: u64,            // Transmit bytes
-    pub percentage: f64,          // Percentage of total usage
-    pub rank: usize,              // Ranking position (1-based)
+    pub total_bytes: u64, // Total bytes (rx + tx) in the time range
+    pub rx_bytes: u64,    // Receive bytes
+    pub tx_bytes: u64,    // Transmit bytes
+    pub percentage: f64,  // Percentage of total usage
+    pub rank: usize,      // Ranking position (1-based)
 }
 
 /// Device usage ranking response structure
@@ -71,20 +77,20 @@ pub struct DeviceUsageRanking {
 pub struct DeviceUsageRankingResponse {
     pub start_ms: u64,
     pub end_ms: u64,
-    pub total_bytes: u64,         // Total bytes across all devices
-    pub total_rx_bytes: u64,      // Total receive bytes across all devices
-    pub total_tx_bytes: u64,      // Total transmit bytes across all devices
-    pub device_count: usize,      // Number of devices
+    pub total_bytes: u64,    // Total bytes across all devices
+    pub total_rx_bytes: u64, // Total receive bytes across all devices
+    pub total_tx_bytes: u64, // Total transmit bytes across all devices
+    pub device_count: usize, // Number of devices
     pub rankings: Vec<DeviceUsageRanking>,
 }
 
 /// Time series increment entry (hourly or daily)
 #[derive(Serialize, Deserialize)]
 pub struct TimeSeriesIncrement {
-    pub ts_ms: u64,               // Timestamp (start of hour or day)
-    pub rx_bytes: u64,            // Receive bytes increment in this period
-    pub tx_bytes: u64,            // Transmit bytes increment in this period
-    pub total_bytes: u64,         // Total bytes increment (rx + tx)
+    pub ts_ms: u64,       // Timestamp (start of hour or day)
+    pub rx_bytes: u64,    // Receive bytes increment in this period
+    pub tx_bytes: u64,    // Transmit bytes increment in this period
+    pub total_bytes: u64, // Total bytes increment (rx + tx)
 }
 
 /// Time series increment response structure
@@ -92,12 +98,12 @@ pub struct TimeSeriesIncrement {
 pub struct TimeSeriesIncrementResponse {
     pub start_ms: u64,
     pub end_ms: u64,
-    pub aggregation: String,      // "hourly" or "daily"
-    pub mac: String,              // MAC address (or "all" for aggregate)
+    pub aggregation: String, // "hourly" or "daily"
+    pub mac: String,         // MAC address (or "all" for aggregate)
     pub increments: Vec<TimeSeriesIncrement>,
-    pub total_rx_bytes: u64,      // Total RX bytes in the range
-    pub total_tx_bytes: u64,      // Total TX bytes in the range
-    pub total_bytes: u64,         // Total bytes in the range
+    pub total_rx_bytes: u64, // Total RX bytes in the range
+    pub total_tx_bytes: u64, // Total TX bytes in the range
+    pub total_bytes: u64,    // Total bytes in the range
 }
 
 /// Hostname binding information for API response
@@ -172,8 +178,8 @@ impl TryFrom<&TimeSlotApi> for TimeSlot {
 pub struct ScheduledRateLimitInfo {
     pub mac: String,
     pub time_slot: TimeSlotApi,
-    pub wide_rx_rate_limit: u64,
-    pub wide_tx_rate_limit: u64,
+    pub wan_rx_rate_limit: u64,
+    pub wan_tx_rate_limit: u64,
 }
 
 /// Scheduled rate limits response structure
@@ -187,8 +193,8 @@ pub struct ScheduledRateLimitsResponse {
 pub struct SetScheduledLimitRequest {
     pub mac: String,
     pub time_slot: TimeSlotApi,
-    pub wide_rx_rate_limit: u64,
-    pub wide_tx_rate_limit: u64,
+    pub wan_rx_rate_limit: u64,
+    pub wan_tx_rate_limit: u64,
 }
 
 /// Delete scheduled limit request structure
@@ -201,32 +207,32 @@ pub struct DeleteScheduledLimitRequest {
 /// Traffic monitoring API handler
 #[derive(Clone)]
 pub struct TrafficApiHandler {
-    mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
-    baselines: Arc<Mutex<HashMap<[u8; 6], BaselineTotals>>>, // Historical device baselines
+    mac_stats: Arc<Mutex<HashMap<[u8; 6], DeviceTrafficStats>>>,
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-    realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
-    multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month/year)
+    realtime_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling (memory-only)
+    long_term_manager: Arc<MultiLevelRingManager>, // Long-term sampling (day/week/month/year, persisted)
+    device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // Centralized device registry
     options: Options,
 }
 
 impl TrafficApiHandler {
     pub fn new(
-        mac_stats: Arc<Mutex<HashMap<[u8; 6], MacTrafficStats>>>,
-        baselines: Arc<Mutex<HashMap<[u8; 6], BaselineTotals>>>,
+        mac_stats: Arc<Mutex<HashMap<[u8; 6], DeviceTrafficStats>>>,
         scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-        realtime_ring_manager: Arc<RealtimeRingManager>,
-        multi_level_ring_manager: Arc<MultiLevelRingManager>,
+        realtime_manager: Arc<RealtimeRingManager>,
+        long_term_manager: Arc<MultiLevelRingManager>,
+        device_registry: Arc<crate::storage::device_registry::DeviceRegistry>,
         options: Options,
     ) -> Self {
         Self {
             mac_stats,
-            baselines,
             scheduled_rate_limits,
             hostname_bindings,
-            realtime_ring_manager,
-            multi_level_ring_manager,
+            realtime_manager,
+            long_term_manager,
+            device_registry,
             options,
         }
     }
@@ -238,15 +244,10 @@ impl TrafficApiHandler {
             "/api/traffic/devices",
             "/api/traffic/limits/schedule",
             "/api/traffic/metrics",
-            "/api/traffic/metrics/hour",
-            "/api/traffic/metrics/day",
-            "/api/traffic/metrics/week",
-            "/api/traffic/metrics/month",
             "/api/traffic/metrics/year",
             "/api/traffic/bindings",
             "/api/traffic/usage/ranking",
             "/api/traffic/usage/increments",
-            
         ]
     }
 
@@ -274,30 +275,9 @@ impl TrafficApiHandler {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
             }
-            "/api/traffic/metrics/day" => {
-                if request.method == "GET" {
-                    self.handle_metrics_level(request, "day").await
-                } else {
-                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
-                }
-            }
-            "/api/traffic/metrics/week" => {
-                if request.method == "GET" {
-                    self.handle_metrics_level(request, "week").await
-                } else {
-                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
-                }
-            }
-            "/api/traffic/metrics/month" => {
-                if request.method == "GET" {
-                    self.handle_metrics_level(request, "month").await
-                } else {
-                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
-                }
-            }
             "/api/traffic/metrics/year" => {
                 if request.method == "GET" {
-                    self.handle_metrics_level(request, "year").await
+                    self.handle_metrics_year(request).await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
@@ -331,25 +311,17 @@ impl TrafficApiHandler {
     /// Handle /api/devices endpoint
     async fn handle_devices(&self) -> Result<HttpResponse, anyhow::Error> {
         let stats_map = self.mac_stats.lock().unwrap();
-        let baselines_map = self.baselines.lock().unwrap();
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
         // Get IPv6 neighbor table from system
         let ipv6_neighbors = crate::utils::network_utils::get_ipv6_neighbors().unwrap_or_default();
 
-        // Collect all devices: current (from mac_stats) and historical (from baselines)
-        use std::collections::HashSet;
-        let mut all_macs: HashSet<[u8; 6]> = HashSet::new();
-        
-        // Add current devices (with last_sample_ts > 0)
-        for (mac, stats) in stats_map.iter() {
-            if stats.last_sample_ts > 0 {
-                all_macs.insert(*mac);
-            }
-        }
-        
-        // Add historical devices (from baselines)
-        for mac in baselines_map.keys() {
+        // Collect all devices from centralized registry (includes historical devices)
+        let registry_devices = self.device_registry.get_all_devices();
+        let mut all_macs: HashSet<[u8; 6]> = registry_devices.iter().map(|d| d.mac).collect();
+
+        // Also add devices from current stats (baseline already applied during initialization)
+        for mac in stats_map.keys() {
             all_macs.insert(*mac);
         }
 
@@ -359,58 +331,107 @@ impl TrafficApiHandler {
                 // Format MAC address
                 let mac_str = format_mac(&mac);
 
-                // Try to get current stats, otherwise use baseline
-                let (ip_address, total_rx_bytes, total_tx_bytes, total_rx_rate, total_tx_rate,
-                     wide_rx_rate_limit, wide_tx_rate_limit, local_rx_bytes, local_tx_bytes,
-                     local_rx_rate, local_tx_rate, wide_rx_bytes, wide_tx_bytes,
-                     wide_rx_rate, wide_tx_rate, last_online_ts, ipv6_count, ipv6_addresses_from_stats) = 
-                    if let Some(stats) = stats_map.get(&mac) {
-                        // Current device - use stats from mac_stats
-                        (stats.ip_address, stats.total_rx_bytes, stats.total_tx_bytes,
-                         stats.total_rx_rate, stats.total_tx_rate,
-                         stats.wide_rx_rate_limit, stats.wide_tx_rate_limit,
-                         stats.local_rx_bytes, stats.local_tx_bytes,
-                         stats.local_rx_rate, stats.local_tx_rate,
-                         stats.wide_rx_bytes, stats.wide_tx_bytes,
-                         stats.wide_rx_rate, stats.wide_tx_rate,
-                         stats.last_online_ts, stats.ipv6_count, stats.ipv6_addresses)
-                    } else if let Some(baseline) = baselines_map.get(&mac) {
-                        // Historical device - use baseline data, rates are 0 (offline)
-                        (baseline.ip_address, baseline.total_rx_bytes, baseline.total_tx_bytes,
-                         0, 0, // rates are 0 for offline devices
-                         0, 0, // rate limits are 0 for offline devices
-                         baseline.local_rx_bytes, baseline.local_tx_bytes,
-                         0, 0, // rates are 0 for offline devices
-                         baseline.wide_rx_bytes, baseline.wide_tx_bytes,
-                         0, 0, // rates are 0 for offline devices
-                         baseline.last_online_ts, 0, [[0u8; 16]; 16])
-                    } else {
-                        // Should not happen, but provide defaults
-                        ([0, 0, 0, 0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, [[0u8; 16]; 16])
-                    };
+                // Get stats from mac_stats (baseline already applied during initialization)
+                let (
+                    ip_address,
+                    total_rx_bytes,
+                    total_tx_bytes,
+                    total_rx_rate,
+                    total_tx_rate,
+                    wan_rx_rate_limit,
+                    wan_tx_rate_limit,
+                    lan_rx_bytes,
+                    lan_tx_bytes,
+                    lan_rx_rate,
+                    lan_tx_rate,
+                    wan_rx_bytes,
+                    wan_tx_bytes,
+                    wan_rx_rate,
+                    wan_tx_rate,
+                    last_online_ts,
+                    ipv6_addresses_from_stats,
+                ) = if let Some(stats) = stats_map.get(&mac) {
+                    // Device stats (includes baseline for offline devices)
+                    (
+                        stats.ip_address,
+                        stats.total_rx_bytes(),
+                        stats.total_tx_bytes(),
+                        stats.total_rx_rate(),
+                        stats.total_tx_rate(),
+                        stats.wan_rx_rate_limit,
+                        stats.wan_tx_rate_limit,
+                        stats.lan_rx_bytes,
+                        stats.lan_tx_bytes,
+                        stats.lan_rx_rate,
+                        stats.lan_tx_rate,
+                        stats.wan_rx_bytes,
+                        stats.wan_tx_bytes,
+                        stats.wan_rx_rate,
+                        stats.wan_tx_rate,
+                        stats.last_online_ts,
+                        stats.ipv6_addresses,
+                    )
+                } else {
+                    // Should not happen, but provide defaults
+                    (
+                        [0, 0, 0, 0],
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        [[0u8; 16]; 16],
+                    )
+                };
+
+                // Get device record from registry (includes historical IP addresses)
+                let device_record = self.device_registry.get_device(&mac);
+
+                // Use current IP from stats/baseline, or fallback to registry
+                let final_ipv4 = if ip_address != [0, 0, 0, 0] {
+                    ip_address
+                } else if let Some(record) = &device_record {
+                    record.current_ipv4.unwrap_or([0, 0, 0, 0])
+                } else {
+                    [0, 0, 0, 0]
+                };
 
                 // Format IP address
                 let ip_str = format!(
                     "{}.{}.{}.{}",
-                    ip_address[0],
-                    ip_address[1],
-                    ip_address[2],
-                    ip_address[3]
+                    final_ipv4[0], final_ipv4[1], final_ipv4[2], final_ipv4[3]
                 );
 
-                // Get IPv6 addresses for this MAC
-                // Combine addresses from eBPF stats, baseline, and system neighbor table
+                // Get IPv6 addresses: combine current from stats, registry, and system neighbor table
                 let mut ipv6_addresses_set: HashSet<[u8; 16]> = HashSet::new();
 
                 // First, add IPv6 addresses from eBPF stats (if current device)
-                for i in 0..(ipv6_count as usize) {
-                    let addr = ipv6_addresses_from_stats[i];
-                    if addr != [0u8; 16] {
-                        ipv6_addresses_set.insert(addr);
+                for addr in ipv6_addresses_from_stats.iter() {
+                    if *addr != [0u8; 16] {
+                        ipv6_addresses_set.insert(*addr);
                     }
                 }
 
-                // Then, add IPv6 addresses from system neighbor table
+                // Then, add IPv6 addresses from registry (current and historical)
+                if let Some(record) = &device_record {
+                    for addr in &record.current_ipv6 {
+                        if *addr != [0u8; 16] {
+                            ipv6_addresses_set.insert(*addr);
+                        }
+                    }
+                }
+
+                // Finally, add IPv6 addresses from system neighbor table
                 if let Some(addrs) = ipv6_neighbors.get(&mac) {
                     for addr in addrs {
                         if *addr != [0u8; 16] {
@@ -440,21 +461,30 @@ impl TrafficApiHandler {
                     total_tx_bytes,
                     total_rx_rate,
                     total_tx_rate,
-                    wide_rx_rate_limit,
-                    wide_tx_rate_limit,
-                    local_rx_bytes,
-                    local_tx_bytes,
-                    local_rx_rate,
-                    local_tx_rate,
-                    wide_rx_bytes,
-                    wide_tx_bytes,
-                    wide_rx_rate,
-                    wide_tx_rate,
+                    wan_rx_rate_limit,
+                    wan_tx_rate_limit,
+                    lan_rx_bytes,
+                    lan_tx_bytes,
+                    lan_rx_rate,
+                    lan_tx_rate,
+                    wan_rx_bytes,
+                    wan_tx_bytes,
+                    wan_rx_rate,
+                    wan_tx_rate,
                     last_online_ts,
                 }
             })
-            .filter(|device| device.last_online_ts > 0) // Filter out devices that never had transmit traffic
+            .filter(|device| device.last_online_ts > 0)
             .collect();
+
+        let mut devices = devices;
+        devices.sort_by(|a, b| {
+            let a_ip: std::net::Ipv4Addr =
+                a.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+            let b_ip: std::net::Ipv4Addr =
+                b.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+            a_ip.cmp(&b_ip)
+        });
 
         let response = DevicesResponse { devices };
         let api_response = ApiResponse::success(response);
@@ -462,7 +492,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/metrics endpoint
+    /// Handle /api/metrics endpoint - Real-time metrics (memory-only, not persisted)
     async fn handle_metrics(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let mac_opt = request.query_params.get("mac").cloned();
 
@@ -477,14 +507,14 @@ impl TrafficApiHandler {
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    self.realtime_ring_manager
+                    self.realtime_manager
                         .query_metrics_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        self.realtime_ring_manager
+                        self.realtime_manager
                             .query_metrics(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
@@ -494,9 +524,8 @@ impl TrafficApiHandler {
                 }
             }
         } else {
-            // mac omitted => aggregate all within window
             (
-                self.realtime_ring_manager
+                self.realtime_manager
                     .query_metrics_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
@@ -504,10 +533,6 @@ impl TrafficApiHandler {
 
         match rows_result {
             Ok(rows) => {
-                // Convert to compact array format: [ts_ms, total_rx_rate, total_tx_rate,
-                // local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate,
-                // total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes,
-                // wide_rx_bytes, wide_tx_bytes]
                 let metrics: Vec<Vec<u64>> = rows
                     .iter()
                     .map(|r| {
@@ -515,16 +540,16 @@ impl TrafficApiHandler {
                             r.ts_ms,
                             r.total_rx_rate,
                             r.total_tx_rate,
-                            r.local_rx_rate,
-                            r.local_tx_rate,
-                            r.wide_rx_rate,
-                            r.wide_tx_rate,
+                            r.lan_rx_rate,
+                            r.lan_tx_rate,
+                            r.wan_rx_rate,
+                            r.wan_tx_rate,
                             r.total_rx_bytes,
                             r.total_tx_bytes,
-                            r.local_rx_bytes,
-                            r.local_tx_bytes,
-                            r.wide_rx_bytes,
-                            r.wide_tx_bytes,
+                            r.lan_rx_bytes,
+                            r.lan_tx_bytes,
+                            r.wan_rx_bytes,
+                            r.wan_tx_bytes,
                         ]
                     })
                     .collect();
@@ -536,7 +561,107 @@ impl TrafficApiHandler {
                 };
 
                 let api_response = ApiResponse::success(response);
-                // Use compact JSON serialization (minified, no whitespace)
+                let body = serde_json::to_string(&api_response)?;
+                Ok(HttpResponse::ok(body))
+            }
+            Err(e) => Ok(HttpResponse::error(500, e.to_string())),
+        }
+    }
+
+    /// Handle /api/traffic/metrics/year endpoint - Year-level statistics (persisted)
+    async fn handle_metrics_year(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let mac_opt = request.query_params.get("mac").cloned();
+
+        let year_manager = match self.long_term_manager.get_manager_by_level("year") {
+            Some(manager) => manager,
+            None => {
+                return Ok(HttpResponse::error(
+                    500,
+                    "Internal error: year level manager not found".to_string(),
+                ));
+            }
+        };
+
+        // Get year-level sampling configuration
+        let sampling_level = match self.long_term_manager.get_level_by_name("year") {
+            Some(level) => level,
+            None => {
+                return Ok(HttpResponse::error(
+                    500,
+                    "Internal error: year level config not found".to_string(),
+                ));
+            }
+        };
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        let retention_seconds = sampling_level.retention_seconds;
+        let start_ms = now_ms.saturating_sub(retention_seconds * 1000);
+        let end_ms = now_ms;
+
+        let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
+            if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
+                (
+                    year_manager.query_stats_aggregate_all(start_ms, end_ms),
+                    "all".to_string(),
+                )
+            } else {
+                match crate::utils::network_utils::parse_mac_address(&mac_str) {
+                    Ok(mac) => (
+                        year_manager.query_stats(&mac, start_ms, end_ms),
+                        format_mac(&mac),
+                    ),
+                    Err(e) => {
+                        return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e)));
+                    }
+                }
+            }
+        } else {
+            (
+                year_manager.query_stats_aggregate_all(start_ms, end_ms),
+                "all".to_string(),
+            )
+        };
+
+        match rows_result {
+            Ok(rows) => {
+                // Convert to array format with statistics:
+                // [ts_ms, wan_rx_rate_avg, wan_rx_rate_max, wan_rx_rate_min, wan_rx_rate_p90, wan_rx_rate_p95, wan_rx_rate_p99,
+                //  wan_tx_rate_avg, wan_tx_rate_max, wan_tx_rate_min, wan_tx_rate_p90, wan_tx_rate_p95, wan_tx_rate_p99,
+                //  wan_rx_bytes, wan_tx_bytes]
+                let metrics: Vec<Vec<u64>> = rows
+                    .iter()
+                    .map(|r| {
+                        vec![
+                            r.ts_ms,
+                            r.wan_rx_rate_avg,
+                            r.wan_rx_rate_max,
+                            r.wan_rx_rate_min,
+                            r.wan_rx_rate_p90,
+                            r.wan_rx_rate_p95,
+                            r.wan_rx_rate_p99,
+                            r.wan_tx_rate_avg,
+                            r.wan_tx_rate_max,
+                            r.wan_tx_rate_min,
+                            r.wan_tx_rate_p90,
+                            r.wan_tx_rate_p95,
+                            r.wan_tx_rate_p99,
+                            r.wan_rx_bytes,
+                            r.wan_tx_bytes,
+                        ]
+                    })
+                    .collect();
+
+                let response = MetricsResponse {
+                    retention_seconds: retention_seconds as u64,
+                    mac: mac_label,
+                    metrics,
+                };
+
+                let api_response = ApiResponse::success(response);
                 let body = serde_json::to_string(&api_response)?;
                 Ok(HttpResponse::ok(body))
             }
@@ -623,8 +748,8 @@ impl TrafficApiHandler {
             .map(|rule| ScheduledRateLimitInfo {
                 mac: format_mac(&rule.mac),
                 time_slot: TimeSlotApi::from(&rule.time_slot),
-                wide_rx_rate_limit: rule.wide_rx_rate_limit,
-                wide_tx_rate_limit: rule.wide_tx_rate_limit,
+                wan_rx_rate_limit: rule.wan_rx_rate_limit,
+                wan_tx_rate_limit: rule.wan_tx_rate_limit,
             })
             .collect();
 
@@ -654,8 +779,8 @@ impl TrafficApiHandler {
         let scheduled_limit = ScheduledRateLimit {
             mac,
             time_slot,
-            wide_rx_rate_limit: set_request.wide_rx_rate_limit,
-            wide_tx_rate_limit: set_request.wide_tx_rate_limit,
+            wan_rx_rate_limit: set_request.wan_rx_rate_limit,
+            wan_tx_rate_limit: set_request.wan_tx_rate_limit,
         };
 
         // Update in-memory scheduled rate limits
@@ -677,16 +802,16 @@ impl TrafficApiHandler {
         traffic::upsert_scheduled_limit(self.options.data_dir(), &scheduled_limit)?;
 
         // Log the change
-        let rx_str = if scheduled_limit.wide_rx_rate_limit == 0 {
+        let rx_str = if scheduled_limit.wan_rx_rate_limit == 0 {
             "Unlimited".to_string()
         } else {
-            format!("{}/s", format_bytes(scheduled_limit.wide_rx_rate_limit))
+            format!("{}/s", format_bytes(scheduled_limit.wan_rx_rate_limit))
         };
 
-        let tx_str = if scheduled_limit.wide_tx_rate_limit == 0 {
+        let tx_str = if scheduled_limit.wan_tx_rate_limit == 0 {
             "Unlimited".to_string()
         } else {
-            format!("{}/s", format_bytes(scheduled_limit.wide_tx_rate_limit))
+            format!("{}/s", format_bytes(scheduled_limit.wan_tx_rate_limit))
         };
 
         log::info!(
@@ -751,127 +876,18 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/metrics/{level} endpoint (day/week/month/year)
-    async fn handle_metrics_level(
-        &self,
-        request: &HttpRequest,
-        level: &str,
-    ) -> Result<HttpResponse, anyhow::Error> {
-        // Get the specific level's configuration
-        let sampling_level = match self.multi_level_ring_manager.get_level_by_name(level) {
-            Some(level) => level,
-            None => {
-                return Ok(HttpResponse::error(
-                    400,
-                    format!("Invalid level: {}", level),
-                ));
-            }
-        };
-
-        let mac_opt = request.query_params.get("mac").cloned();
-
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .as_millis() as u64;
-
-        let retention_seconds = sampling_level.retention_seconds;
-        let start_ms = now_ms.saturating_sub(retention_seconds * 1000);
-        let end_ms = now_ms;
-
-        // Get the specific level's manager (day/week/month/year)
-        let level_manager = match self.multi_level_ring_manager.get_manager_by_level(level) {
-            Some(manager) => manager,
-            None => {
-                return Ok(HttpResponse::error(
-                    500,
-                    format!("Internal error: level '{}' manager not found", level),
-                ));
-            }
-        };
-
-        // Query statistics from the specific level's manager only
-        let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
-            if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
-                // Aggregate query from specific level
-                (
-                    level_manager.query_stats_aggregate_all(start_ms, end_ms),
-                    "all".to_string(),
-                )
-            } else {
-                match crate::utils::network_utils::parse_mac_address(&mac_str) {
-                    Ok(mac) => {
-                        // Query from specific level
-                        (
-                            level_manager.query_stats(&mac, start_ms, end_ms),
-                            format_mac(&mac),
-                        )
-                    }
-                    Err(e) => {
-                        return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e)));
-                    }
-                }
-            }
-        } else {
-            // mac omitted => aggregate all within window
-            (
-                level_manager.query_stats_aggregate_all(start_ms, end_ms),
-                "all".to_string(),
-            )
-        };
-
-        match rows_result {
-            Ok(rows) => {
-                // Convert to array format with statistics:
-                // [ts_ms,
-                //  wide_rx_rate_avg, wide_rx_rate_max, wide_rx_rate_min, wide_rx_rate_p90, wide_rx_rate_p95, wide_rx_rate_p99,
-                //  wide_tx_rate_avg, wide_tx_rate_max, wide_tx_rate_min, wide_tx_rate_p90, wide_tx_rate_p95, wide_tx_rate_p99,
-                //  wide_rx_bytes, wide_tx_bytes]
-                let metrics: Vec<Vec<u64>> = rows
-                    .iter()
-                    .map(|r| {
-                        vec![
-                            r.ts_ms,
-                            r.wide_rx_rate_avg,
-                            r.wide_rx_rate_max,
-                            r.wide_rx_rate_min,
-                            r.wide_rx_rate_p90,
-                            r.wide_rx_rate_p95,
-                            r.wide_rx_rate_p99,
-                            r.wide_tx_rate_avg,
-                            r.wide_tx_rate_max,
-                            r.wide_tx_rate_min,
-                            r.wide_tx_rate_p90,
-                            r.wide_tx_rate_p95,
-                            r.wide_tx_rate_p99,
-                            r.wide_rx_bytes,
-                            r.wide_tx_bytes,
-                        ]
-                    })
-                    .collect();
-
-                let response = MetricsResponse {
-                    retention_seconds: retention_seconds as u64,
-                    mac: mac_label,
-                    metrics,
-                };
-
-                let api_response = ApiResponse::success(response);
-                let body = serde_json::to_string(&api_response)?;
-                Ok(HttpResponse::ok(body))
-            }
-            Err(e) => Ok(HttpResponse::error(500, e.to_string())),
-        }
-    }
 
     /// Handle /api/traffic/usage/ranking endpoint
     /// Query device usage ranking within a specified time range from year-level data
     /// Query parameters:
     ///   - start_ms: Start timestamp in milliseconds (optional, defaults to 365 days ago)
     ///   - end_ms: End timestamp in milliseconds (optional, defaults to now)
-    async fn handle_usage_ranking(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_usage_ranking(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         // Get year-level manager
-        let year_manager = match self.multi_level_ring_manager.get_manager_by_level("year") {
+        let year_manager = match self.long_term_manager.get_manager_by_level("year") {
             Some(manager) => manager,
             None => {
                 return Ok(HttpResponse::error(
@@ -914,7 +930,10 @@ impl TrafficApiHandler {
         let device_stats = match year_manager.query_stats_by_device(start_ms, end_ms) {
             Ok(stats) => stats,
             Err(e) => {
-                return Ok(HttpResponse::error(500, format!("Failed to query stats: {}", e)));
+                return Ok(HttpResponse::error(
+                    500,
+                    format!("Failed to query stats: {}", e),
+                ));
             }
         };
 
@@ -933,35 +952,26 @@ impl TrafficApiHandler {
             return Ok(HttpResponse::ok(body));
         }
 
-        // Get hostname bindings and device info
         let bindings_map = self.hostname_bindings.lock().unwrap();
         let stats_map = self.mac_stats.lock().unwrap();
-        let baselines_map = self.baselines.lock().unwrap();
 
-        // Calculate total bytes and create ranking entries
         let mut rankings: Vec<DeviceUsageRanking> = Vec::new();
         let mut total_bytes = 0u64;
         let mut total_rx_bytes = 0u64;
         let mut total_tx_bytes = 0u64;
 
         for (mac, stats) in device_stats.iter() {
-            let total_device_bytes = stats.wide_rx_bytes + stats.wide_tx_bytes;
+            let total_device_bytes = stats.wan_rx_bytes + stats.wan_tx_bytes;
             total_bytes = total_bytes.saturating_add(total_device_bytes);
-            total_rx_bytes = total_rx_bytes.saturating_add(stats.wide_rx_bytes);
-            total_tx_bytes = total_tx_bytes.saturating_add(stats.wide_tx_bytes);
+            total_rx_bytes = total_rx_bytes.saturating_add(stats.wan_rx_bytes);
+            total_tx_bytes = total_tx_bytes.saturating_add(stats.wan_tx_bytes);
 
-            // Get device info (hostname, IP)
             let mac_str = format_mac(mac);
             let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
 
-            // Get IP address from current stats or baseline
-            let ip_address = if let Some(current_stats) = stats_map.get(mac) {
-                current_stats.ip_address
-            } else if let Some(baseline) = baselines_map.get(mac) {
-                baseline.ip_address
-            } else {
-                [0, 0, 0, 0]
-            };
+            let ip_address = stats_map.get(mac)
+                .map(|s| s.ip_address)
+                .unwrap_or([0, 0, 0, 0]);
 
             let ip_str = format!(
                 "{}.{}.{}.{}",
@@ -973,8 +983,8 @@ impl TrafficApiHandler {
                 hostname,
                 ip: ip_str,
                 total_bytes: total_device_bytes,
-                rx_bytes: stats.wide_rx_bytes,
-                tx_bytes: stats.wide_tx_bytes,
+                rx_bytes: stats.wan_rx_bytes,
+                tx_bytes: stats.wan_tx_bytes,
                 percentage: 0.0, // Will calculate after sorting
                 rank: 0,         // Will set after sorting
             });
@@ -1013,9 +1023,12 @@ impl TrafficApiHandler {
     ///   - start_ms: Start timestamp in milliseconds (optional, defaults to 365 days ago)
     ///   - end_ms: End timestamp in milliseconds (optional, defaults to now)
     ///   - aggregation: "hourly" or "daily" (optional, defaults to "hourly")
-    async fn handle_usage_increments(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_usage_increments(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         // Get year-level manager
-        let year_manager = match self.multi_level_ring_manager.get_manager_by_level("year") {
+        let year_manager = match self.long_term_manager.get_manager_by_level("year") {
             Some(manager) => manager,
             None => {
                 return Ok(HttpResponse::error(
@@ -1049,9 +1062,7 @@ impl TrafficApiHandler {
             .query_params
             .get("start_ms")
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| {
-                now_ms.saturating_sub(365 * 24 * 3600 * 1000)
-            });
+            .unwrap_or_else(|| now_ms.saturating_sub(365 * 24 * 3600 * 1000));
 
         let end_ms = request
             .query_params
@@ -1136,27 +1147,27 @@ fn aggregate_to_daily(
     end_ms: u64,
 ) -> Vec<TimeSeriesIncrement> {
     use std::collections::BTreeMap;
-    
+
     // Group by day (timestamp at 00:00:00 UTC of each day)
     let mut daily_map: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
-    
+
     for (ts_ms, rx_bytes, tx_bytes) in hourly_increments {
         // Convert timestamp to start of day (00:00:00 UTC) in milliseconds
         // Use chrono to properly handle UTC timezone
         let ts_secs = (ts_ms / 1000) as i64;
         let dt = DateTime::<Utc>::from_timestamp(ts_secs, 0)
             .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
-        
+
         // Get the date at 00:00:00 UTC
         let day_start_dt = dt.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let day_start_utc = DateTime::<Utc>::from_naive_utc_and_offset(day_start_dt, Utc);
         let day_start_ms = day_start_utc.timestamp_millis() as u64;
-        
+
         let entry = daily_map.entry(day_start_ms).or_insert((0, 0));
         entry.0 = entry.0.saturating_add(rx_bytes);
         entry.1 = entry.1.saturating_add(tx_bytes);
     }
-    
+
     // Filter out days that are not within the requested time range
     // A day is included if its start timestamp (00:00:00 UTC) is within [start_ms, end_ms)
     daily_map

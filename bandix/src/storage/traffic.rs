@@ -1,5 +1,5 @@
 use anyhow::Context;
-use bandix_common::MacTrafficStats;
+use bandix_common::DeviceTrafficStats;
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -156,8 +156,8 @@ impl TimeSlot {
 pub struct ScheduledRateLimit {
     pub mac: [u8; 6],
     pub time_slot: TimeSlot,
-    pub wide_rx_rate_limit: u64,
-    pub wide_tx_rate_limit: u64,
+    pub wan_rx_rate_limit: u64,
+    pub wan_tx_rate_limit: u64,
 }
 
 const RING_MAGIC: [u8; 4] = *b"BXR1"; // bandix ring magic
@@ -175,12 +175,12 @@ const RING_VERSION_REALTIME: u32 = RING_VERSION_REALTIME_V3; // Current version
 // Per-slot structure for real-time data (little-endian):
 // Version 2:
 //   ts_ms: u64
-//   total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
+//   total_rx_rate..wan_tx_bytes: 12 u64 values in total (see MetricsRow)
 //   last_online_ts: u64
 //   Slot size = 14 * 8 = 112 bytes
 // Version 3:
 //   ts_ms: u64
-//   total_rx_rate..wide_tx_bytes: 12 u64 values in total (see MetricsRow)
+//   total_rx_rate..wan_tx_bytes: 12 u64 values in total (see MetricsRow)
 //   last_online_ts: u64
 //   ip_address: u64 (IPv4 address stored in low 32 bits, high 32 bits are 0)
 //   Slot size = 15 * 8 = 120 bytes
@@ -200,9 +200,9 @@ const RING_VERSION_MULTILEVEL: u32 = 3;
 
 // Per-slot structure for multi-level statistics (little-endian):
 // ts_ms: u64
-// For wide rate metrics (wide_rx_rate, wide_tx_rate):
+// For wide rate metrics (wan_rx_rate, wan_tx_rate):
 //   avg: u64, max: u64, min: u64, p90: u64, p95: u64, p99: u64 (6 * 8 = 48 bytes per metric)
-// wide_rx_bytes: u64, wide_tx_bytes: u64
+// wan_rx_bytes: u64, wan_tx_bytes: u64
 // Slot size = 1 + (2 metrics * 6 stats) + 2 bytes = 1 + 12 + 2 = 15 * 8 = 120 bytes (since v3)
 const SLOT_U64S_MULTILEVEL: usize = 15; // 1 + (2 metrics * 6 stats) + 2 bytes = 15
 /// Slot size for multilevel ring files (120 bytes)
@@ -262,16 +262,16 @@ impl RealtimeRing {
                 ts_ms: slot[0],
                 total_rx_rate: slot[1],
                 total_tx_rate: slot[2],
-                local_rx_rate: slot[3],
-                local_tx_rate: slot[4],
-                wide_rx_rate: slot[5],
-                wide_tx_rate: slot[6],
+                lan_rx_rate: slot[3],
+                lan_tx_rate: slot[4],
+                wan_rx_rate: slot[5],
+                wan_tx_rate: slot[6],
                 total_rx_bytes: slot[7],
                 total_tx_bytes: slot[8],
-                local_rx_bytes: slot[9],
-                local_tx_bytes: slot[10],
-                wide_rx_bytes: slot[11],
-                wide_tx_bytes: slot[12],
+                lan_rx_bytes: slot[9],
+                lan_tx_bytes: slot[10],
+                wan_rx_bytes: slot[11],
+                wan_tx_bytes: slot[12],
             });
         }
 
@@ -320,25 +320,25 @@ impl MultilevelRing {
         // ts_ms
         slot[0] = ts_ms;
 
-        // wide_rx_rate: avg, max, min, p90, p95, p99 (indices 1-6)
-        slot[1] = stats.wide_rx_rate.avg;
-        slot[2] = stats.wide_rx_rate.max;
-        slot[3] = stats.wide_rx_rate.min;
-        slot[4] = stats.wide_rx_rate.p90;
-        slot[5] = stats.wide_rx_rate.p95;
-        slot[6] = stats.wide_rx_rate.p99;
+        // wan_rx_rate: avg, max, min, p90, p95, p99 (indices 1-6)
+        slot[1] = stats.wan_rx_rate.avg;
+        slot[2] = stats.wan_rx_rate.max;
+        slot[3] = stats.wan_rx_rate.min;
+        slot[4] = stats.wan_rx_rate.p90;
+        slot[5] = stats.wan_rx_rate.p95;
+        slot[6] = stats.wan_rx_rate.p99;
 
-        // wide_tx_rate: avg, max, min, p90, p95, p99 (indices 7-12)
-        slot[7] = stats.wide_tx_rate.avg;
-        slot[8] = stats.wide_tx_rate.max;
-        slot[9] = stats.wide_tx_rate.min;
-        slot[10] = stats.wide_tx_rate.p90;
-        slot[11] = stats.wide_tx_rate.p95;
-        slot[12] = stats.wide_tx_rate.p99;
+        // wan_tx_rate: avg, max, min, p90, p95, p99 (indices 7-12)
+        slot[7] = stats.wan_tx_rate.avg;
+        slot[8] = stats.wan_tx_rate.max;
+        slot[9] = stats.wan_tx_rate.min;
+        slot[10] = stats.wan_tx_rate.p90;
+        slot[11] = stats.wan_tx_rate.p95;
+        slot[12] = stats.wan_tx_rate.p99;
 
         // Total wide traffic bytes (indices 13-14)
-        slot[13] = stats.wide_rx_bytes;
-        slot[14] = stats.wide_tx_bytes;
+        slot[13] = stats.wan_rx_bytes;
+        slot[14] = stats.wan_tx_bytes;
 
         self.slots[idx as usize] = slot;
         self.current_index = idx;
@@ -359,23 +359,23 @@ impl MultilevelRing {
 
             rows.push(MetricsRowWithStats {
                 ts_ms: slot[0],
-                // wide_rx_rate stats (indices 1-6)
-                wide_rx_rate_avg: slot[1],
-                wide_rx_rate_max: slot[2],
-                wide_rx_rate_min: slot[3],
-                wide_rx_rate_p90: slot[4],
-                wide_rx_rate_p95: slot[5],
-                wide_rx_rate_p99: slot[6],
-                // wide_tx_rate stats (indices 7-12)
-                wide_tx_rate_avg: slot[7],
-                wide_tx_rate_max: slot[8],
-                wide_tx_rate_min: slot[9],
-                wide_tx_rate_p90: slot[10],
-                wide_tx_rate_p95: slot[11],
-                wide_tx_rate_p99: slot[12],
+                // wan_rx_rate stats (indices 1-6)
+                wan_rx_rate_avg: slot[1],
+                wan_rx_rate_max: slot[2],
+                wan_rx_rate_min: slot[3],
+                wan_rx_rate_p90: slot[4],
+                wan_rx_rate_p95: slot[5],
+                wan_rx_rate_p99: slot[6],
+                // wan_tx_rate stats (indices 7-12)
+                wan_tx_rate_avg: slot[7],
+                wan_tx_rate_max: slot[8],
+                wan_tx_rate_min: slot[9],
+                wan_tx_rate_p90: slot[10],
+                wan_tx_rate_p95: slot[11],
+                wan_tx_rate_p99: slot[12],
                 // Total wide traffic bytes (indices 13-14)
-                wide_rx_bytes: slot[13],
-                wide_tx_bytes: slot[14],
+                wan_rx_bytes: slot[13],
+                wan_tx_bytes: slot[14],
             });
         }
 
@@ -395,15 +395,13 @@ impl MultilevelRing {
 /// Memory Ring Manager for real-time data (1-second sampling)
 pub struct RealtimeRingManager {
     pub rings: Arc<Mutex<HashMap<[u8; 6], RealtimeRing>>>,
-    pub base_dir: String,
     pub capacity: u32,
 }
 
 impl RealtimeRingManager {
-    pub fn new(base_dir: String, capacity: u32) -> Self {
+    pub fn new(_base_dir: String, capacity: u32) -> Self {
         Self {
             rings: Arc::new(Mutex::new(HashMap::new())),
-            base_dir,
             capacity,
         }
     }
@@ -470,10 +468,10 @@ impl RealtimeRingManager {
                 total_tx_bytes += tx_rate;
 
                 // Split between local and wide (70% wide, 30% local)
-                let wide_rx_bytes = (total_rx_bytes * 7) / 10;
-                let local_rx_bytes = total_rx_bytes - wide_rx_bytes;
-                let wide_tx_bytes = (total_tx_bytes * 7) / 10;
-                let local_tx_bytes = total_tx_bytes - wide_tx_bytes;
+                let wan_rx_bytes = (total_rx_bytes * 7) / 10;
+                let lan_rx_bytes = total_rx_bytes - wan_rx_bytes;
+                let wan_tx_bytes = (total_tx_bytes * 7) / 10;
+                let lan_tx_bytes = total_tx_bytes - wan_tx_bytes;
 
                 // Update cumulative bytes
                 device_bytes.insert(
@@ -481,44 +479,35 @@ impl RealtimeRingManager {
                     (
                         total_rx_bytes,
                         total_tx_bytes,
-                        local_rx_bytes,
-                        local_tx_bytes,
+                        lan_rx_bytes,
+                        lan_tx_bytes,
                     ),
                 );
 
                 // Wide rates (same proportion)
-                let wide_rx_rate = (rx_rate * 7) / 10;
-                let local_rx_rate = rx_rate - wide_rx_rate;
-                let wide_tx_rate = (tx_rate * 7) / 10;
-                let local_tx_rate = tx_rate - wide_tx_rate;
+                let wan_rx_rate = (rx_rate * 7) / 10;
+                let lan_rx_rate = rx_rate - wan_rx_rate;
+                let wan_tx_rate = (tx_rate * 7) / 10;
+                let lan_tx_rate = tx_rate - wan_tx_rate;
 
-                let stats = MacTrafficStats {
+                let stats = DeviceTrafficStats {
                     ip_address: [192, 168, 1, (mac[5] % 100) as u8 + 10],
                     ipv6_addresses: [[0; 16]; 16],
-                    ipv6_count: 0,
-                    total_rx_bytes,
-                    total_tx_bytes,
-                    total_rx_packets: total_rx_bytes / 1500, // Approximate packet count
-                    total_tx_packets: total_tx_bytes / 1500,
-                    total_last_rx_bytes: total_rx_bytes,
-                    total_last_tx_bytes: total_tx_bytes,
-                    total_rx_rate: rx_rate,
-                    total_tx_rate: tx_rate,
-                    local_rx_bytes,
-                    local_tx_bytes,
-                    local_rx_rate,
-                    local_tx_rate,
-                    local_last_rx_bytes: local_rx_bytes,
-                    local_last_tx_bytes: local_tx_bytes,
-                    wide_rx_bytes,
-                    wide_tx_bytes,
-                    wide_rx_rate,
-                    wide_tx_rate,
-                    wide_last_rx_bytes: wide_rx_bytes,
-                    wide_last_tx_bytes: wide_tx_bytes,
-                    wide_rx_rate_limit: 0,
-                    wide_tx_rate_limit: 0,
+                    wan_rx_rate_limit: 0,
+                    wan_tx_rate_limit: 0,
+                    lan_rx_bytes,
+                    lan_tx_bytes,
+                    lan_rx_rate,
+                    lan_tx_rate,
+                    wan_rx_bytes,
+                    wan_tx_bytes,
+                    wan_rx_rate,
+                    wan_tx_rate,
                     last_online_ts: ts_ms,
+                    lan_last_rx_bytes: lan_rx_bytes,
+                    lan_last_tx_bytes: lan_tx_bytes,
+                    wan_last_rx_bytes: wan_rx_bytes,
+                    wan_last_tx_bytes: wan_tx_bytes,
                     last_sample_ts: ts_ms,
                 };
 
@@ -536,7 +525,7 @@ impl RealtimeRingManager {
     pub fn insert_metrics_batch(
         &self,
         ts_ms: u64,
-        rows: &Vec<([u8; 6], MacTrafficStats)>,
+        rows: &Vec<([u8; 6], DeviceTrafficStats)>,
     ) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
@@ -560,18 +549,18 @@ impl RealtimeRingManager {
 
             let rec: [u64; SLOT_U64S_REALTIME] = [
                 ts_ms,
-                s.total_rx_rate,
-                s.total_tx_rate,
-                s.local_rx_rate,
-                s.local_tx_rate,
-                s.wide_rx_rate,
-                s.wide_tx_rate,
-                s.total_rx_bytes,
-                s.total_tx_bytes,
-                s.local_rx_bytes,
-                s.local_tx_bytes,
-                s.wide_rx_bytes,
-                s.wide_tx_bytes,
+                s.total_rx_rate(),
+                s.total_tx_rate(),
+                s.lan_rx_rate,
+                s.lan_tx_rate,
+                s.wan_rx_rate,
+                s.wan_tx_rate,
+                s.total_rx_bytes(),
+                s.total_tx_bytes(),
+                s.lan_rx_bytes,
+                s.lan_tx_bytes,
+                s.wan_rx_bytes,
+                s.wan_tx_bytes,
                 s.last_online_ts,
                 ip_address_u64, // IPv4 address (v3)
             ];
@@ -634,140 +623,48 @@ impl RealtimeRingManager {
                 ts_ms: rec[0],
                 total_rx_rate: rec[1],
                 total_tx_rate: rec[2],
-                local_rx_rate: rec[3],
-                local_tx_rate: rec[4],
-                wide_rx_rate: rec[5],
-                wide_tx_rate: rec[6],
+                lan_rx_rate: rec[3],
+                lan_tx_rate: rec[4],
+                wan_rx_rate: rec[5],
+                wan_tx_rate: rec[6],
                 total_rx_bytes: rec[7],
                 total_tx_bytes: rec[8],
-                local_rx_bytes: rec[9],
-                local_tx_bytes: rec[10],
-                wide_rx_bytes: rec[11],
-                wide_tx_bytes: rec[12],
+                lan_rx_bytes: rec[9],
+                lan_tx_bytes: rec[10],
+                wan_rx_bytes: rec[11],
+                wan_tx_bytes: rec[12],
             })
             .collect();
 
         Ok(rows_vec)
     }
 
-    /// Flush dirty data to disk
+    /// Flush dirty data to disk - DISABLED: Real-time data is now memory-only
     pub async fn flush_dirty_rings(&self) -> Result<(), anyhow::Error> {
+        // Real-time ring data is now memory-only, no disk persistence
+        // Mark all rings as clean to prevent repeated attempts
         let mut rings = self.rings.lock().unwrap();
-
-        for (mac, ring) in rings.iter_mut() {
-            if ring.is_dirty() {
-                self.persist_ring_to_file(mac, ring)?;
-                ring.mark_clean();
-            }
+        for (_mac, ring) in rings.iter_mut() {
+            ring.mark_clean();
         }
-
         Ok(())
     }
 
-    /// Persist a single Ring to file
+    /// Persist a single Ring to file - DISABLED: Real-time data is now memory-only
+    #[allow(dead_code)]
     fn persist_ring_to_file(
         &self,
-        mac: &[u8; 6],
-        ring: &RealtimeRing,
+        _mac: &[u8; 6],
+        _ring: &RealtimeRing,
     ) -> Result<(), anyhow::Error> {
-        let path = ring_file_path(&self.base_dir, mac);
-        let f = init_ring_file(&path, ring.capacity)?;
-
-        for (idx, slot) in ring.slots.iter().enumerate() {
-            if slot[0] != 0 {
-                // Only write non-empty slots
-                write_slot(&f, idx as u64, slot)?;
-            }
-        }
-
-        f.sync_all()?;
+        // Real-time ring data is now memory-only, no persistence
         Ok(())
     }
 
-    /// Load data from files to memory at startup
+    /// Load data from files to memory at startup - DISABLED: Real-time data is now memory-only
     pub fn load_from_files(&self) -> Result<(), anyhow::Error> {
-        let dir = ring_dir(&self.base_dir);
-        if !dir.exists() {
-            return Ok(());
-        }
-
-        let mut rings = self.rings.lock().unwrap();
-
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if path.extension().and_then(|s| s.to_str()) != Some("ring") {
-                continue;
-            }
-
-            // Parse MAC from filename
-            let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if fname.len() != 12 {
-                continue;
-            }
-            let mut mac = [0u8; 6];
-            let mut ok = true;
-            for i in 0..6 {
-                if let Ok(v) = u8::from_str_radix(&fname[i * 2..i * 2 + 2], 16) {
-                    mac[i] = v;
-                } else {
-                    ok = false;
-                    break;
-                }
-            }
-            if !ok {
-                continue;
-            }
-
-            // Load from file to memory
-            if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
-                if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_REALTIME_V2 || ver == RING_VERSION_REALTIME_V3 {
-                        if cap != self.capacity {
-                            log::warn!(
-                                "Skipping ring file {:?} with capacity {} (expected {}), file should have been deleted",
-                                path,
-                                cap,
-                                self.capacity
-                            );
-                            continue;
-                        }
-
-                        let mut ring = RealtimeRing::new(self.capacity);
-
-                        for i in 0..(self.capacity as u64) {
-                            if ver == RING_VERSION_REALTIME_V2 {
-                                // Read v2 slot and convert to v3
-                                if let Ok(v2_slot) = read_slot_v2(&f, i) {
-                                    if v2_slot[0] != 0 {
-                                        let mut v3_slot = [0u64; SLOT_U64S_REALTIME];
-                                        for j in 0..SLOT_U64S_REALTIME_V2 {
-                                            v3_slot[j] = v2_slot[j];
-                                        }
-                                        // IP address remains 0 for v2 data
-                                        ring.slots[i as usize] = v3_slot;
-                                    }
-                                }
-                            } else {
-                                // Read v3 slot
-                                if let Ok(slot) = read_slot(&f, i) {
-                                    if slot[0] != 0 {
-                                        ring.slots[i as usize] = slot;
-                                    }
-                                }
-                            }
-                        }
-
-                        ring.mark_clean(); // Just loaded from file, mark as clean
-                        rings.insert(mac, ring);
-                    }
-                }
-            }
-        }
-
+        // Real-time ring data is now memory-only, skip loading from disk
+        log::info!("Real-time ring data is now memory-only, skipping disk load");
         Ok(())
     }
 }
@@ -854,37 +751,37 @@ impl MetricStats {
 #[derive(Debug, Clone)]
 pub struct DeviceStatsAccumulator {
     pub ts_end_ms: u64,
-    pub wide_rx_rate: MetricStats, // Wide network receive rate statistics
-    pub wide_tx_rate: MetricStats, // Wide network transmit rate statistics
-    pub wide_rx_bytes: u64,        // Total wide network receive bytes (cumulative)
-    pub wide_tx_bytes: u64,        // Total wide network transmit bytes (cumulative)
+    pub wan_rx_rate: MetricStats, // Wide network receive rate statistics
+    pub wan_tx_rate: MetricStats, // Wide network transmit rate statistics
+    pub wan_rx_bytes: u64,        // Total wide network receive bytes (cumulative)
+    pub wan_tx_bytes: u64,        // Total wide network transmit bytes (cumulative)
 }
 
 impl DeviceStatsAccumulator {
     pub fn new(ts_ms: u64) -> Self {
         Self {
             ts_end_ms: ts_ms,
-            wide_rx_rate: MetricStats::new(),
-            wide_tx_rate: MetricStats::new(),
-            wide_rx_bytes: 0,
-            wide_tx_bytes: 0,
+            wan_rx_rate: MetricStats::new(),
+            wan_tx_rate: MetricStats::new(),
+            wan_rx_bytes: 0,
+            wan_tx_bytes: 0,
         }
     }
 
-    pub fn add_sample(&mut self, stats: &MacTrafficStats, ts_ms: u64) {
+    pub fn add_sample(&mut self, stats: &DeviceTrafficStats, ts_ms: u64) {
         self.ts_end_ms = ts_ms;
         // Only accumulate wide network statistics
-        self.wide_rx_rate.add_sample(stats.wide_rx_rate);
-        self.wide_tx_rate.add_sample(stats.wide_tx_rate);
+        self.wan_rx_rate.add_sample(stats.wan_rx_rate);
+        self.wan_tx_rate.add_sample(stats.wan_tx_rate);
 
         // Keep latest cumulative wide traffic values
-        self.wide_rx_bytes = stats.wide_rx_bytes;
-        self.wide_tx_bytes = stats.wide_tx_bytes;
+        self.wan_rx_bytes = stats.wan_rx_bytes;
+        self.wan_tx_bytes = stats.wan_tx_bytes;
     }
 
     pub fn finalize(&mut self) {
-        self.wide_rx_rate.finalize();
-        self.wide_tx_rate.finalize();
+        self.wan_rx_rate.finalize();
+        self.wan_tx_rate.finalize();
     }
 }
 
@@ -992,20 +889,20 @@ impl MultilevelRingManager {
             // Aggregate all rows for this device into a single stats entry
             let mut aggregated = MetricsRowWithStats {
                 ts_ms: start_ms, // Use start time as reference
-                wide_rx_rate_avg: 0,
-                wide_rx_rate_max: 0,
-                wide_rx_rate_min: u64::MAX,
-                wide_rx_rate_p90: 0,
-                wide_rx_rate_p95: 0,
-                wide_rx_rate_p99: 0,
-                wide_tx_rate_avg: 0,
-                wide_tx_rate_max: 0,
-                wide_tx_rate_min: u64::MAX,
-                wide_tx_rate_p90: 0,
-                wide_tx_rate_p95: 0,
-                wide_tx_rate_p99: 0,
-                wide_rx_bytes: 0,
-                wide_tx_bytes: 0,
+                wan_rx_rate_avg: 0,
+                wan_rx_rate_max: 0,
+                wan_rx_rate_min: u64::MAX,
+                wan_rx_rate_p90: 0,
+                wan_rx_rate_p95: 0,
+                wan_rx_rate_p99: 0,
+                wan_tx_rate_avg: 0,
+                wan_tx_rate_max: 0,
+                wan_tx_rate_min: u64::MAX,
+                wan_tx_rate_p90: 0,
+                wan_tx_rate_p95: 0,
+                wan_tx_rate_p99: 0,
+                wan_rx_bytes: 0,
+                wan_tx_bytes: 0,
             };
 
             if rows.is_empty() {
@@ -1013,7 +910,7 @@ impl MultilevelRingManager {
             }
 
             // For bytes: calculate the increment within the time range
-            // Since wide_rx_bytes and wide_tx_bytes are cumulative values,
+            // Since wan_rx_bytes and wan_tx_bytes are cumulative values,
             // if there's only one sample, use its value (total up to that point)
             // if there are multiple samples, use the difference (increment in the time range)
             // For rates: aggregate statistics
@@ -1022,44 +919,44 @@ impl MultilevelRingManager {
             
             if rows.len() == 1 {
                 // Only one sample: use the cumulative value directly
-                aggregated.wide_rx_bytes = last_row.wide_rx_bytes;
-                aggregated.wide_tx_bytes = last_row.wide_tx_bytes;
+                aggregated.wan_rx_bytes = last_row.wan_rx_bytes;
+                aggregated.wan_tx_bytes = last_row.wan_tx_bytes;
             } else {
                 // Multiple samples: calculate increment (difference between last and first)
-                aggregated.wide_rx_bytes = last_row.wide_rx_bytes.saturating_sub(first_row.wide_rx_bytes);
-                aggregated.wide_tx_bytes = last_row.wide_tx_bytes.saturating_sub(first_row.wide_tx_bytes);
+                aggregated.wan_rx_bytes = last_row.wan_rx_bytes.saturating_sub(first_row.wan_rx_bytes);
+                aggregated.wan_tx_bytes = last_row.wan_tx_bytes.saturating_sub(first_row.wan_tx_bytes);
             }
 
             // Aggregate rate statistics: sum for avg, max for max/p90/p95/p99, min for min
             for row in &rows {
-                aggregated.wide_rx_rate_avg = aggregated.wide_rx_rate_avg.saturating_add(row.wide_rx_rate_avg);
-                aggregated.wide_rx_rate_max = aggregated.wide_rx_rate_max.max(row.wide_rx_rate_max);
-                aggregated.wide_rx_rate_min = aggregated.wide_rx_rate_min.min(row.wide_rx_rate_min);
-                aggregated.wide_rx_rate_p90 = aggregated.wide_rx_rate_p90.max(row.wide_rx_rate_p90);
-                aggregated.wide_rx_rate_p95 = aggregated.wide_rx_rate_p95.max(row.wide_rx_rate_p95);
-                aggregated.wide_rx_rate_p99 = aggregated.wide_rx_rate_p99.max(row.wide_rx_rate_p99);
+                aggregated.wan_rx_rate_avg = aggregated.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
+                aggregated.wan_rx_rate_max = aggregated.wan_rx_rate_max.max(row.wan_rx_rate_max);
+                aggregated.wan_rx_rate_min = aggregated.wan_rx_rate_min.min(row.wan_rx_rate_min);
+                aggregated.wan_rx_rate_p90 = aggregated.wan_rx_rate_p90.max(row.wan_rx_rate_p90);
+                aggregated.wan_rx_rate_p95 = aggregated.wan_rx_rate_p95.max(row.wan_rx_rate_p95);
+                aggregated.wan_rx_rate_p99 = aggregated.wan_rx_rate_p99.max(row.wan_rx_rate_p99);
 
-                aggregated.wide_tx_rate_avg = aggregated.wide_tx_rate_avg.saturating_add(row.wide_tx_rate_avg);
-                aggregated.wide_tx_rate_max = aggregated.wide_tx_rate_max.max(row.wide_tx_rate_max);
-                aggregated.wide_tx_rate_min = aggregated.wide_tx_rate_min.min(row.wide_tx_rate_min);
-                aggregated.wide_tx_rate_p90 = aggregated.wide_tx_rate_p90.max(row.wide_tx_rate_p90);
-                aggregated.wide_tx_rate_p95 = aggregated.wide_tx_rate_p95.max(row.wide_tx_rate_p95);
-                aggregated.wide_tx_rate_p99 = aggregated.wide_tx_rate_p99.max(row.wide_tx_rate_p99);
+                aggregated.wan_tx_rate_avg = aggregated.wan_tx_rate_avg.saturating_add(row.wan_tx_rate_avg);
+                aggregated.wan_tx_rate_max = aggregated.wan_tx_rate_max.max(row.wan_tx_rate_max);
+                aggregated.wan_tx_rate_min = aggregated.wan_tx_rate_min.min(row.wan_tx_rate_min);
+                aggregated.wan_tx_rate_p90 = aggregated.wan_tx_rate_p90.max(row.wan_tx_rate_p90);
+                aggregated.wan_tx_rate_p95 = aggregated.wan_tx_rate_p95.max(row.wan_tx_rate_p95);
+                aggregated.wan_tx_rate_p99 = aggregated.wan_tx_rate_p99.max(row.wan_tx_rate_p99);
             }
 
             // Average the rate averages
             let count = rows.len() as u64;
             if count > 0 {
-                aggregated.wide_rx_rate_avg /= count;
-                aggregated.wide_tx_rate_avg /= count;
+                aggregated.wan_rx_rate_avg /= count;
+                aggregated.wan_tx_rate_avg /= count;
             }
 
             // Fix min values
-            if aggregated.wide_rx_rate_min == u64::MAX {
-                aggregated.wide_rx_rate_min = 0;
+            if aggregated.wan_rx_rate_min == u64::MAX {
+                aggregated.wan_rx_rate_min = 0;
             }
-            if aggregated.wide_tx_rate_min == u64::MAX {
-                aggregated.wide_tx_rate_min = 0;
+            if aggregated.wan_tx_rate_min == u64::MAX {
+                aggregated.wan_tx_rate_min = 0;
             }
 
             device_stats.insert(*mac, aggregated);
@@ -1086,8 +983,8 @@ impl MultilevelRingManager {
             }
 
             let mut increments = Vec::new();
-            let mut prev_rx = rows[0].wide_rx_bytes;
-            let mut prev_tx = rows[0].wide_tx_bytes;
+            let mut prev_rx = rows[0].wan_rx_bytes;
+            let mut prev_tx = rows[0].wan_tx_bytes;
 
             // First point: use its value as baseline (increment is 0 or use first value)
             // For the first point, we can't calculate increment, so we skip it or use 0
@@ -1098,29 +995,29 @@ impl MultilevelRingManager {
                 if idx == 0 {
                     // First point: no increment, but we can include it with 0 increment
                     // Or skip it - let's skip the first point since we can't calculate increment
-                    prev_rx = row.wide_rx_bytes;
-                    prev_tx = row.wide_tx_bytes;
+                    prev_rx = row.wan_rx_bytes;
+                    prev_tx = row.wan_tx_bytes;
                     continue;
                 }
 
                 // Calculate increment (handle wrap-around)
-                let rx_inc = if row.wide_rx_bytes >= prev_rx {
-                    row.wide_rx_bytes - prev_rx
+                let rx_inc = if row.wan_rx_bytes >= prev_rx {
+                    row.wan_rx_bytes - prev_rx
                 } else {
                     // Handle potential wrap-around (unlikely for cumulative bytes, but safe)
-                    row.wide_rx_bytes
+                    row.wan_rx_bytes
                 };
 
-                let tx_inc = if row.wide_tx_bytes >= prev_tx {
-                    row.wide_tx_bytes - prev_tx
+                let tx_inc = if row.wan_tx_bytes >= prev_tx {
+                    row.wan_tx_bytes - prev_tx
                 } else {
-                    row.wide_tx_bytes
+                    row.wan_tx_bytes
                 };
 
                 increments.push((row.ts_ms, rx_inc, tx_inc));
 
-                prev_rx = row.wide_rx_bytes;
-                prev_tx = row.wide_tx_bytes;
+                prev_rx = row.wan_rx_bytes;
+                prev_tx = row.wan_tx_bytes;
             }
 
             Ok(increments)
@@ -1144,8 +1041,8 @@ impl MultilevelRingManager {
             let rows = ring.query_stats(start_ms, end_ms);
             for row in rows {
                 let entry = all_rows_by_ts.entry(row.ts_ms).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(row.wide_rx_bytes);
-                entry.1 = entry.1.saturating_add(row.wide_tx_bytes);
+                entry.0 = entry.0.saturating_add(row.wan_rx_bytes);
+                entry.1 = entry.1.saturating_add(row.wan_tx_bytes);
             }
         }
 
@@ -1207,48 +1104,48 @@ impl MultilevelRingManager {
         for row in all_rows {
             let entry = ts_to_stats.entry(row.ts_ms).or_insert(MetricsRowWithStats {
                 ts_ms: row.ts_ms,
-                wide_rx_rate_avg: 0,
-                wide_rx_rate_max: 0,
-                wide_rx_rate_min: u64::MAX,
-                wide_rx_rate_p90: 0,
-                wide_rx_rate_p95: 0,
-                wide_rx_rate_p99: 0,
-                wide_tx_rate_avg: 0,
-                wide_tx_rate_max: 0,
-                wide_tx_rate_min: u64::MAX,
-                wide_tx_rate_p90: 0,
-                wide_tx_rate_p95: 0,
-                wide_tx_rate_p99: 0,
-                wide_rx_bytes: 0,
-                wide_tx_bytes: 0,
+                wan_rx_rate_avg: 0,
+                wan_rx_rate_max: 0,
+                wan_rx_rate_min: u64::MAX,
+                wan_rx_rate_p90: 0,
+                wan_rx_rate_p95: 0,
+                wan_rx_rate_p99: 0,
+                wan_tx_rate_avg: 0,
+                wan_tx_rate_max: 0,
+                wan_tx_rate_min: u64::MAX,
+                wan_tx_rate_p90: 0,
+                wan_tx_rate_p95: 0,
+                wan_tx_rate_p99: 0,
+                wan_rx_bytes: 0,
+                wan_tx_bytes: 0,
             });
 
             // Aggregate: sum for avg/bytes, max for max/p90/p95/p99, min for min
-            entry.wide_rx_rate_avg = entry.wide_rx_rate_avg.saturating_add(row.wide_rx_rate_avg);
-            entry.wide_rx_rate_max = entry.wide_rx_rate_max.max(row.wide_rx_rate_max);
-            entry.wide_rx_rate_min = entry.wide_rx_rate_min.min(row.wide_rx_rate_min);
-            entry.wide_rx_rate_p90 = entry.wide_rx_rate_p90.max(row.wide_rx_rate_p90);
-            entry.wide_rx_rate_p95 = entry.wide_rx_rate_p95.max(row.wide_rx_rate_p95);
-            entry.wide_rx_rate_p99 = entry.wide_rx_rate_p99.max(row.wide_rx_rate_p99);
+            entry.wan_rx_rate_avg = entry.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
+            entry.wan_rx_rate_max = entry.wan_rx_rate_max.max(row.wan_rx_rate_max);
+            entry.wan_rx_rate_min = entry.wan_rx_rate_min.min(row.wan_rx_rate_min);
+            entry.wan_rx_rate_p90 = entry.wan_rx_rate_p90.max(row.wan_rx_rate_p90);
+            entry.wan_rx_rate_p95 = entry.wan_rx_rate_p95.max(row.wan_rx_rate_p95);
+            entry.wan_rx_rate_p99 = entry.wan_rx_rate_p99.max(row.wan_rx_rate_p99);
 
-            entry.wide_tx_rate_avg = entry.wide_tx_rate_avg.saturating_add(row.wide_tx_rate_avg);
-            entry.wide_tx_rate_max = entry.wide_tx_rate_max.max(row.wide_tx_rate_max);
-            entry.wide_tx_rate_min = entry.wide_tx_rate_min.min(row.wide_tx_rate_min);
-            entry.wide_tx_rate_p90 = entry.wide_tx_rate_p90.max(row.wide_tx_rate_p90);
-            entry.wide_tx_rate_p95 = entry.wide_tx_rate_p95.max(row.wide_tx_rate_p95);
-            entry.wide_tx_rate_p99 = entry.wide_tx_rate_p99.max(row.wide_tx_rate_p99);
+            entry.wan_tx_rate_avg = entry.wan_tx_rate_avg.saturating_add(row.wan_tx_rate_avg);
+            entry.wan_tx_rate_max = entry.wan_tx_rate_max.max(row.wan_tx_rate_max);
+            entry.wan_tx_rate_min = entry.wan_tx_rate_min.min(row.wan_tx_rate_min);
+            entry.wan_tx_rate_p90 = entry.wan_tx_rate_p90.max(row.wan_tx_rate_p90);
+            entry.wan_tx_rate_p95 = entry.wan_tx_rate_p95.max(row.wan_tx_rate_p95);
+            entry.wan_tx_rate_p99 = entry.wan_tx_rate_p99.max(row.wan_tx_rate_p99);
 
-            entry.wide_rx_bytes = entry.wide_rx_bytes.saturating_add(row.wide_rx_bytes);
-            entry.wide_tx_bytes = entry.wide_tx_bytes.saturating_add(row.wide_tx_bytes);
+            entry.wan_rx_bytes = entry.wan_rx_bytes.saturating_add(row.wan_rx_bytes);
+            entry.wan_tx_bytes = entry.wan_tx_bytes.saturating_add(row.wan_tx_bytes);
         }
 
         // Fix min values that are still u64::MAX
         for stats in ts_to_stats.values_mut() {
-            if stats.wide_rx_rate_min == u64::MAX {
-                stats.wide_rx_rate_min = 0;
+            if stats.wan_rx_rate_min == u64::MAX {
+                stats.wan_rx_rate_min = 0;
             }
-            if stats.wide_tx_rate_min == u64::MAX {
-                stats.wide_tx_rate_min = 0;
+            if stats.wan_tx_rate_min == u64::MAX {
+                stats.wan_tx_rate_min = 0;
             }
         }
 
@@ -1359,16 +1256,10 @@ pub struct MultiLevelRingManager {
 }
 
 impl MultiLevelRingManager {
-    /// Create a new multi-level ring manager with default levels:
-    /// - Level 1: 30s interval, 1 day retention (use statistics)
-    /// - Level 2: 3min interval, 1 week retention (use statistics)
-    /// - Level 3: 10min interval, 1 month retention (use statistics)
-    /// - Level 4: 1h interval, 365 days retention (use statistics)
+    /// Create a new multi-level ring manager with only year level:
+    /// - Level 1: 1h interval, 365 days retention (use statistics)
     pub fn new(base_dir: String) -> Self {
         let levels = vec![
-            SamplingLevel::new(30, 24 * 3600, "day".to_string(), true), // 1 day, 30s interval, use stats
-            SamplingLevel::new(180, 7 * 24 * 3600, "week".to_string(), true), // 1 week, 3min interval, use stats
-            SamplingLevel::new(600, 30 * 24 * 3600, "month".to_string(), true), // 1 month, 10min interval, use stats
             SamplingLevel::new(3600, 365 * 24 * 3600, "year".to_string(), true), // 365 days, 1h interval, use stats
         ];
 
@@ -1398,7 +1289,7 @@ impl MultiLevelRingManager {
     pub fn insert_metrics_batch(
         &self,
         ts_ms: u64,
-        rows: &Vec<([u8; 6], MacTrafficStats)>,
+        rows: &Vec<([u8; 6], DeviceTrafficStats)>,
     ) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
@@ -1912,16 +1803,16 @@ pub struct MetricsRow {
     pub ts_ms: u64,
     pub total_rx_rate: u64,
     pub total_tx_rate: u64,
-    pub local_rx_rate: u64,
-    pub local_tx_rate: u64,
-    pub wide_rx_rate: u64,
-    pub wide_tx_rate: u64,
+    pub lan_rx_rate: u64,
+    pub lan_tx_rate: u64,
+    pub wan_rx_rate: u64,
+    pub wan_tx_rate: u64,
     pub total_rx_bytes: u64,
     pub total_tx_bytes: u64,
-    pub local_rx_bytes: u64,
-    pub local_tx_bytes: u64,
-    pub wide_rx_bytes: u64,
-    pub wide_tx_bytes: u64,
+    pub lan_rx_bytes: u64,
+    pub lan_tx_bytes: u64,
+    pub wan_rx_bytes: u64,
+    pub wan_tx_bytes: u64,
 }
 
 /// Metrics row with statistics (for multi-level sampling)
@@ -1931,34 +1822,44 @@ pub struct MetricsRow {
 pub struct MetricsRowWithStats {
     pub ts_ms: u64,
     // Wide network receive rate statistics (avg, max, min, p90, p95, p99)
-    pub wide_rx_rate_avg: u64, // Mean: typical bandwidth usage
-    pub wide_rx_rate_max: u64, // Max: peak load or burst traffic
-    pub wide_rx_rate_min: u64, // Min: idle or low load state
-    pub wide_rx_rate_p90: u64, // 90th percentile
-    pub wide_rx_rate_p95: u64, // 95th percentile
-    pub wide_rx_rate_p99: u64, // 99th percentile
+    pub wan_rx_rate_avg: u64, // Mean: typical bandwidth usage
+    pub wan_rx_rate_max: u64, // Max: peak load or burst traffic
+    pub wan_rx_rate_min: u64, // Min: idle or low load state
+    pub wan_rx_rate_p90: u64, // 90th percentile
+    pub wan_rx_rate_p95: u64, // 95th percentile
+    pub wan_rx_rate_p99: u64, // 99th percentile
     // Wide network transmit rate statistics (avg, max, min, p90, p95, p99)
-    pub wide_tx_rate_avg: u64, // Mean: typical bandwidth usage
-    pub wide_tx_rate_max: u64, // Max: peak load or burst traffic
-    pub wide_tx_rate_min: u64, // Min: idle or low load state
-    pub wide_tx_rate_p90: u64, // 90th percentile
-    pub wide_tx_rate_p95: u64, // 95th percentile
-    pub wide_tx_rate_p99: u64, // 99th percentile
+    pub wan_tx_rate_avg: u64, // Mean: typical bandwidth usage
+    pub wan_tx_rate_max: u64, // Max: peak load or burst traffic
+    pub wan_tx_rate_min: u64, // Min: idle or low load state
+    pub wan_tx_rate_p90: u64, // 90th percentile
+    pub wan_tx_rate_p95: u64, // 95th percentile
+    pub wan_tx_rate_p99: u64, // 99th percentile
     // Total wide network traffic (cumulative bytes)
-    pub wide_rx_bytes: u64, // Total wide network receive bytes
-    pub wide_tx_bytes: u64, // Total wide network transmit bytes
+    pub wan_rx_bytes: u64, // Total wide network receive bytes
+    pub wan_tx_bytes: u64, // Total wide network transmit bytes
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineTotals {
     pub ip_address: [u8; 4], // IPv4 address from ring file
-    pub total_rx_bytes: u64,
-    pub total_tx_bytes: u64,
-    pub local_rx_bytes: u64,
-    pub local_tx_bytes: u64,
-    pub wide_rx_bytes: u64,
-    pub wide_tx_bytes: u64,
+    pub lan_rx_bytes: u64,
+    pub lan_tx_bytes: u64,
+    pub wan_rx_bytes: u64,
+    pub wan_tx_bytes: u64,
     pub last_online_ts: u64,
+}
+
+impl BaselineTotals {
+    /// Calculate total receive bytes (lan + wan)
+    pub fn total_rx_bytes(&self) -> u64 {
+        self.lan_rx_bytes + self.wan_rx_bytes
+    }
+
+    /// Calculate total send bytes (lan + wan)
+    pub fn total_tx_bytes(&self) -> u64 {
+        self.lan_tx_bytes + self.wan_tx_bytes
+    }
 }
 
 // Use the latest record from each device's ring as baseline
@@ -2044,12 +1945,10 @@ pub fn load_latest_totals(base_dir: &str) -> Result<Vec<([u8; 6], BaselineTotals
                 mac,
                 BaselineTotals {
                     ip_address,
-                    total_rx_bytes: rec[7],
-                    total_tx_bytes: rec[8],
-                    local_rx_bytes: rec[9],
-                    local_tx_bytes: rec[10],
-                    wide_rx_bytes: rec[11],
-                    wide_tx_bytes: rec[12],
+                    lan_rx_bytes: rec[9],
+                    lan_tx_bytes: rec[10],
+                    wan_rx_bytes: rec[11],
+                    wan_tx_bytes: rec[12],
                     last_online_ts: rec[13],
                 },
             ));
@@ -2088,8 +1987,8 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
                 let scheduled_limit = ScheduledRateLimit {
                     mac: *mac,
                     time_slot: TimeSlot::all_time(),
-                    wide_rx_rate_limit: *rx,
-                    wide_tx_rate_limit: *tx,
+                    wan_rx_rate_limit: *rx,
+                    wan_tx_rate_limit: *tx,
                 };
                 // Save to new file (will merge with existing scheduled limits)
                 upsert_scheduled_limit(base_dir, &scheduled_limit)?;
@@ -2186,8 +2085,8 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
                 end_minute,
                 days_of_week,
             },
-            wide_rx_rate_limit: rx,
-            wide_tx_rate_limit: tx,
+            wan_rx_rate_limit: rx,
+            wan_tx_rate_limit: tx,
         });
     }
 
@@ -2256,8 +2155,8 @@ pub fn upsert_scheduled_limit(
                                             end_minute,
                                             days_of_week,
                                         },
-                                        wide_rx_rate_limit: rx,
-                                        wide_tx_rate_limit: tx,
+                                        wan_rx_rate_limit: rx,
+                                        wan_tx_rate_limit: tx,
                                     });
                                 }
                             }
@@ -2307,7 +2206,7 @@ pub fn upsert_scheduled_limit(
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
         buf.push_str(&format!(
             "{} schedule {} {} {} {} {}\n",
-            mac_str, start_str, end_str, days_str, rule.wide_rx_rate_limit, rule.wide_tx_rate_limit
+            mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
         ));
     }
 
@@ -2400,8 +2299,8 @@ pub fn delete_scheduled_limit(
                                         end_minute,
                                         days_of_week,
                                     },
-                                    wide_rx_rate_limit: rx,
-                                    wide_tx_rate_limit: tx,
+                                    wan_rx_rate_limit: rx,
+                                    wan_tx_rate_limit: tx,
                                 });
                             }
                         }
@@ -2423,7 +2322,7 @@ pub fn delete_scheduled_limit(
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
         buf.push_str(&format!(
             "{} schedule {} {} {} {} {}\n",
-            mac_str, start_str, end_str, days_str, rule.wide_rx_rate_limit, rule.wide_tx_rate_limit
+            mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
         ));
     }
 
@@ -2454,14 +2353,14 @@ pub fn calculate_current_rate_limit(
     let mut tx_limit: Option<u64> = None;
 
     for rule in matching_rules {
-        if rule.wide_rx_rate_limit > 0 {
-            rx_limit = Some(rx_limit.map_or(rule.wide_rx_rate_limit, |current: u64| {
-                current.min(rule.wide_rx_rate_limit)
+        if rule.wan_rx_rate_limit > 0 {
+            rx_limit = Some(rx_limit.map_or(rule.wan_rx_rate_limit, |current: u64| {
+                current.min(rule.wan_rx_rate_limit)
             }));
         }
-        if rule.wide_tx_rate_limit > 0 {
-            tx_limit = Some(tx_limit.map_or(rule.wide_tx_rate_limit, |current: u64| {
-                current.min(rule.wide_tx_rate_limit)
+        if rule.wan_tx_rate_limit > 0 {
+            tx_limit = Some(tx_limit.map_or(rule.wan_tx_rate_limit, |current: u64| {
+                current.min(rule.wan_tx_rate_limit)
             }));
         }
     }

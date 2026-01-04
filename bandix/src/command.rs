@@ -1,3 +1,7 @@
+use crate::device::DeviceManager;
+use crate::storage::device_registry::DeviceRegistry;
+use std::path::Path;
+
 use crate::ebpf::shared::load_shared;
 use crate::monitor::{
     ConnectionModuleContext, DnsModuleContext, ModuleContext, MonitorManager, TrafficModuleContext,
@@ -203,7 +207,6 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-// Load and initialize hostname bindings (shared resource for traffic and connection modules)
 fn load_hostname_bindings(
     data_dir: &str,
 ) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>> {
@@ -230,7 +233,6 @@ fn load_hostname_bindings(
         let mut bindings_map = bindings.lock().unwrap();
         let mut ubus_count = 0;
         for (mac, hostname) in ubus_bindings {
-            // Only add if MAC address doesn't already exist (saved bindings take priority)
             if !bindings_map.contains_key(&mac) {
                 bindings_map.insert(mac, hostname);
                 ubus_count += 1;
@@ -252,29 +254,34 @@ async fn init_shared_ebpf(options: &Options) -> Result<aya::Ebpf, anyhow::Error>
     load_shared(options.iface().to_string()).await
 }
 
-
 // Subnet information structure (shared across modules)
 #[derive(Debug, Clone)]
-struct SubnetInfo {
-    interface_ip: [u8; 4],
-    subnet_mask: [u8; 4],
-    ipv6_addresses: Vec<([u8; 16], u8)>,
+pub struct SubnetInfo {
+    pub interface_ip: [u8; 4],
+    pub subnet_mask: [u8; 4],
+    pub interface_mac: [u8; 6],
+    pub ipv6_addresses: Vec<([u8; 16], u8)>,
 }
 
 impl SubnetInfo {
-    fn from_interface(iface: &str) -> Result<Self, anyhow::Error> {
-        // Get IPv4 subnet information
+    pub fn from_interface(iface: &str) -> Result<Self, anyhow::Error> {
         let interface_info = get_interface_info(iface);
+
         let (interface_ip, subnet_mask) = interface_info.ok_or_else(|| {
             anyhow::anyhow!("Failed to get interface information for '{}'", iface)
         })?;
 
-        // Get IPv6 addresses
+        let interface_mac = std::fs::read_to_string(format!("/sys/class/net/{}/address", iface))
+            .ok()
+            .and_then(|content| crate::utils::network_utils::parse_mac_address(content.trim()).ok())
+            .unwrap_or([0, 0, 0, 0, 0, 0]);
+
         let ipv6_addresses = crate::utils::network_utils::get_interface_ipv6_info(iface);
 
         Ok(SubnetInfo {
             interface_ip,
             subnet_mask,
+            interface_mac,
             ipv6_addresses,
         })
     }
@@ -287,6 +294,7 @@ async fn create_module_contexts(
     shared_hostname_bindings: &std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>,
     >,
+    device_manager: Arc<DeviceManager>,
 ) -> Result<Vec<ModuleContext>, anyhow::Error> {
     let mut module_contexts = Vec::new();
 
@@ -295,11 +303,11 @@ async fn create_module_contexts(
     let shared_ebpf = if options.enable_traffic() || options.enable_dns() {
         log::info!("Loading shared eBPF programs (ingress and egress)...");
         let mut ebpf = init_shared_ebpf(options).await?;
-        
+
         // Configure subnet info maps if traffic module is enabled
         if options.enable_traffic() {
             log::info!("Configuring subnet info maps for traffic module...");
-            
+
             // Configure IPv4 subnet info maps
             let mut ipv4_subnet_info: Array<_, [u8; 4]> =
                 Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
@@ -314,7 +322,9 @@ async fn create_module_contexts(
                 ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
             }
 
-            for (idx, (ipv6_addr, prefix_len)) in subnet_info.ipv6_addresses.iter().enumerate().take(16) {
+            for (idx, (ipv6_addr, prefix_len)) in
+                subnet_info.ipv6_addresses.iter().enumerate().take(16)
+            {
                 let mut subnet_data = [0u8; 32];
                 subnet_data[0..16].copy_from_slice(ipv6_addr);
                 subnet_data[16] = *prefix_len;
@@ -332,7 +342,7 @@ async fn create_module_contexts(
                 );
             }
         }
-        
+
         Some(ebpf)
     } else {
         None
@@ -347,41 +357,48 @@ async fn create_module_contexts(
             ebpf.take_map("MODULE_ENABLE_FLAGS")
                 .ok_or_else(|| anyhow::anyhow!("Cannot find MODULE_ENABLE_FLAGS map"))?,
         )?;
-        
+
         // Set traffic module flag (index 0)
         let traffic_flag = if options.enable_traffic() { 1u8 } else { 0u8 };
         module_flags.set(0, &traffic_flag, 0)?;
         log::info!("Traffic module enabled: {}", traffic_flag != 0);
-        
+
         // Set DNS module flag (index 1)
         let dns_flag = if options.enable_dns() { 1u8 } else { 0u8 };
         module_flags.set(1, &dns_flag, 0)?;
         log::info!("DNS module enabled: {}", dns_flag != 0);
-        
+
         let dns_map = if options.enable_dns() {
             // Get DNS_DATA RingBuf map before wrapping in Arc
             // This is necessary because take_map requires exclusive access
             log::info!("Acquiring DNS RingBuf map...");
             Some(ebpf.take_map("DNS_DATA").ok_or_else(|| {
-                anyhow::anyhow!("Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly.")
+                anyhow::anyhow!(
+                    "Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly."
+                )
             })?)
         } else {
             None
         };
-        
+
         // Now wrap in Arc so both modules can share it
         let shared_ebpf_arc = Arc::new(ebpf);
 
         // Initialize traffic module
         if options.enable_traffic() {
             log::info!("Initializing traffic module...");
-            
+
             // Create references to the shared eBPF object
             let ingress = Arc::clone(&shared_ebpf_arc);
             let egress = Arc::clone(&shared_ebpf_arc);
 
-            // Create traffic module context
-            let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress);
+            // Create traffic module context (using shared device_manager)
+            let mut traffic_ctx = TrafficModuleContext::new(
+                options.clone(),
+                ingress,
+                egress,
+                Arc::clone(&device_manager),
+            );
             traffic_ctx.hostname_bindings = std::sync::Arc::clone(shared_hostname_bindings);
 
             module_contexts.push(ModuleContext::Traffic(traffic_ctx));
@@ -390,15 +407,15 @@ async fn create_module_contexts(
         // Initialize DNS module
         if options.enable_dns() {
             log::info!("Initializing DNS module...");
-            
+
             // Create references to the shared eBPF object
             let ingress = Arc::clone(&shared_ebpf_arc);
             let egress = Arc::clone(&shared_ebpf_arc);
 
             // Create DNS module context with the pre-acquired map
             let dns_ctx = DnsModuleContext::new_with_map(
-                options.clone(), 
-                ingress, 
+                options.clone(),
+                ingress,
                 egress,
                 dns_map.unwrap(),
                 std::sync::Arc::clone(shared_hostname_bindings),
@@ -422,6 +439,46 @@ async fn create_module_contexts(
     }
 
     Ok(module_contexts)
+}
+
+// Start device refresh task: periodically refreshes ARP table and updates device registry
+fn start_device_refresh_task(
+    device_manager: Arc<DeviceManager>,
+    device_registry: Arc<DeviceRegistry>,
+    data_dir: String,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Periodic ARP table refresh (every 30 seconds)
+                    if let Err(e) = device_manager.refresh_arp_table() {
+                        log::warn!("Failed to refresh ARP table: {}", e);
+                    } else {
+                        log::debug!("Periodic ARP table refresh completed");
+                    }
+
+                    // Save device registry periodically
+                    let registry_path = Path::new(&data_dir).join("devices.json");
+                    if let Err(e) = device_registry.save_to_file(&registry_path) {
+                        log::warn!("Failed to save device registry: {}", e);
+                    }
+                }
+                _ = shutdown_notify.notified() => {
+                    log::info!("Device refresh task received shutdown signal, stopping...");
+                    // Final save before shutdown
+                    let registry_path = Path::new(&data_dir).join("devices.json");
+                    if let Err(e) = device_registry.save_to_file(&registry_path) {
+                        log::error!("Failed to save device registry during shutdown: {}", e);
+                    }
+                    break;
+                }
+            }
+        }
+    })
 }
 
 // Start hostname refresh task: periodically updates hostname bindings from ubus
@@ -478,9 +535,8 @@ fn start_hostname_refresh_task(
     })
 }
 
-// Run service, start web server and provide TUI output
+// Run service, start web server
 async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
-    // Use Notify for graceful shutdown
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let shutdown_notify_clone = shutdown_notify.clone();
 
@@ -491,20 +547,32 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         }
     });
 
-    // Get subnet information once (shared across modules)
     let subnet_info = SubnetInfo::from_interface(options.iface())?;
 
-    // Load shared hostname bindings once (shared across modules)
     let shared_hostname_bindings = load_hostname_bindings(options.data_dir());
+    
+    let device_registry = Arc::new(DeviceRegistry::new());
+    let device_manager = Arc::new(DeviceManager::new(
+        options.iface().to_string(),
+        subnet_info.clone(),
+        Arc::clone(&device_registry),
+    ));
+
+    if let Err(e) = device_manager.load_initial_devices(options.data_dir()) {
+        log::warn!("Failed to load initial devices: {}", e);
+    }
 
     // Create module contexts: load eBPF programs and configure kernel maps
-    let module_contexts =
-        create_module_contexts(options, &subnet_info, &shared_hostname_bindings).await?;
+    let module_contexts = create_module_contexts(
+        options,
+        &subnet_info,
+        &shared_hostname_bindings,
+        Arc::clone(&device_manager),
+    )
+    .await?;
 
-    // Create monitor manager (modules are inferred from contexts)
+    // Init modules
     let mut monitor_manager = MonitorManager::from_contexts(&module_contexts);
-
-    // Initialize all enabled modules
     monitor_manager.init_modules(&module_contexts).await?;
 
     // Start web server with API router
@@ -519,23 +587,31 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         }
     });
 
-    // Start hostname refresh task (every 10 minutes)
+    // Start hostname refresh task
     let hostname_refresh_task = start_hostname_refresh_task(
-        std::sync::Arc::clone(&shared_hostname_bindings),
+        Arc::clone(&shared_hostname_bindings),
         options.clone(),
         shutdown_notify.clone(),
     );
+
+    // Start device refresh task
+    // let device_refresh_task = start_device_refresh_task(
+    //     device_manager,
+    //     device_registry,
+    //     options.data_dir().to_string(),
+    //     shutdown_notify.clone(),
+    // );
 
     // Start internal loops for all modules via MonitorManager
     let mut tasks = monitor_manager
         .start_modules(module_contexts, shutdown_notify.clone())
         .await?;
 
-    // Add web server task to the list
     tasks.push(web_task);
 
-    // Add hostname refresh task to the list
     tasks.push(hostname_refresh_task);
+
+    // tasks.push(device_refresh_task);
 
     // Wait for shutdown signal
     shutdown_notify.notified().await;
@@ -554,10 +630,8 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
 }
 
 pub async fn run(options: Options) -> Result<(), anyhow::Error> {
-    // Validate arguments
     validate_arguments(&options)?;
 
-    // Parse log level
     let log_level = match options.log_level().to_lowercase().as_str() {
         "trace" => LevelFilter::Trace,
         "debug" => LevelFilter::Debug,
@@ -572,14 +646,12 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
         }
     };
 
-    // Set up logging
     env_logger::Builder::new()
         .filter(None, log_level)
         .filter_module("aya::bpf", LevelFilter::Error) // Filter out aya::bpf warnings (BTF related)
         .target(env_logger::Target::Stdout)
         .init();
 
-    // Startup diagnostics
     log_startup_info(&options);
 
     // Check if at least one module is enabled
@@ -589,7 +661,6 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
         ));
     }
 
-    // Run service (initializes all modules and starts web server)
     run_service(&options).await?;
 
     Ok(())

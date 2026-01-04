@@ -28,8 +28,8 @@ pub mod config {
     pub static MODULE_ENABLE_FLAGS: Array<u8> = Array::with_max_entries(2, 0);
 }
 
-use subnet::{IPV4_SUBNET_INFO, IPV6_SUBNET_INFO};
 use config::MODULE_ENABLE_FLAGS;
+use subnet::{IPV4_SUBNET_INFO, IPV6_SUBNET_INFO};
 
 #[inline]
 pub fn is_subnet_ip(ip: &[u8; 4]) -> bool {
@@ -196,29 +196,30 @@ pub fn get_current_time() -> u64 {
 // Module Configuration Utils
 // ============================================================================
 
-/// Check if traffic module is enabled
+/// Module indices in MODULE_ENABLE_FLAGS array
+pub mod module_index {
+    pub const TRAFFIC: u32 = 0;
+    pub const DNS: u32 = 1;
+}
+
+/// Check if a module is enabled by index
 /// Uses volatile read to ensure the value is always read from memory
 #[inline(always)]
-pub fn is_traffic_enabled() -> bool {
-    match MODULE_ENABLE_FLAGS.get(0) {
-        Some(flag_ptr) => {
-            // Use volatile read to ensure we always read the latest value
-            unsafe { core::ptr::read_volatile(flag_ptr as *const u8) != 0 }
-        }
-        None => false, // Default to disabled if not configured
+pub fn is_module_enabled(index: u32) -> bool {
+    match MODULE_ENABLE_FLAGS.get(index) {
+        Some(flag_ptr) => unsafe { core::ptr::read_volatile(flag_ptr as *const u8) != 0 },
+        None => false,
     }
+}
+
+/// Check if traffic module is enabled
+#[inline(always)]
+pub fn is_traffic_enabled() -> bool {
+    is_module_enabled(module_index::TRAFFIC)
 }
 
 /// Check if DNS module is enabled
-/// Uses volatile read to ensure the value is always read from memory
 #[inline(always)]
 pub fn is_dns_enabled() -> bool {
-    match MODULE_ENABLE_FLAGS.get(1) {
-        Some(flag_ptr) => {
-            // Use volatile read to ensure we always read the latest value
-            unsafe { core::ptr::read_volatile(flag_ptr as *const u8) != 0 }
-        }
-        None => false, // Default to disabled if not configured
-    }
+    is_module_enabled(module_index::DNS)
 }
-
