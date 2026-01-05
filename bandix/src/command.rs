@@ -16,7 +16,7 @@ use log::LevelFilter;
 use std::sync::Arc;
 use tokio::signal;
 
-/// Common arguments shared by all commands
+/// 所有命令共享的通用参数
 #[derive(Debug, Args, Clone)]
 pub struct CommonArgs {
     #[clap(long, help = "Network interface to monitor (required)")]
@@ -40,7 +40,7 @@ pub struct CommonArgs {
     pub log_level: String,
 }
 
-/// Traffic module arguments
+/// 流量模块参数
 #[derive(Debug, Args, Clone)]
 #[clap(group = clap::ArgGroup::new("traffic").multiple(false))]
 pub struct TrafficArgs {
@@ -73,7 +73,7 @@ pub struct TrafficArgs {
     pub traffic_persist_history: bool,
 }
 
-/// DNS module arguments
+/// DNS 模块参数
 #[derive(Debug, Args, Clone)]
 pub struct DnsArgs {
     #[clap(long, default_value = "false", help = "Enable DNS monitoring module")]
@@ -87,7 +87,7 @@ pub struct DnsArgs {
     pub dns_max_records: usize,
 }
 
-/// Connection module arguments
+/// 连接模块参数
 #[derive(Debug, Args, Clone)]
 pub struct ConnectionArgs {
     #[clap(
@@ -118,65 +118,65 @@ pub struct Options {
 }
 
 impl Options {
-    /// Get iface from common args
+    /// 从通用参数获取接口
     pub fn iface(&self) -> &str {
         &self.common.iface
     }
 
-    /// Get port from common args
+    /// 从通用参数获取端口
     pub fn port(&self) -> u16 {
         self.common.port
     }
 
-    /// Get data_dir from common args
+    /// 从通用参数获取数据目录
     pub fn data_dir(&self) -> &str {
         &self.common.data_dir
     }
 
-    /// Get log_level from common args
+    /// 从通用参数获取日志级别
     pub fn log_level(&self) -> &str {
         &self.common.log_level
     }
 
-    /// Get enable_traffic from traffic args
+    /// 从流量参数获取启用流量
     pub fn enable_traffic(&self) -> bool {
         self.traffic.enable_traffic
     }
 
-    /// Get traffic_retention_seconds from traffic args
+    /// 从流量参数获取流量保留秒数
     pub fn traffic_retention_seconds(&self) -> u32 {
         self.traffic.traffic_retention_seconds
     }
 
-    /// Get traffic_flush_interval_seconds from traffic args
+    /// 从流量参数获取流量刷新间隔秒数
     pub fn traffic_flush_interval_seconds(&self) -> u32 {
         self.traffic.traffic_flush_interval_seconds
     }
 
-    /// Get traffic_persist_history from traffic args
+    /// 从流量参数获取流量持久化历史
     pub fn traffic_persist_history(&self) -> bool {
         self.traffic.traffic_persist_history
     }
 
-    /// Get enable_dns from dns args
+    /// 从 DNS 参数获取启用 DNS
     pub fn enable_dns(&self) -> bool {
         self.dns.enable_dns
     }
 
-    /// Get dns_max_records from dns args
+    /// 从 DNS 参数获取 DNS 最大记录数
     pub fn dns_max_records(&self) -> usize {
         self.dns.dns_max_records
     }
 
-    /// Get enable_connection from connection args
+    /// 从连接参数获取启用连接
     pub fn enable_connection(&self) -> bool {
         self.connection.enable_connection
     }
 }
 
-// Validate arguments
+// 验证参数
 fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
-    // Check if network interface exists
+    // 检查网络接口是否存在
     if get_interface_info(opt.iface()).is_none() {
         return Err(anyhow::anyhow!(
             "Network interface '{}' does not exist",
@@ -184,12 +184,12 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
         ));
     }
 
-    // Check if port is valid (0-65535)
+    // 检查端口是否有效（0-65535）
     if opt.port() == 0 {
         return Err(anyhow::anyhow!("Port number cannot be 0"));
     }
 
-    // Only validate traffic-specific arguments if traffic module is enabled
+    // 仅在启用流量模块时验证流量特定参数
     if opt.enable_traffic() {
         if opt.traffic_retention_seconds() == 0 {
             return Err(anyhow::anyhow!(
@@ -212,7 +212,7 @@ fn load_hostname_bindings(
 ) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>> {
     let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
-    // Load existing hostname bindings from file (priority source)
+    // 从文件加载现有主机名绑定（优先来源）
     let mut bindings_count = 0;
     if let Ok(loaded_bindings) = crate::storage::hostname::load_hostname_bindings(data_dir) {
         let mut bindings_map = bindings.lock().unwrap();
@@ -228,7 +228,7 @@ fn load_hostname_bindings(
         log::warn!("Failed to load hostname bindings from saved file");
     }
 
-    // Load additional hostname bindings from ubus (fallback source)
+    // 从 ubus 加载额外的主机名绑定（备用来源）
     if let Ok(ubus_bindings) = crate::storage::hostname::load_hostname_from_ubus() {
         let mut bindings_map = bindings.lock().unwrap();
         let mut ubus_count = 0;
@@ -249,12 +249,12 @@ fn load_hostname_bindings(
     bindings
 }
 
-// Initialize shared eBPF programs (used by both traffic and DNS modules)
+// 初始化共享的 eBPF 程序（被流量和 DNS 模块共同使用）
 async fn init_shared_ebpf(options: &Options) -> Result<aya::Ebpf, anyhow::Error> {
     load_shared(options.iface().to_string()).await
 }
 
-// Subnet information structure (shared across modules)
+// 子网信息结构体（跨模块共享）
 #[derive(Debug, Clone)]
 pub struct SubnetInfo {
     pub interface_ip: [u8; 4],
@@ -287,7 +287,7 @@ impl SubnetInfo {
     }
 }
 
-// Create module contexts: load eBPF programs, configure kernel maps, and create context objects
+// 创建模块上下文：加载 eBPF 程序，配置内核映射，并创建上下文对象
 async fn create_module_contexts(
     options: &Options,
     subnet_info: &SubnetInfo,
@@ -298,23 +298,22 @@ async fn create_module_contexts(
 ) -> Result<Vec<ModuleContext>, anyhow::Error> {
     let mut module_contexts = Vec::new();
 
-    // Load shared eBPF programs if traffic or DNS module is enabled
-    // Both modules share the same ingress and egress hooks
+    // 如果启用了流量或 DNS 模块，则加载共享的 eBPF 程序
     let shared_ebpf = if options.enable_traffic() || options.enable_dns() {
         log::info!("Loading shared eBPF programs (ingress and egress)...");
         let mut ebpf = init_shared_ebpf(options).await?;
 
-        // Configure subnet info maps if traffic module is enabled
+        // 如果启用了流量模块，则配置子网信息映射
         if options.enable_traffic() {
             log::info!("Configuring subnet info maps for traffic module...");
 
-            // Configure IPv4 subnet info maps
+            // 配置 IPv4 子网信息映射
             let mut ipv4_subnet_info: Array<_, [u8; 4]> =
                 Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
             ipv4_subnet_info.set(0, &subnet_info.interface_ip, 0)?;
             ipv4_subnet_info.set(1, &subnet_info.subnet_mask, 0)?;
 
-            // Configure IPv6 subnet info maps
+            // 配置 IPv6 子网信息映射
             let mut ipv6_subnet_info: Array<_, [u8; 32]> =
                 Array::try_from(ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
 
@@ -348,29 +347,29 @@ async fn create_module_contexts(
         None
     };
 
-    // Configure module enable flags and get DNS map if needed
-    // This requires exclusive access to the eBPF object, so we do it before creating contexts
+    // 配置模块启用标志，如果需要则获取 DNS 映射
+    // 这需要对 eBPF 对象的独占访问，因此我们在创建上下文之前完成
     if let Some(mut ebpf) = shared_ebpf {
-        // Configure module enable flags
+        // 配置模块启用标志
         log::info!("Configuring module enable flags...");
         let mut module_flags: Array<_, u8> = Array::try_from(
             ebpf.take_map("MODULE_ENABLE_FLAGS")
                 .ok_or_else(|| anyhow::anyhow!("Cannot find MODULE_ENABLE_FLAGS map"))?,
         )?;
 
-        // Set traffic module flag (index 0)
+        // 设置traffic module flag (index 0)
         let traffic_flag = if options.enable_traffic() { 1u8 } else { 0u8 };
         module_flags.set(0, &traffic_flag, 0)?;
         log::info!("Traffic module enabled: {}", traffic_flag != 0);
 
-        // Set DNS module flag (index 1)
+        // 设置DNS module flag (index 1)
         let dns_flag = if options.enable_dns() { 1u8 } else { 0u8 };
         module_flags.set(1, &dns_flag, 0)?;
         log::info!("DNS module enabled: {}", dns_flag != 0);
 
         let dns_map = if options.enable_dns() {
-            // Get DNS_DATA RingBuf map before wrapping in Arc
-            // This is necessary because take_map requires exclusive access
+            // 在包装到 Arc 之前获取 DNS_DATA RingBuf 映射
+            // 这是必要的，因为 take_map 需要独占访问
             log::info!("Acquiring DNS RingBuf map...");
             Some(ebpf.take_map("DNS_DATA").ok_or_else(|| {
                 anyhow::anyhow!(
@@ -381,18 +380,18 @@ async fn create_module_contexts(
             None
         };
 
-        // Now wrap in Arc so both modules can share it
+        // 现在包装到 Arc 中，以便两个模块可以共享
         let shared_ebpf_arc = Arc::new(ebpf);
 
-        // Initialize traffic module
+        // 初始化流量模块
         if options.enable_traffic() {
             log::info!("Initializing traffic module...");
 
-            // Create references to the shared eBPF object
+            // 创建对共享 eBPF 对象的引用
             let ingress = Arc::clone(&shared_ebpf_arc);
             let egress = Arc::clone(&shared_ebpf_arc);
 
-            // Create traffic module context (using shared device_manager)
+            // 创建流量模块上下文（使用共享的 device_manager）
             let mut traffic_ctx = TrafficModuleContext::new(
                 options.clone(),
                 ingress,
@@ -404,15 +403,15 @@ async fn create_module_contexts(
             module_contexts.push(ModuleContext::Traffic(traffic_ctx));
         }
 
-        // Initialize DNS module
+        // 初始化 DNS 模块
         if options.enable_dns() {
             log::info!("Initializing DNS module...");
 
-            // Create references to the shared eBPF object
+            // 创建对共享 eBPF 对象的引用
             let ingress = Arc::clone(&shared_ebpf_arc);
             let egress = Arc::clone(&shared_ebpf_arc);
 
-            // Create DNS module context with the pre-acquired map
+            // 使用预获取的映射创建 DNS 模块上下文
             let dns_ctx = DnsModuleContext::new_with_map(
                 options.clone(),
                 ingress,
@@ -424,11 +423,11 @@ async fn create_module_contexts(
         }
     }
 
-    // Initialize connection module
+    // 初始化连接模块
     if options.enable_connection() {
         log::info!("Initializing connection module...");
 
-        // Create connection module context
+        // 创建连接模块上下文
         let connection_ctx = ConnectionModuleContext::new(
             options.clone(),
             std::sync::Arc::clone(shared_hostname_bindings),
@@ -441,7 +440,7 @@ async fn create_module_contexts(
     Ok(module_contexts)
 }
 
-// Start device refresh task: periodically refreshes ARP table and updates device registry
+// 启动设备刷新任务：定期刷新 ARP 表并更新设备注册表
 fn start_device_refresh_task(
     device_manager: Arc<DeviceManager>,
     device_registry: Arc<DeviceRegistry>,
@@ -454,14 +453,14 @@ fn start_device_refresh_task(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Periodic ARP table refresh (every 30 seconds)
+                    // 定期 ARP 表刷新（每30秒）
                     if let Err(e) = device_manager.refresh_arp_table() {
                         log::warn!("Failed to refresh ARP table: {}", e);
                     } else {
                         log::debug!("Periodic ARP table refresh completed");
                     }
 
-                    // Save device registry periodically
+                    // 定期保存设备注册表
                     let registry_path = Path::new(&data_dir).join("devices.json");
                     if let Err(e) = device_registry.save_to_file(&registry_path) {
                         log::warn!("Failed to save device registry: {}", e);
@@ -469,7 +468,7 @@ fn start_device_refresh_task(
                 }
                 _ = shutdown_notify.notified() => {
                     log::info!("Device refresh task received shutdown signal, stopping...");
-                    // Final save before shutdown
+                    // 关闭前的最终保存
                     let registry_path = Path::new(&data_dir).join("devices.json");
                     if let Err(e) = device_registry.save_to_file(&registry_path) {
                         log::error!("Failed to save device registry during shutdown: {}", e);
@@ -481,7 +480,7 @@ fn start_device_refresh_task(
     })
 }
 
-// Start hostname refresh task: periodically updates hostname bindings from ubus
+// 启动主机名刷新任务：定期从 ubus 更新主机名绑定
 fn start_hostname_refresh_task(
     shared_hostname_bindings: std::sync::Arc<
         std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>,
@@ -495,19 +494,19 @@ fn start_hostname_refresh_task(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Load hostname bindings from ubus (silently fails if ubus not available)
+                    // 从 ubus 加载主机名绑定（如果 ubus 不可用则静默失败）
                     if let Ok(ubus_bindings) = crate::storage::hostname::load_hostname_from_ubus() {
                         let mut bindings_map = shared_hostname_bindings.lock().unwrap();
                         let mut updated_count = 0;
 
-                        // Load saved bindings to check priority
+                        // 加载保存的绑定以检查优先级
                         let saved_bindings = crate::storage::hostname::load_hostname_bindings(options.data_dir())
                             .unwrap_or_default();
                         let saved_macs: std::collections::HashSet<[u8; 6]> =
                             saved_bindings.iter().map(|(mac, _)| *mac).collect();
 
                         for (mac, hostname) in ubus_bindings {
-                            // Only update if not manually set (not in saved bindings)
+                            // 仅在未手动设置时更新（不在保存的绑定中）
                             if !saved_macs.contains(&mac) {
                                 if let Some(existing) = bindings_map.get(&mac) {
                                     if existing != &hostname {
@@ -535,7 +534,7 @@ fn start_hostname_refresh_task(
     })
 }
 
-// Run service, start web server
+// 运行服务，启动 Web 服务器
 async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let shutdown_notify_clone = shutdown_notify.clone();
@@ -550,7 +549,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let subnet_info = SubnetInfo::from_interface(options.iface())?;
 
     let shared_hostname_bindings = load_hostname_bindings(options.data_dir());
-    
+
     let device_registry = Arc::new(DeviceRegistry::new());
     let device_manager = Arc::new(DeviceManager::new(
         options.iface().to_string(),
@@ -562,7 +561,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         log::warn!("Failed to load initial devices: {}", e);
     }
 
-    // Create module contexts: load eBPF programs and configure kernel maps
+    // 创建模块上下文：加载 eBPF 程序并配置内核映射
     let module_contexts = create_module_contexts(
         options,
         &subnet_info,
@@ -571,11 +570,11 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     )
     .await?;
 
-    // Init modules
+    // 初始化模块
     let mut monitor_manager = MonitorManager::from_contexts(&module_contexts);
     monitor_manager.init_modules(&module_contexts).await?;
 
-    // Start web server with API router
+    // 使用 API 路由器启动 Web 服务器
     let api_router = monitor_manager.get_api_router().clone();
     let options_for_web = options.clone();
     let shutdown_notify_for_web = shutdown_notify.clone();
@@ -587,14 +586,14 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         }
     });
 
-    // Start hostname refresh task
+    // 启动主机名刷新任务
     let hostname_refresh_task = start_hostname_refresh_task(
         Arc::clone(&shared_hostname_bindings),
         options.clone(),
         shutdown_notify.clone(),
     );
 
-    // Start device refresh task
+    // 启动设备刷新任务
     // let device_refresh_task = start_device_refresh_task(
     //     device_manager,
     //     device_registry,
@@ -602,7 +601,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     //     shutdown_notify.clone(),
     // );
 
-    // Start internal loops for all modules via MonitorManager
+    // 通过 MonitorManager 为所有模块启动内部循环
     let mut tasks = monitor_manager
         .start_modules(module_contexts, shutdown_notify.clone())
         .await?;
@@ -613,11 +612,11 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
 
     // tasks.push(device_refresh_task);
 
-    // Wait for shutdown signal
+    // 等待关闭信号
     shutdown_notify.notified().await;
     info!("Stopping all modules...");
 
-    // Wait for all tasks to complete
+    // 等待所有任务完成
     for task in tasks {
         if let Err(e) = task.await {
             log::error!("Module task error: {}", e);
@@ -648,13 +647,13 @@ pub async fn run(options: Options) -> Result<(), anyhow::Error> {
 
     env_logger::Builder::new()
         .filter(None, log_level)
-        .filter_module("aya::bpf", LevelFilter::Error) // Filter out aya::bpf warnings (BTF related)
+        .filter_module("aya::bpf", LevelFilter::Error)
         .target(env_logger::Target::Stdout)
         .init();
 
     log_startup_info(&options);
 
-    // Check if at least one module is enabled
+    // 检查是否至少启用了 一个模块
     if !options.enable_traffic() && !options.enable_dns() && !options.enable_connection() {
         return Err(anyhow::anyhow!(
             "No monitoring modules enabled. At least one module must be enabled: --enable-traffic, --enable-dns, or --enable-connection"

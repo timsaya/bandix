@@ -9,14 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 struct RawTrafficData {
     pub ip_address: [u8; 4],
-    pub ipv6_addresses: [[u8; 16]; 16], // IPv6 addresses (up to 16)
-    pub lan_tx_bytes: u64,              // Local network send bytes
-    pub lan_rx_bytes: u64,              // Local network receive bytes
-    pub wan_tx_bytes: u64,              // Cross-network send bytes
-    pub wan_rx_bytes: u64,              // Cross-network receive bytes
+    pub ipv6_addresses: [[u8; 16]; 16], // IPv6 地址（最多16个）
+    pub lan_tx_bytes: u64,              // lan 发送字节数
+    pub lan_rx_bytes: u64,              // lan 接收字节数
+    pub wan_tx_bytes: u64,              // wan 发送字节数
+    pub wan_rx_bytes: u64,              // wan 接收字节数
 }
 
-/// Specific implementation of Traffic monitoring module
+/// 流量监控模块的具体实现
 pub struct TrafficMonitor;
 
 impl TrafficMonitor {
@@ -37,70 +37,42 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        let interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
-        // Only create flush interval if persistence is enabled
-        if ctx.options.traffic_persist_history() {
-            self.start_monitoring_loop_with_persist(ctx, interval, shutdown_notify)
-                .await
-        } else {
-            self.start_monitoring_loop_memory_only(ctx, interval, shutdown_notify)
-                .await
-        }
-    }
-
-    /// Traffic monitoring loop with persistence enabled
-    async fn start_monitoring_loop_with_persist(
-        &self,
-        ctx: &mut TrafficModuleContext,
-        mut interval: tokio::time::Interval,
-        shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
-    ) -> Result<()> {
-        let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_secs(
-            ctx.options.traffic_flush_interval_seconds() as u64,
+        let persist_enabled = ctx.options.traffic_persist_history();
+        let mut flush_interval = persist_enabled.then_some(tokio::time::interval(
+            tokio::time::Duration::from_secs(ctx.options.traffic_flush_interval_seconds() as u64),
         ));
 
         loop {
+            let flush_future = async {
+                match &mut flush_interval {
+                    Some(fi) => fi.tick().await,
+                    None => std::future::pending().await,
+                }
+            };
+
             tokio::select! {
                 _ = interval.tick() => {
                     self.process_monitoring_cycle(ctx).await;
                 }
-                _ = flush_interval.tick() => {
-                    log::debug!("Starting periodic flush of dirty rings to disk (interval: {}s)...",
+                _ = flush_future => {
+                    log::debug!("Starting periodic flush of dirty rings to disk (interval: {} seconds)...",
                                ctx.options.traffic_flush_interval_seconds());
                     if let Err(e) = ctx.long_term_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush multi-level rings to disk: {}", e);
+                        log::error!("Failed to flush long-term rings to disk: {}", e);
                     } else {
                         log::debug!("Successfully flushed dirty rings to disk");
                     }
                 }
                 _ = shutdown_notify.notified() => {
                     log::debug!("Traffic monitoring module received shutdown signal, stopping...");
-                    log::debug!("Flushing all dirty rings before shutdown...");
-                    if let Err(e) = ctx.long_term_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush multi-level rings during shutdown: {}", e);
+                    if persist_enabled {
+                        log::debug!("Flushing all dirty rings before shutdown...");
+                        if let Err(e) = ctx.long_term_manager.flush_dirty_rings().await {
+                            log::error!("Failed to flush long-term rings during shutdown: {}", e);
+                        }
                     }
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn start_monitoring_loop_memory_only(
-        &self,
-        ctx: &mut TrafficModuleContext,
-        mut interval: tokio::time::Interval,
-        shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    self.process_monitoring_cycle(ctx).await;
-                }
-                _ = shutdown_notify.notified() => {
-                    log::debug!("Traffic monitoring module received shutdown signal, stopping...");
                     break;
                 }
             }
@@ -136,36 +108,30 @@ impl TrafficMonitor {
             stats.iter().map(|(k, v)| (*k, *v)).collect()
         };
 
-        if let Err(e) = ctx
-            .realtime_manager
-            .insert_metrics_batch(ts_ms, &snapshot)
-        {
-            log::error!("metrics persist to memory ring error: {}", e);
+        if let Err(e) = ctx.realtime_manager.insert_metrics_batch(ts_ms, &snapshot) {
+            log::error!("Failed to persist metrics to memory ring: {}", e);
         }
 
-        if let Err(e) = ctx
-            .long_term_manager
-            .insert_metrics_batch(ts_ms, &snapshot)
-        {
-            log::error!("metrics persist to multi-level ring error: {}", e);
+        if let Err(e) = ctx.long_term_manager.insert_metrics_batch(ts_ms, &snapshot) {
+            log::error!("Failed to persist metrics to long-term ring: {}", e);
         }
     }
 }
 
 impl TrafficMonitor {
-    /// Check if MAC address is special address (broadcast, multicast, etc.)
+    /// 检查 MAC 地址是否为特殊地址（广播、多播等）
     fn is_special_mac_address(&self, mac: &[u8; 6]) -> bool {
-        // Broadcast address FF:FF:FF:FF:FF:FF
+        // 广播地址 FF:FF:FF:FF:FF:FF
         if mac == &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF] {
             return true;
         }
 
-        // Multicast address (lowest bit of first byte is 1)
+        // 多播地址（第一个字节的最低位为1）
         if (mac[0] & 0x01) == 0x01 {
             return true;
         }
 
-        // Zero address 00:00:00:00:00:00
+        // 零地址 00:00:00:00:00:00
         if mac == &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00] {
             return true;
         }
@@ -179,7 +145,7 @@ impl TrafficMonitor {
     ) -> Result<StdHashMap<[u8; 6], [u64; 4]>, anyhow::Error> {
         let mut traffic_data = StdHashMap::new();
 
-        // Since ingress and egress share the same eBPF object and maps, we only need to read once
+        // 由于入口和出口共享同一个 eBPF 对象和映射，我们只需要读取一次
         let traffic_map = HashMap::<&MapData, [u8; 6], [u64; 4]>::try_from(
             ebpf.map("MAC_TRAFFIC")
                 .ok_or(anyhow::anyhow!("Cannot find MAC_TRAFFIC map"))?,
@@ -187,7 +153,7 @@ impl TrafficMonitor {
 
         for entry in traffic_map.iter() {
             let (key, value) = entry.unwrap();
-            // Exclude broadcast and multicast addresses
+            // 排除广播和多播地址
             if self.is_special_mac_address(&key) {
                 continue;
             }
@@ -204,17 +170,17 @@ impl TrafficMonitor {
     ) -> Result<StdHashMap<[u8; 6], RawTrafficData>, anyhow::Error> {
         let mut traffic = StdHashMap::new();
 
-        // Get all devices from DeviceManager
+        // 从 DeviceManager 获取所有设备
         let devices = device_manager.get_all_devices();
         let devices_map: StdHashMap<[u8; 6], crate::device::ArpLine> =
             devices.into_iter().map(|d| (d.mac, d)).collect();
 
-        // Build traffic data for each MAC address that has traffic
+        // 为每个有流量的 MAC 地址构建流量数据
         for (mac, data) in traffic_data.iter() {
             if let Some(device_info) = devices_map.get(mac) {
                 let mut ipv6_addresses = [[0u8; 16]; 16];
 
-                // Copy IPv6 addresses from device info (up to 16)
+                // 从设备信息复制 IPv6 地址（最多16个）
                 for (i, ipv6_addr) in device_info.ipv6_addresses.iter().enumerate().take(16) {
                     if *ipv6_addr != [0u8; 16] {
                         ipv6_addresses[i] = *ipv6_addr;
@@ -226,10 +192,10 @@ impl TrafficMonitor {
                     RawTrafficData {
                         ip_address: device_info.ip,
                         ipv6_addresses,
-                        lan_tx_bytes: data[0], // Local network send
-                        lan_rx_bytes: data[1], // Local network receive
-                        wan_tx_bytes: data[2], // Cross-network send
-                        wan_rx_bytes: data[3], // Cross-network receive
+                        lan_tx_bytes: data[0], // lan 发送
+                        lan_rx_bytes: data[1], // lan 接收
+                        wan_tx_bytes: data[2], // wan 发送
+                        wan_rx_bytes: data[3], // wan 接收
                     },
                 );
             }
@@ -261,7 +227,7 @@ impl TrafficMonitor {
                 DeviceTrafficStats::from_ip(raw_traffic.ip_address, raw_traffic.ipv6_addresses)
             });
 
-            // Calculate current effective rate limit from scheduled rules
+            // 从预定规则计算当前有效速率限制
             if let Some(limits) =
                 crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac)
             {
@@ -269,20 +235,20 @@ impl TrafficMonitor {
                 stats.wan_tx_rate_limit = limits[1];
             }
 
-            // If the entry already exists (e.g., created earlier due to rate limit config and IP is still default),
-            // overwrite with the latest IP collected by eBPF to avoid staying at 0.0.0.0.
+            // 如果条目已存在（例如，由于速率限制配置而提前创建且 IP 仍是默认值），
+            // 用 eBPF 收集的最新 IP 覆盖，以避免停留在 0.0.0.0。
             if raw_traffic.ip_address != [0, 0, 0, 0] && stats.ip_address != raw_traffic.ip_address
             {
                 stats.ip_address = raw_traffic.ip_address;
             }
 
-            // Update IPv6 addresses from DeviceManager
-            // Merge new IPv6 addresses from DeviceManager into existing ones
+            // 从 DeviceManager 更新 IPv6 地址
+            // 将 DeviceManager 中的新 IPv6 地址合并到现有地址中
             if let Some(device_info) = ctx.device_manager.get_device_by_mac(mac) {
                 for ipv6_addr in device_info.ipv6_addresses.iter() {
                     // Check if this IPv6 address is not all zeros
                     if *ipv6_addr != [0u8; 16] {
-                        // Check if this IPv6 address already exists in the array
+                        // 检查此 IPv6 地址是否已存在于数组中
                         let mut found = false;
                         let current_count = stats.ipv6_count() as usize;
                         for i in 0..current_count {
@@ -292,7 +258,7 @@ impl TrafficMonitor {
                             }
                         }
 
-                        // Add new IPv6 address if not found and we have space (up to 16)
+                        // 如果未找到且有空间（最多16个），则添加新的 IPv6 地址
                         if !found && current_count < 16 {
                             stats.ipv6_addresses[current_count] = *ipv6_addr;
                         }
@@ -300,34 +266,34 @@ impl TrafficMonitor {
                 }
             }
 
-            // Update traffic bytes (baseline already applied during initialization)
-            // eBPF provides incremental values since last reset, so we add them to existing baseline
+            // 更新流量字节数（基准线已在初始化期间应用）
+            // eBPF 提供自上次重置以来的增量值，因此我们将其添加到现有基准线上
             stats.lan_rx_bytes += raw_traffic.lan_rx_bytes;
             stats.lan_tx_bytes += raw_traffic.lan_tx_bytes;
             stats.wan_rx_bytes += raw_traffic.wan_rx_bytes;
             stats.wan_tx_bytes += raw_traffic.wan_tx_bytes;
 
-            // Calculate rate (bytes/sec)
+            // 计算速率（字节/秒）
             if stats.last_sample_ts > 0 {
                 let time_diff = now.saturating_sub(stats.last_sample_ts);
                 if time_diff > 0 {
-                    // Calculate local network receive rate
+                    // 计算lan 接收速率
                     let lan_rx_diff = stats.lan_rx_bytes.saturating_sub(stats.lan_last_rx_bytes);
                     stats.lan_rx_rate = (lan_rx_diff * 1000) / time_diff;
 
-                    // Calculate local network send rate
+                    // 计算lan 发送速率
                     let lan_tx_diff = stats.lan_tx_bytes.saturating_sub(stats.lan_last_tx_bytes);
                     stats.lan_tx_rate = (lan_tx_diff * 1000) / time_diff;
 
-                    // Calculate cross-network receive rate
+                    // 计算wan 接收速率
                     let wan_rx_diff = stats.wan_rx_bytes.saturating_sub(stats.wan_last_rx_bytes);
                     stats.wan_rx_rate = (wan_rx_diff * 1000) / time_diff;
 
-                    // Calculate cross-network send rate
+                    // 计算wan 发送速率
                     let wan_tx_diff = stats.wan_tx_bytes.saturating_sub(stats.wan_last_tx_bytes);
                     stats.wan_tx_rate = (wan_tx_diff * 1000) / time_diff;
 
-                    // Update last active time only if any transmit traffic increased
+                    // 仅当任何发送流量增加时更新最后活动时间
                     let total_tx_diff = lan_tx_diff + wan_tx_diff;
                     if total_tx_diff > 0 {
                         stats.last_online_ts = now;
@@ -335,14 +301,14 @@ impl TrafficMonitor {
                 }
             }
 
-            // If first sample and there is transmit traffic, set last active time
+            // 如果是第一次采样且有发送流量，则设置最后活动时间
             if stats.last_sample_ts == 0 {
                 if stats.total_tx_bytes() > 0 {
                     stats.last_online_ts = now;
                 }
             }
 
-            // Save current values as basis for next calculation
+            // 将当前值保存为下次计算的基础
             stats.lan_last_rx_bytes = stats.lan_rx_bytes;
             stats.lan_last_tx_bytes = stats.lan_tx_bytes;
             stats.wan_last_rx_bytes = stats.wan_rx_bytes;
@@ -358,14 +324,14 @@ impl TrafficMonitor {
         ctx: &mut TrafficModuleContext,
         _ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
-        // Calculate current effective rate limits from scheduled rules
+        // 从预定规则计算当前有效速率限制
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
-        // Collect all unique MAC addresses from scheduled limits
+        // 从预定限制收集所有唯一的 MAC 地址
         use std::collections::HashSet;
         let macs: HashSet<[u8; 6]> = scheduled_limits.iter().map(|r| r.mac).collect();
 
-        // Calculate current effective limits for each MAC
+        // 为每个 MAC 计算当前有效限制
         let mut effective_limits: std::collections::HashMap<[u8; 6], [u64; 2]> =
             std::collections::HashMap::new();
         for mac in macs {
@@ -377,15 +343,15 @@ impl TrafficMonitor {
         }
         drop(scheduled_limits);
 
-        // Get ingress eBPF reference (both ingress and egress share the same eBPF object and maps)
+        // 获取入口 eBPF 引用（入口和出口共享同一个 eBPF 对象和映射）
         let ingress_ebpf = ctx
             .ingress_ebpf
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Ingress eBPF program not initialized"))?;
 
-        // Get mutable access to the eBPF object using unsafe
-        // This is safe because eBPF maps are thread-safe and we're only updating the map,
-        // not modifying the eBPF object itself
+        // 使用 unsafe 获取对 eBPF 对象的可变访问
+        // 这是安全的，因为 eBPF 映射是线程安全的，我们只是在更新映射，
+        // 不是修改 eBPF 对象本身
         let ebpf_mut = unsafe {
             // Get a raw pointer to the inner Ebpf object
             let ptr = Arc::as_ptr(ingress_ebpf) as *const aya::Ebpf as *mut aya::Ebpf;
@@ -399,7 +365,7 @@ impl TrafficMonitor {
                 .ok_or(anyhow::anyhow!("Cannot find MAC_RATE_LIMITS"))?,
         )?;
 
-        // Collect all MACs currently in eBPF map
+        // 收集当前在 eBPF 映射中的所有 MAC
         let mut existing_macs_in_ebpf: std::collections::HashSet<[u8; 6]> =
             std::collections::HashSet::new();
         for entry in mac_rate_limits.iter() {
@@ -408,14 +374,14 @@ impl TrafficMonitor {
             }
         }
 
-        // Apply effective limits to eBPF map (update or add)
+        // 将有效限制应用到 eBPF 映射（更新或添加）
         for (mac, lim) in effective_limits.iter() {
             mac_rate_limits.insert(mac, &[lim[0], lim[1]], 0).unwrap();
             existing_macs_in_ebpf.remove(mac);
         }
 
-        // Clear limits for MACs that no longer have matching rules
-        // Set to [0, 0] to remove rate limiting (unlimited)
+        // 清除不再有匹配规则的 MAC 的限制
+        // 设置为 [0, 0] 以移除速率限制（无限制）
         for mac in existing_macs_in_ebpf.iter() {
             mac_rate_limits.insert(mac, &[0, 0], 0).unwrap();
         }

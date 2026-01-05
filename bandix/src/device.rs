@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-/// Device information from ARP table
+/// 来自 ARP 表的设备信息
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArpLine {
     pub mac: [u8; 6],
@@ -18,22 +18,22 @@ pub struct ArpLine {
 }
 
 pub struct DeviceManager {
-    /// Current ARP table snapshot (online devices)
+    /// 当前 ARP table snapshot (online devices)
     arp_table: Arc<Mutex<Vec<ArpLine>>>,
     /// Central device registry (maintains historical IP addresses)
     device_registry: Arc<DeviceRegistry>,
-    /// Network interface name
+    /// 网络接口 name
     iface: String,
     /// Subnet information for the monitored interface
     subnet_info: SubnetInfo,
-    /// Last refresh timestamp
+    /// 最后一个 refresh timestamp
     last_refresh: Arc<Mutex<SystemTime>>,
     /// Refresh interval (default: 30 seconds)
     refresh_interval: Duration,
 }
 
 impl DeviceManager {
-    /// Create a new device manager with interface and subnet info
+    /// 创建a new device manager with interface and subnet info
     pub fn new(
         iface: String,
         subnet_info: SubnetInfo,
@@ -49,7 +49,7 @@ impl DeviceManager {
         }
     }
 
-    /// Get mutable reference to device by MAC address
+    /// 获取mutable reference to device by MAC address
     fn get_device_by_mac_mut<'a>(
         devices: &'a mut Vec<ArpLine>,
         mac: &[u8; 6],
@@ -57,7 +57,7 @@ impl DeviceManager {
         devices.iter_mut().find(|device| device.mac == *mac)
     }
 
-    /// Get reference to device registry
+    /// 获取reference to device registry
     pub fn get_registry(&self) -> Arc<DeviceRegistry> {
         Arc::clone(&self.device_registry)
     }
@@ -144,20 +144,20 @@ impl DeviceManager {
                 continue;
             }
 
-            // Parse IP address
+            // 解析IP address
             let ip = match parts[0].parse::<Ipv4Addr>() {
                 Ok(ip) => ip,
                 Err(_) => continue,
             };
             let ip_bytes = ip.octets();
 
-            // Parse hardware type (should be 0x01 for Ethernet)
+            // 解析hardware type (should be 0x01 for Ethernet)
             let hw_type = parts[1];
             if hw_type != "0x1" && hw_type != "0x01" && hw_type != "1" {
                 continue;
             }
 
-            // Parse flags (ARP entry state)
+            // 解析flags (ARP entry state)
             // Flags: 0x2 = incomplete, 0x0 = no entry, others = valid
             let flags = parts[2];
             if flags == "0x0" || flags == "0x00" || flags == "0" {
@@ -165,7 +165,7 @@ impl DeviceManager {
                 continue;
             }
 
-            // Parse MAC address
+            // 解析MAC address
             let mac_str = parts[3];
             if mac_str == "00:00:00:00:00:00" || mac_str == "<incomplete>" {
                 // Invalid or incomplete entry
@@ -177,12 +177,12 @@ impl DeviceManager {
                 Err(_) => continue,
             };
 
-            // Check if MAC is special (broadcast, multicast, etc.)
+            // 检查是否MAC is special (broadcast, multicast, etc.)
             if self::is_special_mac_address(&mac) {
                 continue;
             }
 
-            // Parse device name (interface) - last column in ARP table
+            // 解析device name (interface) - last column in ARP table
             let device_name = parts[5];
             if device_name != self.iface {
                 log::debug!(
@@ -193,10 +193,10 @@ impl DeviceManager {
                 continue;
             }
 
-            // Get IPv6 addresses for this MAC
+            // 获取IPv6 addresses for this MAC
             let ipv6_addresses = ipv6_neighbors.get(&mac).cloned().unwrap_or_default();
 
-            // Add to devices list
+            // 添加to devices list
             devices.push(ArpLine {
                 mac,
                 ip: ip_bytes,
@@ -222,8 +222,8 @@ impl DeviceManager {
     }
 
     /// Refresh ARP table cache
-    /// This should be called when eBPF detects a new MAC/IP combination
-    /// This method performs incremental update: adds new devices and updates existing ones,
+    /// 这should be called when eBPF detects a new MAC/IP combination
+    /// 这method performs incremental update: adds new devices and updates existing ones,
     /// but does not remove devices that are temporarily offline
     pub fn refresh_arp_table(&self) -> Result<usize> {
         // Refresh ARP/neighbor cache before reading to remove stale entries
@@ -247,7 +247,7 @@ impl DeviceManager {
                         existing_device.ip = device.ip;
                         changed = true;
                     }
-                    // Update IPv6 addresses if changed
+                    // 更新IPv6 addresses if changed
                     if existing_device.ipv6_addresses != device.ipv6_addresses {
                         existing_device.ipv6_addresses = device.ipv6_addresses.clone();
                         changed = true;
@@ -261,7 +261,7 @@ impl DeviceManager {
                     added_count += 1;
                 }
 
-                // Update registry with current ARP table data
+                // 更新registry with current ARP table data
                 let ipv6_array: Vec<[u8; 16]> = device.ipv6_addresses.clone();
                 self.device_registry
                     .register_device(device.mac, Some(device.ip), &ipv6_array);
@@ -282,14 +282,14 @@ impl DeviceManager {
         Ok(added_count + updated_count)
     }
 
-    /// Check if a MAC address is in the device list
+    /// 检查是否a MAC address is in the device list
     #[allow(dead_code)]
     pub fn is_valid_mac(&self, mac: &[u8; 6]) -> bool {
         let devices = self.arp_table.lock().unwrap();
         devices.iter().any(|device| device.mac == *mac)
     }
 
-    /// Check if a MAC-IP combination is valid
+    /// 检查是否a MAC-IP combination is valid
     /// Returns true if both MAC and IP are in the device list and match
     pub fn is_valid_device(&self, mac: &[u8; 6], ip: &[u8; 4]) -> bool {
         let devices = self.arp_table.lock().unwrap();
@@ -298,27 +298,27 @@ impl DeviceManager {
             .any(|device| device.mac == *mac && device.ip == *ip)
     }
 
-    /// Get device info by MAC address
+    /// 获取device info by MAC address
     #[allow(dead_code)]
     pub fn get_device_by_mac(&self, mac: &[u8; 6]) -> Option<ArpLine> {
         let devices = self.arp_table.lock().unwrap();
         devices.iter().find(|device| device.mac == *mac).cloned()
     }
 
-    /// Get all devices
+    /// 获取all devices
     #[allow(dead_code)]
     pub fn get_all_devices(&self) -> Vec<ArpLine> {
         let devices = self.arp_table.lock().unwrap();
         devices.clone()
     }
 
-    /// Get device count
+    /// 获取device count
     pub fn device_count(&self) -> usize {
         let devices = self.arp_table.lock().unwrap();
         devices.len()
     }
 
-    /// Check if refresh is needed (based on refresh interval)
+    /// 检查是否refresh is needed (based on refresh interval)
     pub fn should_refresh(&self) -> bool {
         let last_refresh = self.last_refresh.lock().unwrap();
         if let Ok(elapsed) = last_refresh.elapsed() {
@@ -369,16 +369,16 @@ impl DeviceManager {
         Ok(())
     }
 
-    /// Set refresh interval
+    /// 设置refresh interval
     #[allow(dead_code)]
     pub fn set_refresh_interval(&mut self, interval: Duration) {
         self.refresh_interval = interval;
     }
 }
 
-// Note: DeviceManager no longer implements Default because it requires hostname_bindings
+// 注意：DeviceManager 不再实现 Default，因为它需要 hostname_bindings
 
-/// Check if MAC address is special (broadcast, multicast, etc.)
+/// 检查 MAC 地址是否特殊（广播、多播等）
 fn is_special_mac_address(mac: &[u8; 6]) -> bool {
     // Broadcast address FF:FF:FF:FF:FF:FF
     if mac == &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF] {

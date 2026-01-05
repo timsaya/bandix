@@ -210,7 +210,7 @@ impl DeviceRegistry {
 
     pub fn register_device(&self, mac: [u8; 6], ipv4: Option<[u8; 4]>, ipv6_list: &[[u8; 16]]) {
         let mut devices = self.devices.lock().unwrap();
-        
+
         if let Some(record) = Self::get_device_by_mac_mut(&mut devices, &mac) {
             if let Some(ip) = ipv4 {
                 record.update_ipv4(ip);
@@ -322,10 +322,8 @@ impl DeviceRegistry {
         }
 
         let devices = self.devices.lock().unwrap();
-        let json_records: Vec<DeviceRecordJson> = devices
-            .iter()
-            .map(|r| DeviceRecordJson::from(r))
-            .collect();
+        let json_records: Vec<DeviceRecordJson> =
+            devices.iter().map(|r| DeviceRecordJson::from(r)).collect();
         let content = serde_json::to_string_pretty(&json_records)
             .map_err(|e| anyhow::anyhow!("Failed to serialize device registry: {}", e))?;
 
@@ -338,7 +336,6 @@ impl DeviceRegistry {
         Arc::clone(&self.devices)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

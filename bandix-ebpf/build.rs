@@ -4,7 +4,7 @@ use which::which;
 /// better expressed by [artifact-dependencies][bindeps] but issues such as
 /// https://github.com/rust-lang/cargo/issues/12385 make their use impractical for the time being.
 ///
-/// This file implements an imperfect solution: it causes cargo to rebuild the crate whenever the
+/// 这file implements an imperfect solution: it causes cargo to rebuild the crate whenever the
 /// mtime of `which bpf-linker` changes. Note that possibility that a new bpf-linker is added to
 /// $PATH ahead of the one used as the cache key still exists. Solving this in the general case
 /// would require rebuild-if-changed-env=PATH *and* rebuild-if-changed={every-directory-in-PATH}

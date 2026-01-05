@@ -1,7 +1,7 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::storage::traffic::{
-    self, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
+    self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
 };
 use crate::utils::format_utils::{format_bytes, format_mac};
 use bandix_common::DeviceTrafficStats;
@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Device information for API response
+/// 设备信息，用于 API 响应
 #[derive(Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub ip: String,
@@ -41,14 +41,14 @@ pub struct DeviceInfo {
     pub last_online_ts: u64,
 }
 
-/// Devices response structure
+/// 设备响应结构
 #[derive(Serialize, Deserialize)]
 pub struct DevicesResponse {
     pub devices: Vec<DeviceInfo>,
 }
 
-/// Metrics response structure
-/// metrics is a Vec of arrays, each array contains:
+/// 指标响应结构
+/// 指标是一个数组向量，每个数组包含：
 /// [ts_ms, total_rx_rate, total_tx_rate, lan_rx_rate, lan_tx_rate,
 ///  wan_rx_rate, wan_tx_rate, total_rx_bytes, total_tx_bytes,
 ///  lan_rx_bytes, lan_tx_bytes, wan_rx_bytes, wan_tx_bytes]
@@ -59,79 +59,79 @@ pub struct MetricsResponse {
     pub metrics: Vec<Vec<u64>>,
 }
 
-/// Device usage ranking entry
+/// 设备使用排名条目
 #[derive(Serialize, Deserialize)]
 pub struct DeviceUsageRanking {
     pub mac: String,
     pub hostname: String,
     pub ip: String,
-    pub total_bytes: u64, // Total bytes (rx + tx) in the time range
-    pub rx_bytes: u64,    // Receive bytes
-    pub tx_bytes: u64,    // Transmit bytes
-    pub percentage: f64,  // Percentage of total usage
-    pub rank: usize,      // Ranking position (1-based)
+    pub total_bytes: u64, // 时间范围内总字节数（rx + tx）
+    pub rx_bytes: u64,    // 接收字节数
+    pub tx_bytes: u64,    // 发送字节数
+    pub percentage: f64,  // 总使用量的百分比
+    pub rank: usize,      // 排名位置（从1开始）
 }
 
-/// Device usage ranking response structure
+/// 设备使用排名响应结构
 #[derive(Serialize, Deserialize)]
 pub struct DeviceUsageRankingResponse {
     pub start_ms: u64,
     pub end_ms: u64,
-    pub total_bytes: u64,    // Total bytes across all devices
-    pub total_rx_bytes: u64, // Total receive bytes across all devices
-    pub total_tx_bytes: u64, // Total transmit bytes across all devices
-    pub device_count: usize, // Number of devices
+    pub total_bytes: u64,    // 所有设备的总字节数
+    pub total_rx_bytes: u64, // 所有设备的总接收字节数
+    pub total_tx_bytes: u64, // 所有设备的总发送字节数
+    pub device_count: usize, // 设备数量
     pub rankings: Vec<DeviceUsageRanking>,
 }
 
-/// Time series increment entry (hourly or daily)
+/// 时间序列增量条目（每小时或每日）
 #[derive(Serialize, Deserialize)]
 pub struct TimeSeriesIncrement {
-    pub ts_ms: u64,       // Timestamp (start of hour or day)
-    pub rx_bytes: u64,    // Receive bytes increment in this period
-    pub tx_bytes: u64,    // Transmit bytes increment in this period
-    pub total_bytes: u64, // Total bytes increment (rx + tx)
+    pub ts_ms: u64,       // 时间戳（小时或日的开始）
+    pub rx_bytes: u64,    // 此期间的接收字节增量
+    pub tx_bytes: u64,    // 此期间的发送字节增量
+    pub total_bytes: u64, // 此期间的总字节增量（rx + tx）
 }
 
-/// Time series increment response structure
+/// 时间序列增量响应结构
 #[derive(Serialize, Deserialize)]
 pub struct TimeSeriesIncrementResponse {
     pub start_ms: u64,
     pub end_ms: u64,
-    pub aggregation: String, // "hourly" or "daily"
-    pub mac: String,         // MAC address (or "all" for aggregate)
+    pub aggregation: String, // "hourly" 或 "daily"
+    pub mac: String,         // MAC 地址（或 "all" 表示聚合）
     pub increments: Vec<TimeSeriesIncrement>,
-    pub total_rx_bytes: u64, // Total RX bytes in the range
-    pub total_tx_bytes: u64, // Total TX bytes in the range
-    pub total_bytes: u64,    // Total bytes in the range
+    pub total_rx_bytes: u64, // 范围内的总 RX 字节数
+    pub total_tx_bytes: u64, // 范围内的总 TX 字节数
+    pub total_bytes: u64,    // 范围内的总字节数
 }
 
-/// Hostname binding information for API response
+/// 主机名绑定信息，用于 API 响应
 #[derive(Serialize, Deserialize)]
 pub struct HostnameBinding {
     pub mac: String,
     pub hostname: String,
 }
 
-/// Hostname bindings response structure
+/// 主机名绑定响应结构
 #[derive(Serialize, Deserialize)]
 pub struct HostnameBindingsResponse {
     pub bindings: Vec<HostnameBinding>,
 }
 
-/// Set hostname binding request structure
+/// 设置主机名绑定请求结构
 #[derive(Serialize, Deserialize)]
 pub struct SetHostnameBindingRequest {
     pub mac: String,
     pub hostname: String,
 }
 
-/// Time slot for API request/response
+/// 时间段，用于 API 请求/响应
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimeSlotApi {
-    pub start: String, // Format: "HH:MM"
-    pub end: String,   // Format: "HH:MM"
-    pub days: Vec<u8>, // 1-7 (Monday-Sunday)
+    pub start: String, // 格式："HH:MM"
+    pub end: String,   // 格式："HH:MM"
+    pub days: Vec<u8>, // 1-7（周一到周日）
 }
 
 impl From<&TimeSlot> for TimeSlotApi {
@@ -139,7 +139,7 @@ impl From<&TimeSlot> for TimeSlotApi {
         let mut days = Vec::new();
         for i in 0..7 {
             if (slot.days_of_week & (1 << i)) != 0 {
-                days.push(i + 1); // Convert to 1-7 (Monday-Sunday)
+                days.push(i + 1); // 转换为 1-7（周一到周日）
             }
         }
         Self {
@@ -173,7 +173,7 @@ impl TryFrom<&TimeSlotApi> for TimeSlot {
     }
 }
 
-/// Scheduled rate limit info for API response
+/// 预定速率限制信息，用于 API 响应
 #[derive(Serialize, Deserialize)]
 pub struct ScheduledRateLimitInfo {
     pub mac: String,
@@ -182,13 +182,13 @@ pub struct ScheduledRateLimitInfo {
     pub wan_tx_rate_limit: u64,
 }
 
-/// Scheduled rate limits response structure
+/// 预定速率限制响应结构
 #[derive(Serialize, Deserialize)]
 pub struct ScheduledRateLimitsResponse {
     pub limits: Vec<ScheduledRateLimitInfo>,
 }
 
-/// Set scheduled limit request structure
+/// 设置预定限制请求结构
 #[derive(Serialize, Deserialize)]
 pub struct SetScheduledLimitRequest {
     pub mac: String,
@@ -197,22 +197,22 @@ pub struct SetScheduledLimitRequest {
     pub wan_tx_rate_limit: u64,
 }
 
-/// Delete scheduled limit request structure
+/// 删除预定限制请求结构
 #[derive(Serialize, Deserialize)]
 pub struct DeleteScheduledLimitRequest {
     pub mac: String,
     pub time_slot: TimeSlotApi,
 }
 
-/// Traffic monitoring API handler
+/// 流量 monitoring API handler
 #[derive(Clone)]
 pub struct TrafficApiHandler {
     mac_stats: Arc<Mutex<HashMap<[u8; 6], DeviceTrafficStats>>>,
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-    realtime_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling (memory-only)
-    long_term_manager: Arc<MultiLevelRingManager>, // Long-term sampling (day/week/month/year, persisted)
-    device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // Centralized device registry
+    realtime_manager: Arc<RealtimeRingManager>, // 实时 1 秒采样（仅内存）
+    long_term_manager: Arc<LongTermRingManager>, // 长期采样（1 小时间隔，365 天保留，已持久化）
+    device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // 中心化设备注册表
     options: Options,
 }
 
@@ -222,7 +222,7 @@ impl TrafficApiHandler {
         scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         realtime_manager: Arc<RealtimeRingManager>,
-        long_term_manager: Arc<MultiLevelRingManager>,
+        long_term_manager: Arc<LongTermRingManager>,
         device_registry: Arc<crate::storage::device_registry::DeviceRegistry>,
         options: Options,
     ) -> Self {
@@ -308,19 +308,19 @@ impl TrafficApiHandler {
 }
 
 impl TrafficApiHandler {
-    /// Handle /api/devices endpoint
+    /// 处理/api/devices endpoint
     async fn handle_devices(&self) -> Result<HttpResponse, anyhow::Error> {
         let stats_map = self.mac_stats.lock().unwrap();
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
-        // Get IPv6 neighbor table from system
+        // 从系统获取 IPv6 邻居表
         let ipv6_neighbors = crate::utils::network_utils::get_ipv6_neighbors().unwrap_or_default();
 
-        // Collect all devices from centralized registry (includes historical devices)
+        // 从中心化注册表收集所有设备（包括历史设备）
         let registry_devices = self.device_registry.get_all_devices();
         let mut all_macs: HashSet<[u8; 6]> = registry_devices.iter().map(|d| d.mac).collect();
 
-        // Also add devices from current stats (baseline already applied during initialization)
+        // 还添加来自当前统计的设备（基准线已在初始化期间应用）
         for mac in stats_map.keys() {
             all_macs.insert(*mac);
         }
@@ -328,10 +328,10 @@ impl TrafficApiHandler {
         let devices: Vec<DeviceInfo> = all_macs
             .into_iter()
             .map(|mac| {
-                // Format MAC address
+                // 格式化 MAC 地址
                 let mac_str = format_mac(&mac);
 
-                // Get stats from mac_stats (baseline already applied during initialization)
+                // 从 mac_stats 获取统计（基准线已在初始化期间应用）
                 let (
                     ip_address,
                     total_rx_bytes,
@@ -394,10 +394,10 @@ impl TrafficApiHandler {
                     )
                 };
 
-                // Get device record from registry (includes historical IP addresses)
+                // 从注册表获取设备记录（包括历史 IP 地址）
                 let device_record = self.device_registry.get_device(&mac);
 
-                // Use current IP from stats/baseline, or fallback to registry
+                // 使用来自统计/基准的当前 IP，或回退到注册表
                 let final_ipv4 = if ip_address != [0, 0, 0, 0] {
                     ip_address
                 } else if let Some(record) = &device_record {
@@ -406,23 +406,23 @@ impl TrafficApiHandler {
                     [0, 0, 0, 0]
                 };
 
-                // Format IP address
+                // 格式化IP address
                 let ip_str = format!(
                     "{}.{}.{}.{}",
                     final_ipv4[0], final_ipv4[1], final_ipv4[2], final_ipv4[3]
                 );
 
-                // Get IPv6 addresses: combine current from stats, registry, and system neighbor table
+                // 获取 IPv6 地址：结合来自统计、注册表和系统邻居表的当前地址
                 let mut ipv6_addresses_set: HashSet<[u8; 16]> = HashSet::new();
 
-                // First, add IPv6 addresses from eBPF stats (if current device)
+                // 首先，添加来自 eBPF 统计的 IPv6 地址（如果是当前设备）
                 for addr in ipv6_addresses_from_stats.iter() {
                     if *addr != [0u8; 16] {
                         ipv6_addresses_set.insert(*addr);
                     }
                 }
 
-                // Then, add IPv6 addresses from registry (current and historical)
+                // 然后，添加来自注册表的 IPv6 地址（当前和历史）
                 if let Some(record) = &device_record {
                     for addr in &record.current_ipv6 {
                         if *addr != [0u8; 16] {
@@ -431,7 +431,7 @@ impl TrafficApiHandler {
                     }
                 }
 
-                // Finally, add IPv6 addresses from system neighbor table
+                // 最后，添加来自系统邻居表的 IPv6 地址
                 if let Some(addrs) = ipv6_neighbors.get(&mac) {
                     for addr in addrs {
                         if *addr != [0u8; 16] {
@@ -440,13 +440,13 @@ impl TrafficApiHandler {
                     }
                 }
 
-                // Convert to formatted strings and sort lexicographically
+                // 转换为格式化的字符串并按字典序排序
                 let mut ipv6_addresses: Vec<String> = ipv6_addresses_set
                     .iter()
                     .map(|addr| crate::utils::network_utils::format_ipv6(addr))
                     .collect();
 
-                // Sort IPv6 addresses in lexicographic order
+                // 排序IPv6 addresses in lexicographic order
                 ipv6_addresses.sort();
 
                 // Get hostname from bindings, fallback to empty string if not found
@@ -492,7 +492,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/metrics endpoint - Real-time metrics (memory-only, not persisted)
+    /// 处理/api/metrics endpoint - 实时指标（仅内存，未持久化）
     async fn handle_metrics(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let mac_opt = request.query_params.get("mac").cloned();
 
@@ -514,8 +514,7 @@ impl TrafficApiHandler {
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        self.realtime_manager
-                            .query_metrics(&mac, start_ms, end_ms),
+                        self.realtime_manager.query_metrics(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -568,50 +567,34 @@ impl TrafficApiHandler {
         }
     }
 
-    /// Handle /api/traffic/metrics/year endpoint - Year-level statistics (persisted)
-    async fn handle_metrics_year(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+    /// 处理/api/traffic/metrics/year endpoint - 年级统计（已持久化）
+    async fn handle_metrics_year(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<HttpResponse, anyhow::Error> {
         let mac_opt = request.query_params.get("mac").cloned();
 
-        let year_manager = match self.long_term_manager.get_manager_by_level("year") {
-            Some(manager) => manager,
-            None => {
-                return Ok(HttpResponse::error(
-                    500,
-                    "Internal error: year level manager not found".to_string(),
-                ));
-            }
-        };
-
-        // Get year-level sampling configuration
-        let sampling_level = match self.long_term_manager.get_level_by_name("year") {
-            Some(level) => level,
-            None => {
-                return Ok(HttpResponse::error(
-                    500,
-                    "Internal error: year level config not found".to_string(),
-                ));
-            }
-        };
 
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
 
-        let retention_seconds = sampling_level.retention_seconds;
+        const RETENTION_SECONDS: u64 = 365 * 24 * 3600;
+        let retention_seconds = RETENTION_SECONDS;
         let start_ms = now_ms.saturating_sub(retention_seconds * 1000);
         let end_ms = now_ms;
 
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    year_manager.query_stats_aggregate_all(start_ms, end_ms),
+                    self.long_term_manager.query_stats_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        year_manager.query_stats(&mac, start_ms, end_ms),
+                        self.long_term_manager.query_stats(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -621,14 +604,14 @@ impl TrafficApiHandler {
             }
         } else {
             (
-                year_manager.query_stats_aggregate_all(start_ms, end_ms),
+                self.long_term_manager.query_stats_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
         };
 
         match rows_result {
             Ok(rows) => {
-                // Convert to array format with statistics:
+                // 转换为包含统计信息的数组格式：
                 // [ts_ms, wan_rx_rate_avg, wan_rx_rate_max, wan_rx_rate_min, wan_rx_rate_p90, wan_rx_rate_p95, wan_rx_rate_p99,
                 //  wan_tx_rate_avg, wan_tx_rate_max, wan_tx_rate_min, wan_tx_rate_p90, wan_tx_rate_p95, wan_tx_rate_p99,
                 //  wan_rx_bytes, wan_tx_bytes]
@@ -669,7 +652,7 @@ impl TrafficApiHandler {
         }
     }
 
-    /// Handle /api/traffic/bindings endpoint (GET)
+    /// 处理/api/traffic/bindings endpoint (GET)
     async fn handle_hostname_bindings(&self) -> Result<HttpResponse, anyhow::Error> {
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
@@ -690,7 +673,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/bindings endpoint (POST)
+    /// 处理/api/traffic/bindings endpoint (POST)
     async fn handle_set_hostname_binding(
         &self,
         request: &HttpRequest,
@@ -700,7 +683,7 @@ impl TrafficApiHandler {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
-        // Parse JSON request body using serde
+        // 解析JSON request body using serde
         let set_binding_request: SetHostnameBindingRequest = serde_json::from_str(body)?;
 
         let mac = crate::utils::network_utils::parse_mac_address(&set_binding_request.mac)?;
@@ -708,7 +691,7 @@ impl TrafficApiHandler {
         // Allow empty hostname (for clearing bindings)
         let hostname = set_binding_request.hostname.trim();
 
-        // Update in-memory hostname bindings
+        // 更新in-memory hostname bindings
         {
             let mut bindings = self.hostname_bindings.lock().unwrap();
             if hostname.is_empty() {
@@ -739,7 +722,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/limits/schedule endpoint (GET)
+    /// 处理/api/traffic/limits/schedule endpoint (GET)
     async fn handle_scheduled_limits(&self) -> Result<HttpResponse, anyhow::Error> {
         let scheduled_limits = self.scheduled_rate_limits.lock().unwrap();
 
@@ -759,7 +742,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/limits/schedule endpoint (POST)
+    /// 处理/api/traffic/limits/schedule endpoint (POST)
     async fn handle_set_scheduled_limit(
         &self,
         request: &HttpRequest,
@@ -769,7 +752,7 @@ impl TrafficApiHandler {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
-        // Parse JSON request body
+        // 解析JSON request body
         let set_request: SetScheduledLimitRequest = serde_json::from_str(body)?;
 
         let mac = crate::utils::network_utils::parse_mac_address(&set_request.mac)?;
@@ -783,10 +766,10 @@ impl TrafficApiHandler {
             wan_tx_rate_limit: set_request.wan_tx_rate_limit,
         };
 
-        // Update in-memory scheduled rate limits
+        // 更新in-memory scheduled rate limits
         {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
-            // Remove existing rule with same MAC and time slot
+            // 移除existing rule with same MAC and time slot
             srl.retain(|r| {
                 !(r.mac == scheduled_limit.mac
                     && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
@@ -829,7 +812,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/limits/schedule endpoint (DELETE)
+    /// 处理/api/traffic/limits/schedule endpoint (DELETE)
     async fn handle_delete_scheduled_limit(
         &self,
         request: &HttpRequest,
@@ -839,14 +822,14 @@ impl TrafficApiHandler {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
-        // Parse JSON request body
+        // 解析JSON request body
         let delete_request: DeleteScheduledLimitRequest = serde_json::from_str(body)?;
 
         let mac = crate::utils::network_utils::parse_mac_address(&delete_request.mac)?;
         let time_slot = TimeSlot::try_from(&delete_request.time_slot)
             .map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
 
-        // Remove from in-memory scheduled rate limits
+        // 移除from in-memory scheduled rate limits
         {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
             srl.retain(|r| {
@@ -859,7 +842,7 @@ impl TrafficApiHandler {
             });
         }
 
-        // Remove from file
+        // 移除from file
         traffic::delete_scheduled_limit(self.options.data_dir(), &mac, &time_slot)?;
 
         // Log the change
@@ -876,28 +859,17 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-
-    /// Handle /api/traffic/usage/ranking endpoint
-    /// Query device usage ranking within a specified time range from year-level data
-    /// Query parameters:
-    ///   - start_ms: Start timestamp in milliseconds (optional, defaults to 365 days ago)
-    ///   - end_ms: End timestamp in milliseconds (optional, defaults to now)
+    /// 处理/api/traffic/usage/ranking endpoint
+    /// 从年级数据查询指定时间范围内的设备使用排名
+    /// 查询参数：
+    ///   - start_ms: 开始时间戳，毫秒（可选，默认为 365 天前）
+    ///   - end_ms: 结束时间戳，毫秒（可选，默认为现在）
     async fn handle_usage_ranking(
         &self,
         request: &HttpRequest,
     ) -> Result<HttpResponse, anyhow::Error> {
-        // Get year-level manager
-        let year_manager = match self.long_term_manager.get_manager_by_level("year") {
-            Some(manager) => manager,
-            None => {
-                return Ok(HttpResponse::error(
-                    500,
-                    "Internal error: year level manager not found".to_string(),
-                ));
-            }
-        };
 
-        // Parse time range from query parameters
+        // 从查询参数解析时间范围
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
@@ -908,7 +880,7 @@ impl TrafficApiHandler {
             .get("start_ms")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or_else(|| {
-                // Default to 365 days ago
+                // 默认为 365 天前
                 now_ms.saturating_sub(365 * 24 * 3600 * 1000)
             });
 
@@ -918,7 +890,7 @@ impl TrafficApiHandler {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(now_ms);
 
-        // Validate time range
+        // 验证时间范围
         if start_ms >= end_ms {
             return Ok(HttpResponse::error(
                 400,
@@ -926,8 +898,8 @@ impl TrafficApiHandler {
             ));
         }
 
-        // Query statistics for all devices
-        let device_stats = match year_manager.query_stats_by_device(start_ms, end_ms) {
+        // 查询所有设备的统计信息
+        let device_stats = match self.long_term_manager.query_stats_by_device(start_ms, end_ms) {
             Ok(stats) => stats,
             Err(e) => {
                 return Ok(HttpResponse::error(
@@ -969,7 +941,8 @@ impl TrafficApiHandler {
             let mac_str = format_mac(mac);
             let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
 
-            let ip_address = stats_map.get(mac)
+            let ip_address = stats_map
+                .get(mac)
                 .map(|s| s.ip_address)
                 .unwrap_or([0, 0, 0, 0]);
 
@@ -990,10 +963,10 @@ impl TrafficApiHandler {
             });
         }
 
-        // Sort by total_bytes descending
+        // 排序by total_bytes descending
         rankings.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
 
-        // Calculate percentages and set ranks
+        // 计算percentages and set ranks
         for (idx, ranking) in rankings.iter_mut().enumerate() {
             ranking.rank = idx + 1;
             if total_bytes > 0 {
@@ -1016,29 +989,19 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// Handle /api/traffic/usage/increments endpoint
-    /// Query time series increments (hourly or daily) from year-level data
-    /// Query parameters:
-    ///   - mac: MAC address (optional, defaults to "all" for aggregate)
-    ///   - start_ms: Start timestamp in milliseconds (optional, defaults to 365 days ago)
-    ///   - end_ms: End timestamp in milliseconds (optional, defaults to now)
-    ///   - aggregation: "hourly" or "daily" (optional, defaults to "hourly")
+    /// 处理/api/traffic/usage/increments endpoint
+    /// 从年级数据查询时间序列增量（每小时或每日）
+    /// 查询参数：
+    ///   - mac: MAC 地址（可选，默认为 "all" 表示聚合）
+    ///   - start_ms: 开始时间戳，毫秒（可选，默认为 365 天前）
+    ///   - end_ms: 结束时间戳，毫秒（可选，默认为现在）
+    ///   - aggregation: "hourly" 或 "daily"（可选，默认为 "hourly"）
     async fn handle_usage_increments(
         &self,
         request: &HttpRequest,
     ) -> Result<HttpResponse, anyhow::Error> {
-        // Get year-level manager
-        let year_manager = match self.long_term_manager.get_manager_by_level("year") {
-            Some(manager) => manager,
-            None => {
-                return Ok(HttpResponse::error(
-                    500,
-                    "Internal error: year level manager not found".to_string(),
-                ));
-            }
-        };
 
-        // Parse aggregation mode
+        // 解析聚合模式
         let aggregation = request
             .query_params
             .get("aggregation")
@@ -1052,7 +1015,7 @@ impl TrafficApiHandler {
             ));
         }
 
-        // Parse time range
+        // 解析time range
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
@@ -1077,20 +1040,20 @@ impl TrafficApiHandler {
             ));
         }
 
-        // Query increments
+        // 查询增量
         let hourly_increments = if let Some(mac_str) = request.query_params.get("mac") {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
-                year_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
+                self.long_term_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
             } else {
                 match crate::utils::network_utils::parse_mac_address(mac_str) {
-                    Ok(mac) => year_manager.query_time_series_increments(&mac, start_ms, end_ms)?,
+                    Ok(mac) => self.long_term_manager.query_time_series_increments(&mac, start_ms, end_ms)?,
                     Err(e) => {
                         return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e)));
                     }
                 }
             }
         } else {
-            year_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
+            self.long_term_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
         };
 
         let mac_label = request
@@ -1099,12 +1062,12 @@ impl TrafficApiHandler {
             .cloned()
             .unwrap_or_else(|| "all".to_string());
 
-        // Process increments based on aggregation mode
+        // 根据聚合模式处理增量
         let increments = if aggregation == "daily" {
-            // Aggregate hourly increments into daily totals
+            // 将每小时增量聚合为每日总数
             aggregate_to_daily(hourly_increments, start_ms, end_ms)
         } else {
-            // Use hourly increments as-is
+            // 按原样使用每小时增量
             hourly_increments
                 .into_iter()
                 .map(|(ts_ms, rx_bytes, tx_bytes)| TimeSeriesIncrement {
@@ -1116,7 +1079,7 @@ impl TrafficApiHandler {
                 .collect()
         };
 
-        // Calculate totals
+        // 计算总数
         let total_rx_bytes: u64 = increments.iter().map(|inc| inc.rx_bytes).sum();
         let total_tx_bytes: u64 = increments.iter().map(|inc| inc.tx_bytes).sum();
         let total_bytes = total_rx_bytes + total_tx_bytes;
@@ -1138,9 +1101,9 @@ impl TrafficApiHandler {
     }
 }
 
-/// Aggregate hourly increments into daily totals
-/// Groups increments by day (00:00:00 UTC of each day)
-/// Filters out days that are not within the requested time range [start_ms, end_ms)
+/// 将每小时增量聚合为每日总数
+/// 按日分组增量（每天的 00:00:00 UTC）
+/// 过滤掉不在请求时间范围 [start_ms, end_ms) 内的日期
 fn aggregate_to_daily(
     hourly_increments: Vec<(u64, u64, u64)>,
     start_ms: u64,
@@ -1148,17 +1111,17 @@ fn aggregate_to_daily(
 ) -> Vec<TimeSeriesIncrement> {
     use std::collections::BTreeMap;
 
-    // Group by day (timestamp at 00:00:00 UTC of each day)
+    // 按日分组（每天的 00:00:00 UTC 时间戳）
     let mut daily_map: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
 
     for (ts_ms, rx_bytes, tx_bytes) in hourly_increments {
-        // Convert timestamp to start of day (00:00:00 UTC) in milliseconds
-        // Use chrono to properly handle UTC timezone
+        // 将时间戳转换为日的开始（00:00:00 UTC），以毫秒为单位
+        // 使用 chrono 来正确处理 UTC 时区
         let ts_secs = (ts_ms / 1000) as i64;
         let dt = DateTime::<Utc>::from_timestamp(ts_secs, 0)
             .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
 
-        // Get the date at 00:00:00 UTC
+        // 获取 00:00:00 UTC 的日期
         let day_start_dt = dt.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let day_start_utc = DateTime::<Utc>::from_naive_utc_and_offset(day_start_dt, Utc);
         let day_start_ms = day_start_utc.timestamp_millis() as u64;
@@ -1168,8 +1131,8 @@ fn aggregate_to_daily(
         entry.1 = entry.1.saturating_add(tx_bytes);
     }
 
-    // Filter out days that are not within the requested time range
-    // A day is included if its start timestamp (00:00:00 UTC) is within [start_ms, end_ms)
+    // 过滤掉不在请求时间范围内的日期
+    // 如果一天的开始时间戳（00:00:00 UTC）在 [start_ms, end_ms) 范围内，则包含该天
     daily_map
         .into_iter()
         .filter(|(ts_ms, _)| *ts_ms >= start_ms && *ts_ms < end_ms)

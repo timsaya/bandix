@@ -14,7 +14,7 @@ pub struct PacketHeader {
     pub timestamp: u64,    // Timestamp (nanoseconds)
     pub packet_len: u32,   // Total packet length (bytes)
     pub captured_len: u32, // Actual bytes copied to ringbuf (usually equals packet_len)
-    pub ifindex: u32,      // Network interface index (may be 0 in TC scenario)
+    pub ifindex: u32,      // 网络接口 index (may be 0 in TC scenario)
     pub direction: u32,    // Direction: 0=Ingress, 1=Egress
 }
 
@@ -58,27 +58,27 @@ impl DeviceTrafficStats {
             .count() as u8
     }
 
-    /// Calculate total receive bytes (lan + wan)
+    /// 计算total receive bytes (lan + wan)
     pub fn total_rx_bytes(&self) -> u64 {
         self.lan_rx_bytes + self.wan_rx_bytes
     }
 
-    /// Calculate total send bytes (lan + wan)
+    /// 计算total send bytes (lan + wan)
     pub fn total_tx_bytes(&self) -> u64 {
         self.lan_tx_bytes + self.wan_tx_bytes
     }
 
-    /// Calculate total receive rate (lan + wan)
+    /// 计算total receive rate (lan + wan)
     pub fn total_rx_rate(&self) -> u64 {
         self.lan_rx_rate + self.wan_rx_rate
     }
 
-    /// Calculate total send rate (lan + wan)
+    /// 计算total send rate (lan + wan)
     pub fn total_tx_rate(&self) -> u64 {
         self.lan_tx_rate + self.wan_tx_rate
     }
 
-    /// Create a new DeviceTrafficStats with only IP addresses set, all other fields are zero
+    /// 创建a new DeviceTrafficStats with only IP addresses set, all other fields are zero
     pub fn from_ip(ip_address: [u8; 4], ipv6_addresses: [[u8; 16]; 16]) -> Self {
         Self {
             ip_address,
@@ -103,7 +103,7 @@ impl DeviceTrafficStats {
     }
 }
 
-/// Connection statistics data structure
+/// 连接 statistics data structure
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ConnectionStats {
@@ -116,7 +116,7 @@ pub struct ConnectionStats {
     pub last_updated: u64,
 }
 
-/// Device-level connection statistics
+/// 设备-level connection statistics
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct DeviceConnectionStats {

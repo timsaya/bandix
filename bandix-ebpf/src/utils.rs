@@ -42,12 +42,12 @@ pub fn is_subnet_ip(ip: &[u8; 4]) -> bool {
         None => return false,
     };
 
-    // If subnet info not set, return false
+    // 如果subnet info not set, return false
     if *network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0] {
         return false;
     }
 
-    // Check if IP is in subnet
+    // 检查是否IP is in subnet
     for i in 0..4 {
         if (ip[i] & subnet_mask[i]) != (network_addr[i] & subnet_mask[i]) {
             return false;
@@ -72,7 +72,7 @@ pub fn is_subnet_ipv6(ip: &[u8; 16]) -> bool {
                 continue;
             }
 
-            // Check if IP matches this subnet
+            // 检查是否IP matches this subnet
             if ip_matches_prefix(ip, subnet_data, prefix_len) {
                 return true;
             }
@@ -196,13 +196,13 @@ pub fn get_current_time() -> u64 {
 // Module Configuration Utils
 // ============================================================================
 
-/// Module indices in MODULE_ENABLE_FLAGS array
+/// 模块 indices in MODULE_ENABLE_FLAGS array
 pub mod module_index {
     pub const TRAFFIC: u32 = 0;
     pub const DNS: u32 = 1;
 }
 
-/// Check if a module is enabled by index
+/// 检查是否a module is enabled by index
 /// Uses volatile read to ensure the value is always read from memory
 #[inline(always)]
 pub fn is_module_enabled(index: u32) -> bool {
@@ -212,13 +212,13 @@ pub fn is_module_enabled(index: u32) -> bool {
     }
 }
 
-/// Check if traffic module is enabled
+/// 检查是否traffic module is enabled
 #[inline(always)]
 pub fn is_traffic_enabled() -> bool {
     is_module_enabled(module_index::TRAFFIC)
 }
 
-/// Check if DNS module is enabled
+/// 检查是否DNS module is enabled
 #[inline(always)]
 pub fn is_dns_enabled() -> bool {
     is_module_enabled(module_index::DNS)

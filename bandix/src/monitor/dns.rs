@@ -8,7 +8,7 @@ use trust_dns_proto::{
     serialize::binary::BinDecodable,
 };
 
-/// Specific implementation of DNS monitoring module
+/// DNS 监控模块的具体实现
 pub struct DnsMonitor;
 
 impl DnsMonitor {
@@ -16,25 +16,25 @@ impl DnsMonitor {
         DnsMonitor
     }
 
-    /// Start DNS monitoring (includes internal loop)
+    /// 启动 DNS 监控（包括内部循环）
     pub async fn start(
         &self,
         ctx: &mut DnsModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        // Get RingBuf from eBPF
-        // If dns_map is already pre-acquired (when sharing eBPF with other modules), use it
-        // Otherwise, try to acquire it from eBPF object (legacy path for standalone DNS module)
+        // 从 eBPF 获取 RingBuf
+        // 如果 dns_map 已预获取（与其他模块共享 eBPF 时），则使用它
+        // 否则，尝试从 eBPF 对象获取它（独立 DNS 模块的遗留路径）
         let mut ringbuf = if let Some(map) = ctx.dns_map.take() {
-            // Use pre-acquired map (when sharing eBPF with traffic module)
+            // 使用预获取的映射（与其他模块共享 eBPF 时）
             log::debug!("Using pre-acquired DNS RingBuf map");
             RingBuf::<MapData>::try_from(map)?
         } else {
-            // Legacy path: acquire map from eBPF object
-            // Note: DNS_DATA is a shared map used by both ingress and egress programs,
-            // so we can read from either one to get all DNS packets
-            // Since both ingress_ebpf and egress_ebpf are Arc references to the same eBPF object,
-            // we need to temporarily drop all references to get exclusive access
+            // 遗留路径：从 eBPF 对象获取映射
+            // 注意：DNS_DATA 是由入口和出口程序共享的映射，
+            // 因此我们可以从任何一个读取以获取所有 DNS 数据包
+            // 由于 ingress_ebpf 和 egress_ebpf 都是对同一 eBPF 对象的 Arc 引用，
+            // 我们需要临时丢弃所有引用以获得独占访问
             let egress_backup = ctx.egress_ebpf.take();
             let ingress_ebpf = ctx
                 .ingress_ebpf
@@ -50,7 +50,7 @@ impl DnsMonitor {
             let mut ebpf = match std::sync::Arc::try_unwrap(ingress_ebpf) {
                 Ok(ebpf) => ebpf,
                 Err(arc) => {
-                    // If unwrap fails, put back the Arc and return error
+                    // 如果unwrap fails, put back the Arc and return error
                     // This can happen if ModuleContext was cloned, creating additional Arc references
                     ctx.ingress_ebpf = Some(arc);
                     // Recreate egress reference from ingress (they point to the same object)
@@ -89,7 +89,7 @@ impl DnsMonitor {
             .await
     }
 
-    /// DNS monitoring internal loop
+    /// DNS 监控 internal loop
     async fn start_monitoring_loop(
         &self,
         ringbuf: &mut RingBuf<MapData>,
@@ -97,7 +97,7 @@ impl DnsMonitor {
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
-        
+
         loop {
             tokio::select! {
                 _ = shutdown_notify.notified() => {
@@ -114,7 +114,7 @@ impl DnsMonitor {
         Ok(())
     }
 
-    /// Process events from RingBuf
+    /// 处理events from RingBuf
     async fn process_ringbuf_events(&self, ringbuf: &mut RingBuf<MapData>, ctx: &DnsModuleContext) {
         let mut packet_count = 0;
         while let Some(item) = ringbuf.next() {
@@ -179,7 +179,7 @@ impl DnsMonitor {
 
                         // Detailed debug information (only shown when debug logging is enabled)
                         if log::max_level() >= log::Level::Debug {
-                            // Parse more details for better debugging
+                            // 解析more details for better debugging
                             let mut detail_info = String::new();
 
                             // Try to parse IP layer information
@@ -288,7 +288,7 @@ impl DnsMonitor {
                                 _ => detail_info.push_str(&format!("Unknown(0x{:04X})", eth_type)),
                             }
 
-                            // Add packet hex dump (first 64 bytes or less)
+                            // 添加packet hex dump (first 64 bytes or less)
                             let dump_len = std::cmp::min(cap_len, 64);
                             let hex_dump: String = payload[..dump_len]
                                 .iter()
@@ -644,7 +644,7 @@ impl DnsMonitor {
         }
     }
 
-    /// Format IPv6 address from bytes
+    /// 格式化IPv6 address from bytes
     fn format_ipv6(&self, bytes: &[u8]) -> String {
         if bytes.len() < 16 {
             return "::".to_string();
@@ -855,7 +855,7 @@ impl DnsMonitor {
                             response_records.push(format!("SOA:{}", soa.mname()));
                         }
                         _ => {
-                            // Handle other record types (including HTTPS, SVCB, and unknown ones)
+                            // 处理other record types (including HTTPS, SVCB, and unknown ones)
                             // Format: RecordType:<hex data> for better visibility
                             let rdata_str = format!("{:?}", rdata);
                             // Limit output to avoid very long strings
@@ -961,11 +961,11 @@ impl DnsMonitor {
             // Try to match with existing records and calculate response time
             if let Ok(mut queries) = ctx.dns_queries.lock() {
                 if is_query {
-                    // This is a query, try to find matching response (response might come after)
+                    // 这is a query, try to find matching response (response might come after)
                     // We'll match it when the response arrives
                     record.response_time_ms = None;
                 } else {
-                    // This is a response, try to find matching query
+                    // 这is a response, try to find matching query
                     if let Some(matching_query_idx) = queries.iter().position(|q| {
                         // Match criteria:
                         // 1. Transaction ID matches
@@ -986,13 +986,13 @@ impl DnsMonitor {
                         // 7. Response timestamp is after query timestamp
                         timestamp > q.timestamp
                     }) {
-                        // Calculate response time in milliseconds
+                        // 计算response time in milliseconds
                         let query_timestamp = queries[matching_query_idx].timestamp;
-                        // Calculate response time: convert nanoseconds to milliseconds
+                        // 计算response time: convert nanoseconds to milliseconds
                         // Use floating point division then round to avoid precision loss
                         let diff_ns = timestamp - query_timestamp;
                         let response_time_ms = if diff_ns < 1_000_000 {
-                            // If difference is less than 1ms, round up to 1ms for visibility
+                            // 如果difference is less than 1ms, round up to 1ms for visibility
                             // (0ms would indicate no response matched)
                             1
                         } else {
@@ -1000,7 +1000,7 @@ impl DnsMonitor {
                         };
 
                         // Don't update the query record's response_time_ms - queries should never have response time
-                        // Only set response time for this response record
+                        // 仅set response time for this response record
                         record.response_time_ms = Some(response_time_ms);
 
                         log::debug!(

@@ -1,4 +1,4 @@
-pub mod traffic;
+pub mod device_registry;
 pub mod dns;
 pub mod hostname;
-pub mod device_registry;
+pub mod traffic;

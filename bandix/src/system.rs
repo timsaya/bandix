@@ -6,7 +6,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-// ---- Startup diagnostics ----
+// ---- 启动诊断信息 ----
 fn read_first_line(path: &str) -> Option<String> {
     fs::read_to_string(path)
         .ok()
@@ -50,7 +50,7 @@ fn loadavg() -> Option<String> {
 }
 
 fn mem_total_mb() -> Option<u64> {
-    // Parse MemTotal: kB
+    // 解析MemTotal: kB
     if let Ok(content) = fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
@@ -160,7 +160,9 @@ pub fn log_startup_info(options: &Options) {
     info!("Retention seconds: {}", options.traffic_retention_seconds());
     info!(
         "Interface: {} (IP: {}, Mask: {})",
-        options.iface(), ip_str, mask_str
+        options.iface(),
+        ip_str,
+        mask_str
     );
 
     // Display enabled monitoring modules with their configurations

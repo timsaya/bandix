@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-/// Convert subnet mask to CIDR notation
+/// 将子网掩码转换为 CIDR 表示法
 fn subnet_mask_to_cidr(mask: [u8; 4]) -> u8 {
     let mut cidr = 0;
     for byte in mask.iter() {
@@ -16,12 +16,12 @@ fn subnet_mask_to_cidr(mask: [u8; 4]) -> u8 {
     cidr
 }
 
-/// Enhanced global connection statistics
+/// 增强的全局连接统计
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalConnectionStats {
-    // Total connection statistics (no filtering)
+    // 总连接统计（无过滤）
     pub total_stats: ConnectionStats,
-    // Local network device connection statistics (based on ARP table)
+    // lan 设备连接统计（基于 ARP 表）
     pub device_stats: HashMap<[u8; 6], DeviceConnectionStats>,
     pub last_updated: u64,
 }
@@ -36,9 +36,9 @@ impl Default for GlobalConnectionStats {
     }
 }
 
-/// Parse connection statistics from /proc/net/nf_conntrack
-/// 1. Total stats: all TCP/UDP connections (no filtering)
-/// 2. Device stats: connections for devices in ARP table AND in same subnet as interface
+/// 从 /proc/net/nf_conntrack 解析连接统计信息
+/// 1. 总统计：所有 TCP/UDP 连接（无过滤）
+/// 2. 设备统计：ARP 表中且与接口在同一子网中的设备的连接
 pub fn parse_connection_stats(
     interface_ip: [u8; 4],
     subnet_mask: [u8; 4],
@@ -46,12 +46,12 @@ pub fn parse_connection_stats(
     let content = fs::read_to_string("/proc/net/nf_conntrack")?;
     let ip_mac_mapping = network_utils::get_ip_mac_mapping()?;
 
-    // 1. Total connection statistics (no filtering)
+    // 1. 总连接统计（无过滤）
     let mut total_stats = ConnectionStats::default();
-    // 2. Local network device connection statistics (based on ARP table)
+    // 2. 本地网络设备连接统计（基于 ARP 表）
     let mut device_stats = HashMap::new();
 
-    // Get current timestamp
+    // 获取当前时间戳
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -64,29 +64,29 @@ pub fn parse_connection_stats(
             continue;
         }
 
-        // Parse connection line
+        // 解析连接行
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 4 {
             continue;
         }
 
-        // Extract protocol
+        // 提取协议
         let protocol = parts.get(2).unwrap_or(&"");
 
-        // Extract TCP state (only for TCP connections)
+        // 提取 TCP 状态（仅适用于 TCP 连接）
         let mut tcp_state = None;
         if protocol == &"tcp" {
-            // For TCP, state is typically at position 5, but let's be more robust
+            // 对于 TCP，状态通常在位置 5，但让我们更健壮一些
             for (i, part) in parts.iter().enumerate() {
                 if i >= 5 && !part.contains('=') && !part.starts_with('[') {
-                    // This looks like a TCP state (no '=' and not a flag)
+                    // 这看起来像是一个 TCP 状态（没有 '=' 也不是标志）
                     tcp_state = Some(*part);
                     break;
                 }
             }
         }
 
-        // Extract source and destination IP addresses (use first occurrence only)
+        // 提取源和目的 IP 地址（仅使用第一次出现）
         let mut src_ip = None;
         let mut dst_ip = None;
 
@@ -104,7 +104,7 @@ pub fn parse_connection_stats(
             }
         }
 
-        // ===== 1. Total connection statistics (no filtering, only TCP and UDP) =====
+        // ===== 1. 总连接统计（无过滤，仅 TCP 和 UDP）=====
         let mut total_connection_counted = false;
 
         match protocol {
@@ -128,17 +128,17 @@ pub fn parse_connection_stats(
                         }
                         "FIN_WAIT_1" | "FIN_WAIT_2" | "CLOSING" | "LAST_ACK" => {
                             total_stats.tcp_connections += 1;
-                            total_stats.time_wait_tcp += 1; // Categorized as TIME_WAIT
+                            total_stats.time_wait_tcp += 1; // 分类为 TIME_WAIT
                             total_connection_counted = true;
                         }
                         _ => {
-                            // Other TCP states: skip counting
-                            log::debug!("Unknown TCP state '{}' skipped in global stats", state);
+                            // 其他 TCP 状态：跳过计数
+                            log::debug!("未知 TCP 状态 '{}' 在全局统计中跳过", state);
                         }
                     }
                 } else {
-                    // TCP connections without state: skip counting
-                    log::debug!("TCP connection without state skipped in global stats");
+                    // 没有状态的 TCP 连接：跳过计数
+                    log::debug!("没有状态的 TCP 连接在全局统计中跳过");
                 }
             }
             &"udp" => {
@@ -146,7 +146,7 @@ pub fn parse_connection_stats(
                 total_connection_counted = true;
             }
             _ => {
-                // Ignore other protocols
+                // 忽略其他协议
             }
         }
 
@@ -154,8 +154,8 @@ pub fn parse_connection_stats(
             total_stats.total_connections += 1;
         }
 
-        // ===== 2. Local network device connection statistics (requires ARP table and same subnet) =====
-        // Find all IP addresses in ARP table and in same subnet
+        // ===== 2. 本地网络设备连接统计（需要 ARP 表和相同子网）=====
+        // 查找 ARP 表中且在相同子网中的所有 IP 地址
         let mut valid_device_ips = Vec::new();
 
         if let Some(ip) = src_ip {
@@ -197,7 +197,7 @@ pub fn parse_connection_stats(
                     last_updated: timestamp,
                 });
 
-            // Categorize and count by protocol and state
+            // 按协议和状态分类并计数
             let mut device_connection_counted = false;
 
             match protocol {
@@ -225,13 +225,13 @@ pub fn parse_connection_stats(
                                 device_connection_counted = true;
                             }
                             _ => {
-                                // Other TCP states: skip counting
-                                log::debug!("Unknown TCP state '{}' skipped for device", state);
+                                // 其他 TCP 状态：跳过计数
+                                log::debug!("未知 TCP 状态 '{}' 为设备跳过", state);
                             }
                         }
                     } else {
-                        // TCP connections without state: skip counting
-                        log::debug!("TCP connection without state skipped for device");
+                        // 没有状态的 TCP 连接：跳过计数
+                        log::debug!("没有状态的 TCP 连接为设备跳过");
                     }
                 }
                 &"udp" => {
@@ -239,7 +239,7 @@ pub fn parse_connection_stats(
                     device_connection_counted = true;
                 }
                 _ => {
-                    // Ignore other protocols
+                    // 忽略其他协议
                 }
             }
 
@@ -256,7 +256,7 @@ pub fn parse_connection_stats(
     })
 }
 
-/// Connection statistics module context
+/// 连接 statistics module context
 #[derive(Clone)]
 pub struct ConnectionModuleContext {
     pub device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
@@ -266,7 +266,7 @@ pub struct ConnectionModuleContext {
 }
 
 impl ConnectionModuleContext {
-    /// Create connection module context with shared hostname bindings and subnet info
+    /// 创建带有共享主机名绑定和子网信息的连接模块上下文
     pub fn new(
         _options: Options,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
@@ -275,14 +275,14 @@ impl ConnectionModuleContext {
     ) -> Self {
         Self {
             device_connection_stats: Arc::new(Mutex::new(GlobalConnectionStats::default())),
-            hostname_bindings, // Use the shared hostname_bindings
+            hostname_bindings, // 使用共享的主机名绑定
             interface_ip,
             subnet_mask,
         }
     }
 }
 
-/// Connection statistics monitoring module
+/// 连接 statistics monitoring module
 pub struct ConnectionMonitor;
 
 impl ConnectionMonitor {
@@ -290,28 +290,28 @@ impl ConnectionMonitor {
         ConnectionMonitor
     }
 
-    /// Start connection monitoring (includes internal loop)
+    /// 开始连接监控（包括内部循环）
     pub async fn start(
         &self,
         ctx: &mut ConnectionModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        // Start internal loop
+        // 开始内部循环
         self.start_monitoring_loop(ctx, shutdown_notify).await
     }
 
-    /// Connection monitoring internal loop
+    /// 连接监控内部循环
     async fn start_monitoring_loop(
         &self,
         ctx: &mut ConnectionModuleContext,
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3)); // Update every 3 second
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3)); // 每 3 秒更新一次
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Parse connection statistics
+                    // 解析连接统计信息
                     match parse_connection_stats(ctx.interface_ip, ctx.subnet_mask) {
                         Ok(new_stats) => {
                             // Update the shared connection statistics
@@ -360,10 +360,10 @@ mod tests {
 
     #[test]
     fn test_parse_connection_stats() {
-        // This test will only work if /proc/net/nf_conntrack exists
-        // and the process has permission to read it
+        // 此测试仅在 /proc/net/nf_conntrack 存在
+        // 且进程有权限读取时才有效
         if std::path::Path::new("/proc/net/nf_conntrack").exists() {
-            // Use a test subnet (192.168.1.0/24)
+            // 使用测试子网 (192.168.1.0/24)
             let interface_ip = [192, 168, 1, 1];
             let subnet_mask = [255, 255, 255, 0];
             let result = parse_connection_stats(interface_ip, subnet_mask);

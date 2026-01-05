@@ -20,4 +20,3 @@ pub static MAC_RATE_LIMITS: HashMap<[u8; 6], [u64; 2]> = HashMap::with_max_entri
 // rate bucket status: [download token number, upload token number, last update time(ns)]
 #[map]
 pub static RATE_BUCKETS: HashMap<[u8; 6], [u64; 3]> = HashMap::with_max_entries(1024, 0);
-
