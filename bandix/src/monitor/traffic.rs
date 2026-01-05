@@ -235,38 +235,32 @@ impl TrafficMonitor {
                 stats.wan_tx_rate_limit = limits[1];
             }
 
-            // 如果条目已存在（例如，由于速率限制配置而提前创建且 IP 仍是默认值），
             // 用 eBPF 收集的最新 IP 覆盖，以避免停留在 0.0.0.0。
-            if raw_traffic.ip_address != [0, 0, 0, 0] && stats.ip_address != raw_traffic.ip_address
-            {
+            if raw_traffic.ip_address != [0, 0, 0, 0] {
                 stats.ip_address = raw_traffic.ip_address;
             }
 
             // 从 DeviceManager 更新 IPv6 地址
             // 将 DeviceManager 中的新 IPv6 地址合并到现有地址中
             if let Some(device_info) = ctx.device_manager.get_device_by_mac(mac) {
-                for ipv6_addr in device_info.ipv6_addresses.iter() {
-                    // Check if this IPv6 address is not all zeros
-                    if *ipv6_addr != [0u8; 16] {
-                        // 检查此 IPv6 地址是否已存在于数组中
-                        let mut found = false;
-                        let current_count = stats.ipv6_count() as usize;
-                        for i in 0..current_count {
-                            if stats.ipv6_addresses[i] == *ipv6_addr {
-                                found = true;
-                                break;
-                            }
-                        }
+                let current_count = stats.ipv6_count() as usize;
 
-                        // 如果未找到且有空间（最多16个），则添加新的 IPv6 地址
-                        if !found && current_count < 16 {
-                            stats.ipv6_addresses[current_count] = *ipv6_addr;
-                        }
-                    }
+                // 收集需要添加的新 IPv6 地址（过滤零地址和重复地址）
+                let new_ipv6_addresses: Vec<[u8; 16]> = device_info
+                    .ipv6_addresses
+                    .iter()
+                    .filter(|addr| **addr != [0u8; 16]) // 过滤零地址
+                    .filter(|addr| !stats.ipv6_addresses[..current_count].contains(addr)) // 过滤重复地址
+                    .take(16 - current_count) // 限制数量，避免超出数组容量
+                    .cloned()
+                    .collect();
+
+                // 将新地址添加到数组中
+                for (i, ipv6_addr) in new_ipv6_addresses.into_iter().enumerate() {
+                    stats.ipv6_addresses[current_count + i] = ipv6_addr;
                 }
             }
 
-            // 更新流量字节数（基准线已在初始化期间应用）
             // eBPF 提供自上次重置以来的增量值，因此我们将其添加到现有基准线上
             stats.lan_rx_bytes += raw_traffic.lan_rx_bytes;
             stats.lan_tx_bytes += raw_traffic.lan_tx_bytes;

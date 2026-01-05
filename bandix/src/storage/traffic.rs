@@ -1079,6 +1079,41 @@ impl LongTermRingManager {
 
         Ok(ts_to_stats.into_values().collect())
     }
+
+    /// 获取设备的最新基准线统计数据
+    /// 用于在系统重启时恢复 DeviceTrafficStats 的基准值
+    pub fn get_latest_baseline(&self, mac: &[u8; 6]) -> Option<DeviceTrafficStats> {
+        let rings = self.rings.lock().unwrap();
+        if let Some(ring) = rings.get(mac) {
+            // 获取最新的有效数据作为基准线
+            for slot in ring.slots.iter().rev() {
+                if slot[0] != 0 {
+                    // 找到最新的数据，转换为 DeviceTrafficStats
+                    return Some(DeviceTrafficStats {
+                        ip_address: [0, 0, 0, 0], // IP地址需要从其他地方获取
+                        ipv6_addresses: [[0; 16]; 16], // IPv6地址也需要从其他地方获取
+                        wan_rx_rate_limit: 0,
+                        wan_tx_rate_limit: 0,
+                        lan_rx_bytes: 0,
+                        lan_tx_bytes: 0,
+                        lan_rx_rate: slot[1], // 使用平均值作为当前速率
+                        lan_tx_rate: slot[7],
+                        wan_rx_bytes: slot[13], // 使用累积字节数作为基准
+                        wan_tx_bytes: slot[14],
+                        wan_rx_rate: slot[1],
+                        wan_tx_rate: slot[7],
+                        lan_last_rx_bytes: 0,
+                        lan_last_tx_bytes: 0,
+                        wan_last_rx_bytes: slot[13],
+                        wan_last_tx_bytes: slot[14],
+                        last_online_ts: slot[0],
+                        last_sample_ts: slot[0],
+                    });
+                }
+            }
+        }
+        None
+    }
 }
 
 fn ring_dir(base: &str) -> PathBuf {

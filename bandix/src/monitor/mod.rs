@@ -179,6 +179,40 @@ impl ModuleType {
                         log::warn!("Failed to load long-term ring files: {}", e);
                     } else {
                         log::debug!("Successfully loaded long-term ring files");
+
+                        // 从加载的ring数据中恢复基准线到 DeviceTrafficStats
+                        log::debug!("Restoring baseline data from loaded ring files...");
+                        let mut device_traffic_stats = traffic_ctx.device_traffic_stats.lock().unwrap();
+
+                        // 获取所有设备的MAC地址（从设备注册表）
+                        let all_devices = traffic_ctx.device_registry.get_all_devices();
+                        let mut restored_count = 0;
+
+                        for device in all_devices {
+                            // 尝试从ring数据获取最新的基准线
+                            if let Some(baseline) = traffic_ctx.long_term_manager.get_latest_baseline(&device.mac) {
+                                // 将基准线数据合并到 DeviceTrafficStats
+                                // 注意：IP地址和IPv6地址需要从设备管理器获取
+                                let mut stats = baseline;
+
+                                // 从设备管理器获取最新的IP信息
+                                if let Some(device_info) = traffic_ctx.device_manager.get_device_by_mac(&device.mac) {
+                                    stats.ip_address = device_info.ip;
+                                    // 复制IPv6地址（最多16个）
+                                    let ipv6_count = device_info.ipv6_addresses.len().min(16);
+                                    for (i, ipv6) in device_info.ipv6_addresses.iter().enumerate().take(ipv6_count) {
+                                        stats.ipv6_addresses[i] = *ipv6;
+                                    }
+                                }
+
+                                device_traffic_stats.insert(device.mac, stats);
+                                restored_count += 1;
+                            }
+                        }
+
+                        if restored_count > 0 {
+                            log::info!("Restored baseline data for {} devices from persistent storage", restored_count);
+                        }
                     }
                 }
 
