@@ -214,11 +214,6 @@ impl TrafficMonitor {
         let raw_device_traffic =
             self.build_raw_device_traffic(&traffic_data, &ctx.device_manager)?;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .as_millis() as u64;
-
         let mut device_traffic_stats_map = ctx.device_traffic_stats.lock().unwrap();
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
@@ -261,15 +256,49 @@ impl TrafficMonitor {
                 }
             }
 
-            // eBPF 提供自上次重置以来的增量值，因此我们将其添加到现有基准线上
-            stats.lan_rx_bytes += raw_traffic.lan_rx_bytes;
-            stats.lan_tx_bytes += raw_traffic.lan_tx_bytes;
-            stats.wan_rx_bytes += raw_traffic.wan_rx_bytes;
-            stats.wan_tx_bytes += raw_traffic.wan_tx_bytes;
+            // eBPF map 存储的是累积值，需要计算增量
+            let last_ebpf = ctx.last_ebpf_traffic.lock().unwrap();
+            let last_values = last_ebpf.get(mac).copied().unwrap_or([0u64; 4]);
+            drop(last_ebpf);
 
-            // 计算速率（字节/秒）
+            // 计算增量
+            let lan_tx_delta = raw_traffic.lan_tx_bytes.saturating_sub(last_values[0]);
+            let lan_rx_delta = raw_traffic.lan_rx_bytes.saturating_sub(last_values[1]);
+            let wan_tx_delta = raw_traffic.wan_tx_bytes.saturating_sub(last_values[2]);
+            let wan_rx_delta = raw_traffic.wan_rx_bytes.saturating_sub(last_values[3]);
+
+            // 累加增量到统计值
+            stats.lan_rx_bytes = stats.lan_rx_bytes.saturating_add(lan_rx_delta);
+            stats.lan_tx_bytes = stats.lan_tx_bytes.saturating_add(lan_tx_delta);
+            stats.wan_rx_bytes = stats.wan_rx_bytes.saturating_add(wan_rx_delta);
+            stats.wan_tx_bytes = stats.wan_tx_bytes.saturating_add(wan_tx_delta);
+
+            // 保存当前 eBPF 值用于下次计算
+            let mut last_ebpf = ctx.last_ebpf_traffic.lock().unwrap();
+            last_ebpf.insert(
+                *mac,
+                [
+                    raw_traffic.lan_tx_bytes,
+                    raw_traffic.lan_rx_bytes,
+                    raw_traffic.wan_tx_bytes,
+                    raw_traffic.wan_rx_bytes,
+                ],
+            );
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_millis() as u64;
+
+            // 如果是第一次采样则设置最后活动时间
+            if stats.last_sample_ts == 0 {
+                stats.last_online_ts = now;
+            }
+
+            // 后续的采样
             if stats.last_sample_ts > 0 {
                 let time_diff = now.saturating_sub(stats.last_sample_ts);
+
                 if time_diff > 0 {
                     // 计算lan 接收速率
                     let lan_rx_diff = stats.lan_rx_bytes.saturating_sub(stats.lan_last_rx_bytes);
@@ -292,13 +321,6 @@ impl TrafficMonitor {
                     if total_tx_diff > 0 {
                         stats.last_online_ts = now;
                     }
-                }
-            }
-
-            // 如果是第一次采样且有发送流量，则设置最后活动时间
-            if stats.last_sample_ts == 0 {
-                if stats.total_tx_bytes() > 0 {
-                    stats.last_online_ts = now;
                 }
             }
 

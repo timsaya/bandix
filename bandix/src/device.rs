@@ -6,6 +6,7 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -30,6 +31,8 @@ pub struct DeviceManager {
     last_refresh: Arc<Mutex<SystemTime>>,
     /// Refresh interval (default: 30 seconds)
     refresh_interval: Duration,
+    /// Shutdown flag for interruptible operations
+    shutdown_flag: Option<Arc<AtomicBool>>,
 }
 
 impl DeviceManager {
@@ -38,6 +41,7 @@ impl DeviceManager {
         iface: String,
         subnet_info: SubnetInfo,
         device_registry: Arc<DeviceRegistry>,
+        shutdown_flag: Option<Arc<AtomicBool>>,
     ) -> Self {
         Self {
             arp_table: Arc::new(Mutex::new(Vec::new())),
@@ -46,6 +50,7 @@ impl DeviceManager {
             subnet_info,
             last_refresh: Arc::new(Mutex::new(SystemTime::UNIX_EPOCH)),
             refresh_interval: Duration::from_secs(30),
+            shutdown_flag,
         }
     }
 
@@ -361,9 +366,21 @@ impl DeviceManager {
             log::warn!("Failed to flush IPv4 neighbor cache: {}", e);
         }
 
-        // Wait for neighbors to be rediscovered
         log::debug!("Waiting for neighbor rediscovery...");
-        thread::sleep(Duration::from_secs(5));
+        let wait_duration = Duration::from_secs(5);
+        let check_interval = Duration::from_millis(100);
+        let mut elapsed = Duration::ZERO;
+
+        while elapsed < wait_duration {
+            if let Some(ref shutdown_flag) = self.shutdown_flag {
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    log::debug!("ARP cache refresh interrupted by shutdown signal");
+                    return Err(anyhow::anyhow!("Operation interrupted by shutdown signal"));
+                }
+            }
+            thread::sleep(check_interval);
+            elapsed += check_interval;
+        }
 
         log::debug!("ARP/neighbor cache refreshed");
         Ok(())

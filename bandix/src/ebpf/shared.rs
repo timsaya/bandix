@@ -8,7 +8,7 @@ pub async fn load_shared(iface: String) -> anyhow::Result<aya::Ebpf> {
     remove_rlimit_memlock();
 
     log::info!(
-        "正在为接口 {} 加载共享的 eBPF 程序（入口和出口）",
+        "Loading shared eBPF programs (ingress and egress) for interface {}",
         iface
     );
 
@@ -47,7 +47,7 @@ pub async fn load_shared(iface: String) -> anyhow::Result<aya::Ebpf> {
             )
         })?;
 
-    log::info!("共享入口程序已成功附加到 {}", iface);
+    log::info!("Shared ingress program successfully attached to {}", iface);
 
     // 加载并附加共享出口程序
     let egress_program: &mut SchedClassifier = ebpf
@@ -66,8 +66,8 @@ pub async fn load_shared(iface: String) -> anyhow::Result<aya::Ebpf> {
             anyhow::anyhow!("Failed to attach shared egress program to {}: {}", iface, e)
         })?;
 
-    log::info!("共享出口程序已成功附加到 {}", iface);
-    log::info!("共享 eBPF 程序已加载并附加。DNS 和流量模块共享相同的入口和出口钩子。");
+    log::info!("Shared egress program successfully attached to {}", iface);
+    log::info!("Shared eBPF programs loaded and attached. DNS and traffic modules share the same ingress and egress hooks.");
 
     // 返回未包装的 eBPF 对象，以便在包装到 Arc 之前配置映射
     Ok(ebpf)

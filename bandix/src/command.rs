@@ -538,10 +538,13 @@ fn start_hostname_refresh_task(
 async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let shutdown_notify_clone = shutdown_notify.clone();
+    let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag_clone = shutdown_flag.clone();
 
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {
             info!("Received shutdown signal, gracefully shutting down...");
+            shutdown_flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
             shutdown_notify_clone.notify_waiters();
         }
     });
@@ -555,10 +558,17 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         options.iface().to_string(),
         subnet_info.clone(),
         Arc::clone(&device_registry),
+        Some(shutdown_flag.clone()),
     ));
 
     if let Err(e) = device_manager.load_initial_devices(options.data_dir()) {
-        log::warn!("Failed to load initial devices: {}", e);
+        if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            log::info!("Initial device loading interrupted by shutdown signal");
+            shutdown_notify.notify_waiters();
+            return Ok(());
+        } else {
+            log::warn!("Failed to load initial devices: {}", e);
+        }
     }
 
     // 创建模块上下文：加载 eBPF 程序并配置内核映射

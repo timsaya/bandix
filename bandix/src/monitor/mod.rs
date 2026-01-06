@@ -25,6 +25,7 @@ pub struct TrafficModuleContext {
     pub device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // 中心化设备注册表
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
+    pub last_ebpf_traffic: Arc<Mutex<StdHashMap<[u8; 6], [u64; 4]>>>, // 上次从 eBPF 读取的累积值
 }
 
 impl TrafficModuleContext {
@@ -59,6 +60,7 @@ impl TrafficModuleContext {
             device_registry,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
+            last_ebpf_traffic: Arc::new(Mutex::new(StdHashMap::new())),
         }
     }
 }
@@ -135,6 +137,7 @@ impl Clone for ModuleContext {
                 device_registry: Arc::clone(&ctx.device_registry),
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
+                last_ebpf_traffic: Arc::clone(&ctx.last_ebpf_traffic),
             }),
             ModuleContext::Dns(ctx) => ModuleContext::Dns(DnsModuleContext {
                 options: ctx.options.clone(),
@@ -180,38 +183,31 @@ impl ModuleType {
                     } else {
                         log::debug!("Successfully loaded long-term ring files");
 
-                        // 从加载的ring数据中恢复基准线到 DeviceTrafficStats
-                        log::debug!("Restoring baseline data from loaded ring files...");
-                        let mut device_traffic_stats = traffic_ctx.device_traffic_stats.lock().unwrap();
+                        // 从持久化数据恢复基线到 device_traffic_stats
+                        let baselines = traffic_ctx.long_term_manager.get_all_baselines();
+                        if !baselines.is_empty() {
+                            let mut stats_map = traffic_ctx.device_traffic_stats.lock().unwrap();
+                            let mut restored_count = 0;
 
-                        // 获取所有设备的MAC地址（从设备注册表）
-                        let all_devices = traffic_ctx.device_registry.get_all_devices();
-                        let mut restored_count = 0;
+                            for (mac, (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)) in
+                                baselines.iter()
+                            {
+                                let stats = stats_map
+                                    .entry(*mac)
+                                    .or_insert_with(|| DeviceTrafficStats::default());
 
-                        for device in all_devices {
-                            // 尝试从ring数据获取最新的基准线
-                            if let Some(baseline) = traffic_ctx.long_term_manager.get_latest_baseline(&device.mac) {
-                                // 将基准线数据合并到 DeviceTrafficStats
-                                // 注意：IP地址和IPv6地址需要从设备管理器获取
-                                let mut stats = baseline;
-
-                                // 从设备管理器获取最新的IP信息
-                                if let Some(device_info) = traffic_ctx.device_manager.get_device_by_mac(&device.mac) {
-                                    stats.ip_address = device_info.ip;
-                                    // 复制IPv6地址（最多16个）
-                                    let ipv6_count = device_info.ipv6_addresses.len().min(16);
-                                    for (i, ipv6) in device_info.ipv6_addresses.iter().enumerate().take(ipv6_count) {
-                                        stats.ipv6_addresses[i] = *ipv6;
-                                    }
-                                }
-
-                                device_traffic_stats.insert(device.mac, stats);
+                                // 恢复WAN和LAN流量字节数作为基线
+                                stats.wan_rx_bytes = *wan_rx_bytes;
+                                stats.wan_tx_bytes = *wan_tx_bytes;
+                                stats.lan_rx_bytes = *lan_rx_bytes;
+                                stats.lan_tx_bytes = *lan_tx_bytes;
                                 restored_count += 1;
                             }
-                        }
 
-                        if restored_count > 0 {
-                            log::info!("Restored baseline data for {} devices from persistent storage", restored_count);
+                            log::info!(
+                                "Restored baseline for {} devices from persistent storage",
+                                restored_count
+                            );
                         }
                     }
                 }

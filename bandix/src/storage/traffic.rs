@@ -46,11 +46,11 @@ const SLOT_U64S_REALTIME: usize = 15; // 实时数据环形槽位大小（15个u
 // ------------------------------
 // 长期统计常量（1小时采样，365天保留）
 // ------------------------------
-const RING_VERSION_LONG_TERM: u32 = 3; // 长期统计环形文件格式版本
-const SLOT_U64S_LONG_TERM: usize = 15; // 长期统计环形槽位大小（15个u64字段）
-const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（120字节）
+const RING_VERSION_LONG_TERM: u32 = 4; // 长期统计环形文件格式版本（v4 添加了 LAN 统计）
+const SLOT_U64S_LONG_TERM: usize = 29; // 长期统计环形槽位大小（29个u64字段）
+const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（232字节）
 
-// 长期统计环形文件槽位结构（小端字节序，15个u64字段，总共120字节）：
+// 长期统计环形文件槽位结构（小端字节序，29个u64字段，总共232字节）：
 // 索引 | 字段名              | 类型 | 说明
 // -----|---------------------|------|-------------------------------
 //   0   | ts_ms               | u64  | 时间戳（毫秒）
@@ -68,6 +68,20 @@ const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环�
 //  12   | wan_tx_rate.p99     | u64  | 广域网发送速率99th百分位数
 //  13   | wan_rx_bytes        | u64  | 广域网接收总字节数（累积）
 //  14   | wan_tx_bytes        | u64  | 广域网发送总字节数（累积）
+//  15   | lan_rx_rate.avg     | u64  | 局域网接收速率平均值
+//  16   | lan_rx_rate.max     | u64  | 局域网接收速率最大值
+//  17   | lan_rx_rate.min     | u64  | 局域网接收速率最小值
+//  18   | lan_rx_rate.p90     | u64  | 局域网接收速率90th百分位数
+//  19   | lan_rx_rate.p95     | u64  | 局域网接收速率95th百分位数
+//  20   | lan_rx_rate.p99     | u64  | 局域网接收速率99th百分位数
+//  21   | lan_tx_rate.avg     | u64  | 局域网发送速率平均值
+//  22   | lan_tx_rate.max     | u64  | 局域网发送速率最大值
+//  23   | lan_tx_rate.min     | u64  | 局域网发送速率最小值
+//  24   | lan_tx_rate.p90     | u64  | 局域网发送速率90th百分位数
+//  25   | lan_tx_rate.p95     | u64  | 局域网发送速率95th百分位数
+//  26   | lan_tx_rate.p99     | u64  | 局域网发送速率99th百分位数
+//  27   | lan_rx_bytes        | u64  | 局域网接收总字节数（累积）
+//  28   | lan_tx_bytes        | u64  | 局域网发送总字节数（累积）
 
 // 本地助手函数，用于解析/格式化 MAC 地址（用于文件存储交互）
 fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
@@ -335,6 +349,26 @@ impl LongTermRing {
         slot[13] = stats.wan_rx_bytes;
         slot[14] = stats.wan_tx_bytes;
 
+        // lan_rx_rate: avg, max, min, p90, p95, p99 (indices 15-20)
+        slot[15] = stats.lan_rx_rate.avg;
+        slot[16] = stats.lan_rx_rate.max;
+        slot[17] = stats.lan_rx_rate.min;
+        slot[18] = stats.lan_rx_rate.p90;
+        slot[19] = stats.lan_rx_rate.p95;
+        slot[20] = stats.lan_rx_rate.p99;
+
+        // lan_tx_rate: avg, max, min, p90, p95, p99 (indices 21-26)
+        slot[21] = stats.lan_tx_rate.avg;
+        slot[22] = stats.lan_tx_rate.max;
+        slot[23] = stats.lan_tx_rate.min;
+        slot[24] = stats.lan_tx_rate.p90;
+        slot[25] = stats.lan_tx_rate.p95;
+        slot[26] = stats.lan_tx_rate.p99;
+
+        // 局域网总流量字节数（索引27-28）
+        slot[27] = stats.lan_rx_bytes;
+        slot[28] = stats.lan_tx_bytes;
+
         self.slots[idx as usize] = slot;
         self.current_index = idx;
         self.dirty = true;
@@ -371,6 +405,23 @@ impl LongTermRing {
                 // 广域网络总流量字节数（索引13-14）
                 wan_rx_bytes: slot[13],
                 wan_tx_bytes: slot[14],
+                // lan_rx_rate stats (indices 15-20)
+                lan_rx_rate_avg: slot[15],
+                lan_rx_rate_max: slot[16],
+                lan_rx_rate_min: slot[17],
+                lan_rx_rate_p90: slot[18],
+                lan_rx_rate_p95: slot[19],
+                lan_rx_rate_p99: slot[20],
+                // lan_tx_rate stats (indices 21-26)
+                lan_tx_rate_avg: slot[21],
+                lan_tx_rate_max: slot[22],
+                lan_tx_rate_min: slot[23],
+                lan_tx_rate_p90: slot[24],
+                lan_tx_rate_p95: slot[25],
+                lan_tx_rate_p99: slot[26],
+                // 局域网总流量字节数（索引27-28）
+                lan_rx_bytes: slot[27],
+                lan_tx_bytes: slot[28],
             });
         }
 
@@ -384,6 +435,35 @@ impl LongTermRing {
 
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+    }
+
+    /// 获取最新的统计作为基线（返回最新的非空slot的字节数）
+    /// 返回 (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)
+    pub fn get_latest_baseline(&self) -> Option<(u64, u64, u64, u64)> {
+        let mut latest_ts = 0u64;
+        let mut latest_wan_rx_bytes = 0u64;
+        let mut latest_wan_tx_bytes = 0u64;
+        let mut latest_lan_rx_bytes = 0u64;
+        let mut latest_lan_tx_bytes = 0u64;
+
+        for slot in &self.slots {
+            let ts = slot[0];
+            if ts != 0 && ts > latest_ts {
+                latest_ts = ts;
+                latest_wan_rx_bytes = slot[13];
+                latest_wan_tx_bytes = slot[14];
+                // 检查是否有 LAN 数据（v4格式），如果 slot[15] 不为0说明有 LAN 速率数据（兼容v3）
+                // 对于 v3 格式，slot[15-28] 都是0，所以直接读取即可
+                latest_lan_rx_bytes = slot[27];
+                latest_lan_tx_bytes = slot[28];
+            }
+        }
+
+        if latest_ts > 0 {
+            Some((latest_wan_rx_bytes, latest_wan_tx_bytes, latest_lan_rx_bytes, latest_lan_tx_bytes))
+        } else {
+            None
+        }
     }
 }
 
@@ -601,7 +681,7 @@ impl MetricStats {
 }
 
 /// 采样间隔期间设备累积统计信息
-/// 仅存储广域网络统计信息和总广域流量
+/// 存储广域网络和局域网统计信息
 #[derive(Debug, Clone)]
 pub struct DeviceStatsAccumulator {
     pub ts_end_ms: u64,
@@ -609,6 +689,10 @@ pub struct DeviceStatsAccumulator {
     pub wan_tx_rate: MetricStats, // 广域网络发送速率统计信息
     pub wan_rx_bytes: u64,        // 广域网络接收总字节数（累积）
     pub wan_tx_bytes: u64,        // 广域网络发送总字节数（累积）
+    pub lan_rx_rate: MetricStats, // 局域网接收速率统计信息
+    pub lan_tx_rate: MetricStats, // 局域网发送速率统计信息
+    pub lan_rx_bytes: u64,        // 局域网接收总字节数（累积）
+    pub lan_tx_bytes: u64,        // 局域网发送总字节数（累积）
 }
 
 impl DeviceStatsAccumulator {
@@ -619,18 +703,27 @@ impl DeviceStatsAccumulator {
             wan_tx_rate: MetricStats::new(),
             wan_rx_bytes: 0,
             wan_tx_bytes: 0,
+            lan_rx_rate: MetricStats::new(),
+            lan_tx_rate: MetricStats::new(),
+            lan_rx_bytes: 0,
+            lan_tx_bytes: 0,
         }
     }
 
     pub fn add_sample(&mut self, stats: &DeviceTrafficStats, ts_ms: u64) {
         self.ts_end_ms = ts_ms;
-        // 仅累积广域网络统计信息
+        // 累积广域网络统计信息
         self.wan_rx_rate.add_sample(stats.wan_rx_rate);
         self.wan_tx_rate.add_sample(stats.wan_tx_rate);
+        // 累积局域网统计信息
+        self.lan_rx_rate.add_sample(stats.lan_rx_rate);
+        self.lan_tx_rate.add_sample(stats.lan_tx_rate);
 
-        // 保留最新的累积广域流量值
+        // 保留最新的累积流量值
         self.wan_rx_bytes = stats.wan_rx_bytes;
         self.wan_tx_bytes = stats.wan_tx_bytes;
+        self.lan_rx_bytes = stats.lan_rx_bytes;
+        self.lan_tx_bytes = stats.lan_tx_bytes;
     }
 
     pub fn finalize(&mut self) {
@@ -772,11 +865,18 @@ impl LongTermRingManager {
 
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_LONG_TERM {
+                    if ver == RING_VERSION_LONG_TERM || ver == 3 {
                         let mut ring = LongTermRing::new(cap);
+                        let slot_size = if ver == 3 { 15 * 8 } else { SLOT_SIZE_LONG_TERM };
 
                         for i in 0..(cap as u64) {
-                            if let Ok(slot) = read_slot_v3(&f, i) {
+                            let slot_result = if ver == 3 {
+                                read_slot_v3_legacy(&f, i, slot_size)
+                            } else {
+                                read_slot_v3(&f, i)
+                            };
+                            
+                            if let Ok(slot) = slot_result {
                                 if slot[0] != 0 {
                                     ring.slots[i as usize] = slot;
                                 }
@@ -825,6 +925,21 @@ impl LongTermRingManager {
         }
     }
 
+    /// 获取所有设备的最新基线（WAN和LAN流量字节数）
+    /// 返回 HashMap<MAC地址, (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)>
+    pub fn get_all_baselines(&self) -> HashMap<[u8; 6], (u64, u64, u64, u64)> {
+        let rings = self.rings.lock().unwrap();
+        let mut baselines = HashMap::new();
+
+        for (mac, ring) in rings.iter() {
+            if let Some(baseline) = ring.get_latest_baseline() {
+                baselines.insert(*mac, baseline);
+            }
+        }
+
+        baselines
+    }
+
     pub fn query_stats_by_device(
         &self,
         start_ms: u64,
@@ -852,6 +967,20 @@ impl LongTermRingManager {
                 wan_tx_rate_p99: 0,
                 wan_rx_bytes: 0,
                 wan_tx_bytes: 0,
+                lan_rx_rate_avg: 0,
+                lan_rx_rate_max: 0,
+                lan_rx_rate_min: u64::MAX,
+                lan_rx_rate_p90: 0,
+                lan_rx_rate_p95: 0,
+                lan_rx_rate_p99: 0,
+                lan_tx_rate_avg: 0,
+                lan_tx_rate_max: 0,
+                lan_tx_rate_min: u64::MAX,
+                lan_tx_rate_p90: 0,
+                lan_tx_rate_p95: 0,
+                lan_tx_rate_p99: 0,
+                lan_rx_bytes: 0,
+                lan_tx_bytes: 0,
             };
 
             if rows.is_empty() {
@@ -864,11 +993,17 @@ impl LongTermRingManager {
             if rows.len() == 1 {
                 aggregated.wan_rx_bytes = last_row.wan_rx_bytes;
                 aggregated.wan_tx_bytes = last_row.wan_tx_bytes;
+                aggregated.lan_rx_bytes = last_row.lan_rx_bytes;
+                aggregated.lan_tx_bytes = last_row.lan_tx_bytes;
             } else {
                 aggregated.wan_rx_bytes =
                     last_row.wan_rx_bytes.saturating_sub(first_row.wan_rx_bytes);
                 aggregated.wan_tx_bytes =
                     last_row.wan_tx_bytes.saturating_sub(first_row.wan_tx_bytes);
+                aggregated.lan_rx_bytes =
+                    last_row.lan_rx_bytes.saturating_sub(first_row.lan_rx_bytes);
+                aggregated.lan_tx_bytes =
+                    last_row.lan_tx_bytes.saturating_sub(first_row.lan_tx_bytes);
             }
 
             for row in &rows {
@@ -889,12 +1024,32 @@ impl LongTermRingManager {
                 aggregated.wan_tx_rate_p90 = aggregated.wan_tx_rate_p90.max(row.wan_tx_rate_p90);
                 aggregated.wan_tx_rate_p95 = aggregated.wan_tx_rate_p95.max(row.wan_tx_rate_p95);
                 aggregated.wan_tx_rate_p99 = aggregated.wan_tx_rate_p99.max(row.wan_tx_rate_p99);
+
+                aggregated.lan_rx_rate_avg = aggregated
+                    .lan_rx_rate_avg
+                    .saturating_add(row.lan_rx_rate_avg);
+                aggregated.lan_rx_rate_max = aggregated.lan_rx_rate_max.max(row.lan_rx_rate_max);
+                aggregated.lan_rx_rate_min = aggregated.lan_rx_rate_min.min(row.lan_rx_rate_min);
+                aggregated.lan_rx_rate_p90 = aggregated.lan_rx_rate_p90.max(row.lan_rx_rate_p90);
+                aggregated.lan_rx_rate_p95 = aggregated.lan_rx_rate_p95.max(row.lan_rx_rate_p95);
+                aggregated.lan_rx_rate_p99 = aggregated.lan_rx_rate_p99.max(row.lan_rx_rate_p99);
+
+                aggregated.lan_tx_rate_avg = aggregated
+                    .lan_tx_rate_avg
+                    .saturating_add(row.lan_tx_rate_avg);
+                aggregated.lan_tx_rate_max = aggregated.lan_tx_rate_max.max(row.lan_tx_rate_max);
+                aggregated.lan_tx_rate_min = aggregated.lan_tx_rate_min.min(row.lan_tx_rate_min);
+                aggregated.lan_tx_rate_p90 = aggregated.lan_tx_rate_p90.max(row.lan_tx_rate_p90);
+                aggregated.lan_tx_rate_p95 = aggregated.lan_tx_rate_p95.max(row.lan_tx_rate_p95);
+                aggregated.lan_tx_rate_p99 = aggregated.lan_tx_rate_p99.max(row.lan_tx_rate_p99);
             }
 
             let count = rows.len() as u64;
             if count > 0 {
                 aggregated.wan_rx_rate_avg /= count;
                 aggregated.wan_tx_rate_avg /= count;
+                aggregated.lan_rx_rate_avg /= count;
+                aggregated.lan_tx_rate_avg /= count;
             }
 
             if aggregated.wan_rx_rate_min == u64::MAX {
@@ -902,6 +1057,12 @@ impl LongTermRingManager {
             }
             if aggregated.wan_tx_rate_min == u64::MAX {
                 aggregated.wan_tx_rate_min = 0;
+            }
+            if aggregated.lan_rx_rate_min == u64::MAX {
+                aggregated.lan_rx_rate_min = 0;
+            }
+            if aggregated.lan_tx_rate_min == u64::MAX {
+                aggregated.lan_tx_rate_min = 0;
             }
 
             device_stats.insert(*mac, aggregated);
@@ -1048,13 +1209,27 @@ impl LongTermRingManager {
                 wan_tx_rate_p99: 0,
                 wan_rx_bytes: 0,
                 wan_tx_bytes: 0,
+                lan_rx_rate_avg: 0,
+                lan_rx_rate_max: 0,
+                lan_rx_rate_min: u64::MAX,
+                lan_rx_rate_p90: 0,
+                lan_rx_rate_p95: 0,
+                lan_rx_rate_p99: 0,
+                lan_tx_rate_avg: 0,
+                lan_tx_rate_max: 0,
+                lan_tx_rate_min: u64::MAX,
+                lan_tx_rate_p90: 0,
+                lan_tx_rate_p95: 0,
+                lan_tx_rate_p99: 0,
+                lan_rx_bytes: 0,
+                lan_tx_bytes: 0,
             });
 
             entry.wan_rx_rate_avg = entry.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
             entry.wan_rx_rate_max = entry.wan_rx_rate_max.max(row.wan_rx_rate_max);
             entry.wan_rx_rate_min = entry.wan_rx_rate_min.min(row.wan_rx_rate_min);
             entry.wan_rx_rate_p90 = entry.wan_rx_rate_p90.max(row.wan_rx_rate_p90);
-            entry.wan_tx_rate_p95 = entry.wan_tx_rate_p95.max(row.wan_rx_rate_p95);
+            entry.wan_rx_rate_p95 = entry.wan_rx_rate_p95.max(row.wan_rx_rate_p95);
             entry.wan_rx_rate_p99 = entry.wan_rx_rate_p99.max(row.wan_rx_rate_p99);
 
             entry.wan_tx_rate_avg = entry.wan_tx_rate_avg.saturating_add(row.wan_tx_rate_avg);
@@ -1066,6 +1241,23 @@ impl LongTermRingManager {
 
             entry.wan_rx_bytes = entry.wan_rx_bytes.saturating_add(row.wan_rx_bytes);
             entry.wan_tx_bytes = entry.wan_tx_bytes.saturating_add(row.wan_tx_bytes);
+
+            entry.lan_rx_rate_avg = entry.lan_rx_rate_avg.saturating_add(row.lan_rx_rate_avg);
+            entry.lan_rx_rate_max = entry.lan_rx_rate_max.max(row.lan_rx_rate_max);
+            entry.lan_rx_rate_min = entry.lan_rx_rate_min.min(row.lan_rx_rate_min);
+            entry.lan_rx_rate_p90 = entry.lan_rx_rate_p90.max(row.lan_rx_rate_p90);
+            entry.lan_rx_rate_p95 = entry.lan_rx_rate_p95.max(row.lan_rx_rate_p95);
+            entry.lan_rx_rate_p99 = entry.lan_rx_rate_p99.max(row.lan_rx_rate_p99);
+
+            entry.lan_tx_rate_avg = entry.lan_tx_rate_avg.saturating_add(row.lan_tx_rate_avg);
+            entry.lan_tx_rate_max = entry.lan_tx_rate_max.max(row.lan_tx_rate_max);
+            entry.lan_tx_rate_min = entry.lan_tx_rate_min.min(row.lan_tx_rate_min);
+            entry.lan_tx_rate_p90 = entry.lan_tx_rate_p90.max(row.lan_tx_rate_p90);
+            entry.lan_tx_rate_p95 = entry.lan_tx_rate_p95.max(row.lan_tx_rate_p95);
+            entry.lan_tx_rate_p99 = entry.lan_tx_rate_p99.max(row.lan_tx_rate_p99);
+
+            entry.lan_rx_bytes = entry.lan_rx_bytes.saturating_add(row.lan_rx_bytes);
+            entry.lan_tx_bytes = entry.lan_tx_bytes.saturating_add(row.lan_tx_bytes);
         }
 
         for stats in ts_to_stats.values_mut() {
@@ -1075,44 +1267,15 @@ impl LongTermRingManager {
             if stats.wan_tx_rate_min == u64::MAX {
                 stats.wan_tx_rate_min = 0;
             }
+            if stats.lan_rx_rate_min == u64::MAX {
+                stats.lan_rx_rate_min = 0;
+            }
+            if stats.lan_tx_rate_min == u64::MAX {
+                stats.lan_tx_rate_min = 0;
+            }
         }
 
         Ok(ts_to_stats.into_values().collect())
-    }
-
-    /// 获取设备的最新基准线统计数据
-    /// 用于在系统重启时恢复 DeviceTrafficStats 的基准值
-    pub fn get_latest_baseline(&self, mac: &[u8; 6]) -> Option<DeviceTrafficStats> {
-        let rings = self.rings.lock().unwrap();
-        if let Some(ring) = rings.get(mac) {
-            // 获取最新的有效数据作为基准线
-            for slot in ring.slots.iter().rev() {
-                if slot[0] != 0 {
-                    // 找到最新的数据，转换为 DeviceTrafficStats
-                    return Some(DeviceTrafficStats {
-                        ip_address: [0, 0, 0, 0], // IP地址需要从其他地方获取
-                        ipv6_addresses: [[0; 16]; 16], // IPv6地址也需要从其他地方获取
-                        wan_rx_rate_limit: 0,
-                        wan_tx_rate_limit: 0,
-                        lan_rx_bytes: 0,
-                        lan_tx_bytes: 0,
-                        lan_rx_rate: slot[1], // 使用平均值作为当前速率
-                        lan_tx_rate: slot[7],
-                        wan_rx_bytes: slot[13], // 使用累积字节数作为基准
-                        wan_tx_bytes: slot[14],
-                        wan_rx_rate: slot[1],
-                        wan_tx_rate: slot[7],
-                        lan_last_rx_bytes: 0,
-                        lan_last_tx_bytes: 0,
-                        wan_last_rx_bytes: slot[13],
-                        wan_last_tx_bytes: slot[14],
-                        last_online_ts: slot[0],
-                        last_sample_ts: slot[0],
-                    });
-                }
-            }
-        }
-        None
     }
 }
 
@@ -1254,6 +1417,21 @@ fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], an
     Ok(out)
 }
 
+fn read_slot_v3_legacy(mut f: &File, idx: u64, slot_size: usize) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
+    let offset = HEADER_SIZE as u64 + idx * (slot_size as u64);
+    let mut bytes = vec![0u8; slot_size];
+    f.seek(SeekFrom::Start(offset))?;
+    f.read_exact(&mut bytes)?;
+    let mut out = [0u64; SLOT_U64S_LONG_TERM];
+    let legacy_slot_u64s = slot_size / 8;
+    for i in 0..legacy_slot_u64s.min(SLOT_U64S_LONG_TERM) {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        out[i] = u64::from_le_bytes(b);
+    }
+    Ok(out)
+}
+
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     fs::create_dir_all(ring_dir(base_dir))
         .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
@@ -1369,7 +1547,7 @@ pub struct MetricsRow {
 
 /// 带统计信息的指标行（用于多级别采样）
 #[derive(Debug, Clone, Copy)]
-/// 仅包含广域网络统计信息和总广域流量的指标行
+/// 包含广域网络和局域网统计信息的指标行
 pub struct MetricsRowWithStats {
     pub ts_ms: u64,
     // 广域网络接收速率统计信息（平均值、最大值、最小值、p90、p95、p99）
@@ -1389,6 +1567,23 @@ pub struct MetricsRowWithStats {
     // 总广域网络流量（累积字节数）
     pub wan_rx_bytes: u64, // 广域网络接收总字节数
     pub wan_tx_bytes: u64, // 广域网络发送总字节数
+    // 局域网接收速率统计信息（平均值、最大值、最小值、p90、p95、p99）
+    pub lan_rx_rate_avg: u64, // 平均值：典型带宽使用量
+    pub lan_rx_rate_max: u64, // 最大值：峰值负载或突发流量
+    pub lan_rx_rate_min: u64, // 最小值：空闲或低负载状态
+    pub lan_rx_rate_p90: u64, // 90th 百分位数
+    pub lan_rx_rate_p95: u64, // 95th 百分位数
+    pub lan_rx_rate_p99: u64, // 99th 百分位数
+    // 局域网发送速率统计信息（平均值、最大值、最小值、p90、p95、p99）
+    pub lan_tx_rate_avg: u64, // 平均值：典型带宽使用量
+    pub lan_tx_rate_max: u64, // 最大值：峰值负载或突发流量
+    pub lan_tx_rate_min: u64, // 最小值：空闲或低负载状态
+    pub lan_tx_rate_p90: u64, // 90th 百分位数
+    pub lan_tx_rate_p95: u64, // 95th 百分位数
+    pub lan_tx_rate_p99: u64, // 99th 百分位数
+    // 总局域网流量（累积字节数）
+    pub lan_rx_bytes: u64, // 局域网接收总字节数
+    pub lan_tx_bytes: u64, // 局域网发送总字节数
 }
 
 fn limits_schedule_path(base: &str) -> PathBuf {
