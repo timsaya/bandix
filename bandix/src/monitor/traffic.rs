@@ -2,14 +2,11 @@ use crate::monitor::TrafficModuleContext;
 use anyhow::Result;
 use aya::maps::HashMap;
 use aya::maps::MapData;
-use bandix_common::DeviceTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 struct RawTrafficData {
-    pub ip_address: [u8; 4],
-    pub ipv6_addresses: [[u8; 16]; 16], // IPv6 地址（最多16个）
     pub lan_tx_bytes: u64,              // lan 发送字节数
     pub lan_rx_bytes: u64,              // lan 接收字节数
     pub wan_tx_bytes: u64,              // wan 发送字节数
@@ -40,30 +37,11 @@ impl TrafficMonitor {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
         let persist_enabled = ctx.options.traffic_persist_history();
-        let mut flush_interval = persist_enabled.then_some(tokio::time::interval(
-            tokio::time::Duration::from_secs(ctx.options.traffic_flush_interval_seconds() as u64),
-        ));
 
         loop {
-            let flush_future = async {
-                match &mut flush_interval {
-                    Some(fi) => fi.tick().await,
-                    None => std::future::pending().await,
-                }
-            };
-
             tokio::select! {
                 _ = interval.tick() => {
                     self.process_monitoring_cycle(ctx).await;
-                }
-                _ = flush_future => {
-                    log::debug!("Starting periodic flush of dirty rings to disk (interval: {} seconds)...",
-                               ctx.options.traffic_flush_interval_seconds());
-                    if let Err(e) = ctx.long_term_manager.flush_dirty_rings().await {
-                        log::error!("Failed to flush long-term rings to disk: {}", e);
-                    } else {
-                        log::debug!("Successfully flushed dirty rings to disk");
-                    }
                 }
                 _ = shutdown_notify.notified() => {
                     log::debug!("Traffic monitoring module received shutdown signal, stopping...");
@@ -103,10 +81,7 @@ impl TrafficMonitor {
             .unwrap_or(std::time::Duration::from_secs(0))
             .as_millis() as u64;
 
-        let snapshot: Vec<([u8; 6], DeviceTrafficStats)> = {
-            let stats = ctx.device_traffic_stats.lock().unwrap();
-            stats.iter().map(|(k, v)| (*k, *v)).collect()
-        };
+        let snapshot = ctx.device_manager.get_all_devices_for_snapshot();
 
         if let Err(e) = ctx.realtime_manager.insert_metrics_batch(ts_ms, &snapshot) {
             log::error!("Failed to persist metrics to memory ring: {}", e);
@@ -170,28 +145,12 @@ impl TrafficMonitor {
     ) -> Result<StdHashMap<[u8; 6], RawTrafficData>, anyhow::Error> {
         let mut traffic = StdHashMap::new();
 
-        // 从 DeviceManager 获取所有设备
-        let devices = device_manager.get_all_devices();
-        let devices_map: StdHashMap<[u8; 6], crate::device::ArpLine> =
-            devices.into_iter().map(|d| (d.mac, d)).collect();
-
         // 为每个有流量的 MAC 地址构建流量数据
         for (mac, data) in traffic_data.iter() {
-            if let Some(device_info) = devices_map.get(mac) {
-                let mut ipv6_addresses = [[0u8; 16]; 16];
-
-                // 从设备信息复制 IPv6 地址（最多16个）
-                for (i, ipv6_addr) in device_info.ipv6_addresses.iter().enumerate().take(16) {
-                    if *ipv6_addr != [0u8; 16] {
-                        ipv6_addresses[i] = *ipv6_addr;
-                    }
-                }
-
+            if device_manager.get_device_by_mac(mac).is_some() {
                 traffic.insert(
                     *mac,
                     RawTrafficData {
-                        ip_address: device_info.ip,
-                        ipv6_addresses,
                         lan_tx_bytes: data[0], // lan 发送
                         lan_rx_bytes: data[1], // lan 接收
                         wan_tx_bytes: data[2], // wan 发送
@@ -214,47 +173,23 @@ impl TrafficMonitor {
         let raw_device_traffic =
             self.build_raw_device_traffic(&traffic_data, &ctx.device_manager)?;
 
-        let mut device_traffic_stats_map = ctx.device_traffic_stats.lock().unwrap();
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
+        // 获取所有设备（包括离线设备），确保它们都被处理
+        let all_devices = ctx.device_manager.get_all_devices();
+        let all_device_macs: std::collections::HashSet<[u8; 6]> = 
+            all_devices.iter().map(|d| d.mac).collect();
+
+        // 先处理有流量的设备
         for (mac, raw_traffic) in raw_device_traffic.iter() {
-            let stats = device_traffic_stats_map.entry(*mac).or_insert_with(|| {
-                DeviceTrafficStats::from_ip(raw_traffic.ip_address, raw_traffic.ipv6_addresses)
-            });
-
-            // 从预定规则计算当前有效速率限制
-            if let Some(limits) =
-                crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac)
-            {
-                stats.wan_rx_rate_limit = limits[0];
-                stats.wan_tx_rate_limit = limits[1];
+            // 确保设备存在，如果不存在则创建
+            if ctx.device_manager.get_device_by_mac(mac).is_none() {
+                ctx.device_manager.add_offline_device(*mac);
             }
-
-            // 用 eBPF 收集的最新 IP 覆盖，以避免停留在 0.0.0.0。
-            if raw_traffic.ip_address != [0, 0, 0, 0] {
-                stats.ip_address = raw_traffic.ip_address;
-            }
-
-            // 从 DeviceManager 更新 IPv6 地址
-            // 将 DeviceManager 中的新 IPv6 地址合并到现有地址中
-            if let Some(device_info) = ctx.device_manager.get_device_by_mac(mac) {
-                let current_count = stats.ipv6_count() as usize;
-
-                // 收集需要添加的新 IPv6 地址（过滤零地址和重复地址）
-                let new_ipv6_addresses: Vec<[u8; 16]> = device_info
-                    .ipv6_addresses
-                    .iter()
-                    .filter(|addr| **addr != [0u8; 16]) // 过滤零地址
-                    .filter(|addr| !stats.ipv6_addresses[..current_count].contains(addr)) // 过滤重复地址
-                    .take(16 - current_count) // 限制数量，避免超出数组容量
-                    .cloned()
-                    .collect();
-
-                // 将新地址添加到数组中
-                for (i, ipv6_addr) in new_ipv6_addresses.into_iter().enumerate() {
-                    stats.ipv6_addresses[current_count + i] = ipv6_addr;
-                }
-            }
+            
+            // 更新设备的 IP 地址（从 eBPF 收集的数据到 UnifiedDevice）
+            // IP 信息会通过 refresh_devices() 定期更新，这里不需要手动更新
+            // 因为 eBPF 收集的 IP 可能不是最新的，应该以 ARP 表为准
 
             // eBPF map 存储的是累积值，需要计算增量
             let last_ebpf = ctx.last_ebpf_traffic.lock().unwrap();
@@ -267,11 +202,70 @@ impl TrafficMonitor {
             let wan_tx_delta = raw_traffic.wan_tx_bytes.saturating_sub(last_values[2]);
             let wan_rx_delta = raw_traffic.wan_rx_bytes.saturating_sub(last_values[3]);
 
-            // 累加增量到统计值
-            stats.lan_rx_bytes = stats.lan_rx_bytes.saturating_add(lan_rx_delta);
-            stats.lan_tx_bytes = stats.lan_tx_bytes.saturating_add(lan_tx_delta);
-            stats.wan_rx_bytes = stats.wan_rx_bytes.saturating_add(wan_rx_delta);
-            stats.wan_tx_bytes = stats.wan_tx_bytes.saturating_add(wan_tx_delta);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0))
+                .as_millis() as u64;
+
+            // 更新设备流量统计
+            if let Err(e) = ctx.device_manager.update_device_traffic_stats(mac, |stats| {
+                // 从预定规则计算当前有效速率限制
+                if let Some(limits) =
+                    crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac)
+                {
+                    stats.wan_rx_rate_limit = limits[0];
+                    stats.wan_tx_rate_limit = limits[1];
+                }
+
+                // 累加增量到统计值
+                stats.lan_rx_bytes = stats.lan_rx_bytes.saturating_add(lan_rx_delta);
+                stats.lan_tx_bytes = stats.lan_tx_bytes.saturating_add(lan_tx_delta);
+                stats.wan_rx_bytes = stats.wan_rx_bytes.saturating_add(wan_rx_delta);
+                stats.wan_tx_bytes = stats.wan_tx_bytes.saturating_add(wan_tx_delta);
+
+                // 如果是第一次采样则设置最后活动时间
+                if stats.last_sample_ts == 0 {
+                    stats.last_online_ts = now;
+                }
+
+                // 后续的采样
+                if stats.last_sample_ts > 0 {
+                    let time_diff = now.saturating_sub(stats.last_sample_ts);
+
+                    if time_diff > 0 {
+                        // 计算lan 接收速率
+                        let lan_rx_diff = stats.lan_rx_bytes.saturating_sub(stats.lan_last_rx_bytes);
+                        stats.lan_rx_rate = (lan_rx_diff * 1000) / time_diff;
+
+                        // 计算lan 发送速率
+                        let lan_tx_diff = stats.lan_tx_bytes.saturating_sub(stats.lan_last_tx_bytes);
+                        stats.lan_tx_rate = (lan_tx_diff * 1000) / time_diff;
+
+                        // 计算wan 接收速率
+                        let wan_rx_diff = stats.wan_rx_bytes.saturating_sub(stats.wan_last_rx_bytes);
+                        stats.wan_rx_rate = (wan_rx_diff * 1000) / time_diff;
+
+                        // 计算wan 发送速率
+                        let wan_tx_diff = stats.wan_tx_bytes.saturating_sub(stats.wan_last_tx_bytes);
+                        stats.wan_tx_rate = (wan_tx_diff * 1000) / time_diff;
+
+                        // 仅当任何发送流量增加时更新最后活动时间
+                        let total_tx_diff = lan_tx_diff + wan_tx_diff;
+                        if total_tx_diff > 0 {
+                            stats.last_online_ts = now;
+                        }
+                    }
+                }
+
+                // 将当前值保存为下次计算的基础
+                stats.lan_last_rx_bytes = stats.lan_rx_bytes;
+                stats.lan_last_tx_bytes = stats.lan_tx_bytes;
+                stats.wan_last_rx_bytes = stats.wan_rx_bytes;
+                stats.wan_last_tx_bytes = stats.wan_tx_bytes;
+                stats.last_sample_ts = now;
+            }) {
+                log::warn!("Failed to update device stats for {:?}: {}", mac, e);
+            }
 
             // 保存当前 eBPF 值用于下次计算
             let mut last_ebpf = ctx.last_ebpf_traffic.lock().unwrap();
@@ -284,52 +278,47 @@ impl TrafficMonitor {
                     raw_traffic.wan_rx_bytes,
                 ],
             );
+        }
 
+        // 处理没有流量的设备（离线设备或当前没有活动的设备）
+        // 确保它们至少更新速率限制、IP地址等信息
+        for mac in all_device_macs.iter() {
+            // 跳过已经处理过的设备（有流量的设备）
+            if raw_device_traffic.contains_key(mac) {
+                continue;
+            }
+
+            // 更新离线设备的速率限制和速率
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
                 .as_millis() as u64;
-
-            // 如果是第一次采样则设置最后活动时间
-            if stats.last_sample_ts == 0 {
-                stats.last_online_ts = now;
-            }
-
-            // 后续的采样
-            if stats.last_sample_ts > 0 {
-                let time_diff = now.saturating_sub(stats.last_sample_ts);
-
-                if time_diff > 0 {
-                    // 计算lan 接收速率
-                    let lan_rx_diff = stats.lan_rx_bytes.saturating_sub(stats.lan_last_rx_bytes);
-                    stats.lan_rx_rate = (lan_rx_diff * 1000) / time_diff;
-
-                    // 计算lan 发送速率
-                    let lan_tx_diff = stats.lan_tx_bytes.saturating_sub(stats.lan_last_tx_bytes);
-                    stats.lan_tx_rate = (lan_tx_diff * 1000) / time_diff;
-
-                    // 计算wan 接收速率
-                    let wan_rx_diff = stats.wan_rx_bytes.saturating_sub(stats.wan_last_rx_bytes);
-                    stats.wan_rx_rate = (wan_rx_diff * 1000) / time_diff;
-
-                    // 计算wan 发送速率
-                    let wan_tx_diff = stats.wan_tx_bytes.saturating_sub(stats.wan_last_tx_bytes);
-                    stats.wan_tx_rate = (wan_tx_diff * 1000) / time_diff;
-
-                    // 仅当任何发送流量增加时更新最后活动时间
-                    let total_tx_diff = lan_tx_diff + wan_tx_diff;
-                    if total_tx_diff > 0 {
-                        stats.last_online_ts = now;
-                    }
+                
+            if let Err(e) = ctx.device_manager.update_device_traffic_stats(mac, |stats| {
+                // 从预定规则计算当前有效速率限制
+                if let Some(limits) =
+                    crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, mac)
+                {
+                    stats.wan_rx_rate_limit = limits[0];
+                    stats.wan_tx_rate_limit = limits[1];
                 }
-            }
 
-            // 将当前值保存为下次计算的基础
-            stats.lan_last_rx_bytes = stats.lan_rx_bytes;
-            stats.lan_last_tx_bytes = stats.lan_tx_bytes;
-            stats.wan_last_rx_bytes = stats.wan_rx_bytes;
-            stats.wan_last_tx_bytes = stats.wan_tx_bytes;
-            stats.last_sample_ts = now;
+                // 对于没有流量的设备，速率应该为0
+                stats.wan_rx_rate = 0;
+                stats.wan_tx_rate = 0;
+                stats.lan_rx_rate = 0;
+                stats.lan_tx_rate = 0;
+
+                // 如果 last_online_ts 为0，设置一个初始值（使用当前时间）
+                if stats.last_online_ts == 0 {
+                    stats.last_online_ts = now;
+                }
+
+                // 更新最后采样时间
+                stats.last_sample_ts = now;
+            }) {
+                log::warn!("Failed to update offline device stats for {:?}: {}", mac, e);
+            }
         }
 
         Ok(())
@@ -366,15 +355,12 @@ impl TrafficMonitor {
             .ok_or_else(|| anyhow::anyhow!("Ingress eBPF program not initialized"))?;
 
         // 使用 unsafe 获取对 eBPF 对象的可变访问
-        // 这是安全的，因为 eBPF 映射是线程安全的，我们只是在更新映射，
-        // 不是修改 eBPF 对象本身
+        // 这是安全的，因为 eBPF 映射是线程安全的
         let ebpf_mut = unsafe {
-            // Get a raw pointer to the inner Ebpf object
             let ptr = Arc::as_ptr(ingress_ebpf) as *const aya::Ebpf as *mut aya::Ebpf;
             &mut *ptr
         };
 
-        // Use map_mut to update rate limits
         let mut mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
             ebpf_mut
                 .map_mut("MAC_RATE_LIMITS")

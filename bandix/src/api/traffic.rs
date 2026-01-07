@@ -4,8 +4,7 @@ use crate::storage::traffic::{
     self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
 };
 use crate::utils::format_utils::{format_bytes, format_mac};
-use bandix_common::DeviceTrafficStats;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -207,32 +206,29 @@ pub struct DeleteScheduledLimitRequest {
 /// 流量 monitoring API handler
 #[derive(Clone)]
 pub struct TrafficApiHandler {
-    mac_stats: Arc<Mutex<HashMap<[u8; 6], DeviceTrafficStats>>>,
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     realtime_manager: Arc<RealtimeRingManager>, // 实时 1 秒采样（仅内存）
     long_term_manager: Arc<LongTermRingManager>, // 长期采样（1 小时间隔，365 天保留，已持久化）
-    device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // 中心化设备注册表
+    device_manager: Arc<crate::device::DeviceManager>, // 统一的设备管理器（包含设备信息和流量统计）
     options: Options,
 }
 
 impl TrafficApiHandler {
     pub fn new(
-        mac_stats: Arc<Mutex<HashMap<[u8; 6], DeviceTrafficStats>>>,
         scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         realtime_manager: Arc<RealtimeRingManager>,
         long_term_manager: Arc<LongTermRingManager>,
-        device_registry: Arc<crate::storage::device_registry::DeviceRegistry>,
+        device_manager: Arc<crate::device::DeviceManager>,
         options: Options,
     ) -> Self {
         Self {
-            mac_stats,
             scheduled_rate_limits,
             hostname_bindings,
             realtime_manager,
             long_term_manager,
-            device_registry,
+            device_manager,
             options,
         }
     }
@@ -258,7 +254,7 @@ impl TrafficApiHandler {
         match request.path.as_str() {
             "/api/traffic/devices" => {
                 if request.method == "GET" {
-                    self.handle_devices().await
+                    self.handle_devices(request).await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
@@ -308,22 +304,60 @@ impl TrafficApiHandler {
 }
 
 impl TrafficApiHandler {
+    /// 计算时间范围的开始和结束时间戳（毫秒）
+    /// period: "today" | "week" | "month" | "all"
+    fn calculate_time_range(period: &str) -> Option<(u64, u64)> {
+        let now = Local::now();
+        let now_ms = now.timestamp_millis() as u64;
+        
+        let start_ms = match period {
+            "today" => {
+                let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
+                let today_start_local = Local.from_local_datetime(&today_start).unwrap();
+                today_start_local.timestamp_millis() as u64
+            }
+            "week" => {
+                let days_from_monday = now.weekday().num_days_from_monday();
+                let week_start = now.date_naive()
+                    .checked_sub_signed(chrono::Duration::days(days_from_monday as i64))
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                let week_start_local = Local.from_local_datetime(&week_start).unwrap();
+                week_start_local.timestamp_millis() as u64
+            }
+            "month" => {
+                let month_start = now.date_naive()
+                    .with_day(1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                let month_start_local = Local.from_local_datetime(&month_start).unwrap();
+                month_start_local.timestamp_millis() as u64
+            }
+            "all" => return None,
+            _ => return None,
+        };
+        
+        Some((start_ms, now_ms))
+    }
+
     /// 处理/api/devices endpoint
-    async fn handle_devices(&self) -> Result<HttpResponse, anyhow::Error> {
-        let stats_map = self.mac_stats.lock().unwrap();
+    /// 查询参数：
+    ///   - period: "today" | "week" | "month" | "all" (可选，默认为 "all")
+    async fn handle_devices(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let period = request.query_params
+            .get("period")
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| "all".to_string());
+        
+        let time_range = Self::calculate_time_range(&period);
+        
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
-        // 从系统获取 IPv6 邻居表
-        let ipv6_neighbors = crate::utils::network_utils::get_ipv6_neighbors().unwrap_or_default();
-
-        // 从中心化注册表收集所有设备（包括历史设备）
-        let registry_devices = self.device_registry.get_all_devices();
-        let mut all_macs: HashSet<[u8; 6]> = registry_devices.iter().map(|d| d.mac).collect();
-
-        // 还添加来自当前统计的设备（基准线已在初始化期间应用）
-        for mac in stats_map.keys() {
-            all_macs.insert(*mac);
-        }
+        // 从设备管理器收集所有设备（包括在线和离线设备）
+        let all_devices = self.device_manager.get_all_devices();
+        let all_macs: HashSet<[u8; 6]> = all_devices.iter().map(|d| d.mac).collect();
 
         let devices: Vec<DeviceInfo> = all_macs
             .into_iter()
@@ -331,79 +365,24 @@ impl TrafficApiHandler {
                 // 格式化 MAC 地址
                 let mac_str = format_mac(&mac);
 
-                // 从 mac_stats 获取统计（基准线已在初始化期间应用）
-                let (
-                    ip_address,
-                    total_rx_bytes,
-                    total_tx_bytes,
-                    total_rx_rate,
-                    total_tx_rate,
-                    wan_rx_rate_limit,
-                    wan_tx_rate_limit,
-                    lan_rx_bytes,
-                    lan_tx_bytes,
-                    lan_rx_rate,
-                    lan_tx_rate,
-                    wan_rx_bytes,
-                    wan_tx_bytes,
-                    wan_rx_rate,
-                    wan_tx_rate,
-                    last_online_ts,
-                    ipv6_addresses_from_stats,
-                ) = if let Some(stats) = stats_map.get(&mac) {
-                    // Device stats (includes baseline for offline devices)
-                    (
-                        stats.ip_address,
-                        stats.total_rx_bytes(),
-                        stats.total_tx_bytes(),
-                        stats.total_rx_rate(),
-                        stats.total_tx_rate(),
-                        stats.wan_rx_rate_limit,
-                        stats.wan_tx_rate_limit,
-                        stats.lan_rx_bytes,
-                        stats.lan_tx_bytes,
-                        stats.lan_rx_rate,
-                        stats.lan_tx_rate,
-                        stats.wan_rx_bytes,
-                        stats.wan_tx_bytes,
-                        stats.wan_rx_rate,
-                        stats.wan_tx_rate,
-                        stats.last_online_ts,
-                        stats.ipv6_addresses,
-                    )
+                // 从设备管理器获取设备信息（包含所有信息：IP、流量统计等）
+                let device = self.device_manager.get_device_by_mac(&mac);
+                
+                let (final_ipv4, ipv6_addresses_set) = if let Some(device) = &device {
+                    let final_ipv4 = device.get_current_ipv4();
+                    let mut ipv6_set: HashSet<[u8; 16]> = HashSet::new();
+                    
+                    // 添加所有 IPv6 地址（当前和历史）
+                    for addr in device.get_all_ipv6() {
+                        if addr != [0u8; 16] {
+                            ipv6_set.insert(addr);
+                        }
+                    }
+                    
+                    (final_ipv4, ipv6_set)
                 } else {
-                    // Should not happen, but provide defaults
-                    (
-                        [0, 0, 0, 0],
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        0,
-                        [[0u8; 16]; 16],
-                    )
-                };
-
-                // 从注册表获取设备记录（包括历史 IP 地址）
-                let device_record = self.device_registry.get_device(&mac);
-
-                // 使用来自统计/基准的当前 IP，或回退到注册表
-                let final_ipv4 = if ip_address != [0, 0, 0, 0] {
-                    ip_address
-                } else if let Some(record) = &device_record {
-                    record.current_ipv4.unwrap_or([0, 0, 0, 0])
-                } else {
-                    [0, 0, 0, 0]
+                    // 设备不存在，使用默认值
+                    ([0, 0, 0, 0], HashSet::new())
                 };
 
                 // 格式化IP address
@@ -412,69 +391,164 @@ impl TrafficApiHandler {
                     final_ipv4[0], final_ipv4[1], final_ipv4[2], final_ipv4[3]
                 );
 
-                // 获取 IPv6 地址：结合来自统计、注册表和系统邻居表的当前地址
-                let mut ipv6_addresses_set: HashSet<[u8; 16]> = HashSet::new();
-
-                // 首先，添加来自 eBPF 统计的 IPv6 地址（如果是当前设备）
-                for addr in ipv6_addresses_from_stats.iter() {
-                    if *addr != [0u8; 16] {
-                        ipv6_addresses_set.insert(*addr);
-                    }
-                }
-
-                // 然后，添加来自注册表的 IPv6 地址（当前和历史）
-                if let Some(record) = &device_record {
-                    for addr in &record.current_ipv6 {
-                        if *addr != [0u8; 16] {
-                            ipv6_addresses_set.insert(*addr);
-                        }
-                    }
-                }
-
-                // 最后，添加来自系统邻居表的 IPv6 地址
-                if let Some(addrs) = ipv6_neighbors.get(&mac) {
-                    for addr in addrs {
-                        if *addr != [0u8; 16] {
-                            ipv6_addresses_set.insert(*addr);
-                        }
-                    }
-                }
-
                 // 转换为格式化的字符串并按字典序排序
                 let mut ipv6_addresses: Vec<String> = ipv6_addresses_set
                     .iter()
                     .map(|addr| crate::utils::network_utils::format_ipv6(addr))
                     .collect();
-
-                // 排序IPv6 addresses in lexicographic order
                 ipv6_addresses.sort();
 
-                // Get hostname from bindings, fallback to empty string if not found
-                let hostname = bindings_map.get(&mac).cloned().unwrap_or_default();
+                // Get hostname from device or bindings
+                let hostname = device.as_ref()
+                    .map(|d| d.hostname.clone())
+                    .filter(|h| !h.is_empty())
+                    .or_else(|| bindings_map.get(&mac).cloned())
+                    .unwrap_or_default();
+
+                // 如果指定了时间范围，计算该时间范围内的流量增量
+                let (final_total_rx_bytes, final_total_tx_bytes, final_lan_rx_bytes, 
+                      final_lan_tx_bytes, final_wan_rx_bytes, final_wan_tx_bytes) = 
+                    if let Some((start_ms, end_ms)) = time_range {
+                        // 检查结束时间是否在当前小时内（需要从 checkpoint 获取数据）
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or(Duration::from_secs(0))
+                            .as_millis() as u64;
+                        let now_sec = now_ms / 1000;
+                        let current_hour_start = (now_sec / 3600) * 3600;
+                        let end_sec = end_ms / 1000;
+                        let end_hour_start = (end_sec / 3600) * 3600;
+                        let is_current_hour = end_hour_start == current_hour_start;
+
+                        // 从长期数据查询该时间范围内的流量增量
+                        if let Ok(stats_rows) = self.long_term_manager.query_stats(&mac, start_ms, end_ms) {
+                            // 获取开始时间点的数据（作为起始基线）
+                            let start_baseline = stats_rows.first().map(|row| {
+                                (row.wan_rx_bytes, row.wan_tx_bytes, row.lan_rx_bytes, row.lan_tx_bytes)
+                            }).unwrap_or((0, 0, 0, 0));
+                            
+                            // 获取结束时间点的数据
+                            let mut end_baseline = if !stats_rows.is_empty() {
+                                stats_rows.last().map(|row| {
+                                    (row.wan_rx_bytes, row.wan_tx_bytes, row.lan_rx_bytes, row.lan_tx_bytes)
+                                }).unwrap_or((0, 0, 0, 0))
+                            } else {
+                                (0, 0, 0, 0)
+                            };
+
+                            // 如果结束时间在当前小时内，尝试从内存中的累积器获取最新数据
+                            if is_current_hour {
+                                let active_accumulators = self.long_term_manager.get_active_accumulators();
+                                if let Some(&(wan_rx, wan_tx, lan_rx, lan_tx)) = active_accumulators.get(&mac) {
+                                    // 使用内存中累积器的数据作为结束值（更准确）
+                                    end_baseline = (wan_rx, wan_tx, lan_rx, lan_tx);
+                                }
+                            }
+                            
+                            // 计算增量
+                            let period_wan_rx = end_baseline.0.saturating_sub(start_baseline.0);
+                            let period_wan_tx = end_baseline.1.saturating_sub(start_baseline.1);
+                            let period_lan_rx = end_baseline.2.saturating_sub(start_baseline.2);
+                            let period_lan_tx = end_baseline.3.saturating_sub(start_baseline.3);
+                            
+                            (period_wan_rx + period_lan_rx, 
+                             period_wan_tx + period_lan_tx,
+                             period_lan_rx,
+                             period_lan_tx,
+                             period_wan_rx,
+                             period_wan_tx)
+                        } else {
+                            // 查询失败，如果是在当前小时内，尝试使用内存中的累积器数据
+                            if is_current_hour {
+                                let active_accumulators = self.long_term_manager.get_active_accumulators();
+                                if let Some(&(wan_rx, wan_tx, lan_rx, lan_tx)) = active_accumulators.get(&mac) {
+                                    // 使用内存中累积器的数据，起始基线为 0（因为没有历史数据）
+                                    (wan_rx + lan_rx, wan_tx + lan_tx, lan_rx, lan_tx, wan_rx, wan_tx)
+                                } else {
+                                    // 没有累积器数据，使用当前统计值
+                                    if let Some(device) = &device {
+                                        (device.total_rx_bytes(), device.total_tx_bytes(), device.lan_rx_bytes, device.lan_tx_bytes, device.wan_rx_bytes, device.wan_tx_bytes)
+                                    } else {
+                                        (0, 0, 0, 0, 0, 0)
+                                    }
+                                }
+                            } else {
+                                // 不在当前小时内，使用当前统计值
+                                if let Some(device) = &device {
+                                    (device.total_rx_bytes(), device.total_tx_bytes(), device.lan_rx_bytes, device.lan_tx_bytes, device.wan_rx_bytes, device.wan_tx_bytes)
+                                } else {
+                                    (0, 0, 0, 0, 0, 0)
+                                }
+                            }
+                        }
+                    } else {
+                        // period == "all"，使用累计流量
+                        // 优先使用内存中的累积器数据（如果存在，包含当前小时的累积数据）
+                        let active_accumulators = self.long_term_manager.get_active_accumulators();
+                        if let Some(&(wan_rx_acc, wan_tx_acc, lan_rx_acc, lan_tx_acc)) = 
+                            active_accumulators.get(&mac) {
+                            // 使用内存中累积器的数据（更准确，包含当前小时的累积数据）
+                            (wan_rx_acc + lan_rx_acc,
+                             wan_tx_acc + lan_tx_acc,
+                             lan_rx_acc,
+                             lan_tx_acc,
+                             wan_rx_acc,
+                             wan_tx_acc)
+                        } else {
+                            // 没有累积器数据，使用当前统计值
+                            if let Some(device) = &device {
+                                (device.total_rx_bytes(), device.total_tx_bytes(), device.lan_rx_bytes, device.lan_tx_bytes, device.wan_rx_bytes, device.wan_tx_bytes)
+                            } else {
+                                (0, 0, 0, 0, 0, 0)
+                            }
+                        }
+                    };
+
+                // 从 device 获取流量统计信息
+                let (total_rx_rate, total_tx_rate, wan_rx_rate_limit, wan_tx_rate_limit,
+                     lan_rx_rate, lan_tx_rate, wan_rx_rate, wan_tx_rate, last_online_ts) = 
+                    if let Some(device) = &device {
+                        (device.total_rx_rate(), device.total_tx_rate(), 
+                         device.wan_rx_rate_limit, device.wan_tx_rate_limit,
+                         device.lan_rx_rate, device.lan_tx_rate,
+                         device.wan_rx_rate, device.wan_tx_rate, device.last_online_ts)
+                    } else {
+                        (0, 0, 0, 0, 0, 0, 0, 0, 0)
+                    };
 
                 DeviceInfo {
                     ip: ip_str,
                     ipv6_addresses,
                     mac: mac_str,
                     hostname,
-                    total_rx_bytes,
-                    total_tx_bytes,
+                    total_rx_bytes: final_total_rx_bytes,
+                    total_tx_bytes: final_total_tx_bytes,
                     total_rx_rate,
                     total_tx_rate,
                     wan_rx_rate_limit,
                     wan_tx_rate_limit,
-                    lan_rx_bytes,
-                    lan_tx_bytes,
+                    lan_rx_bytes: final_lan_rx_bytes,
+                    lan_tx_bytes: final_lan_tx_bytes,
                     lan_rx_rate,
                     lan_tx_rate,
-                    wan_rx_bytes,
-                    wan_tx_bytes,
+                    wan_rx_bytes: final_wan_rx_bytes,
+                    wan_tx_bytes: final_wan_tx_bytes,
                     wan_rx_rate,
                     wan_tx_rate,
                     last_online_ts,
                 }
             })
-            .filter(|device| device.last_online_ts > 0)
+            .filter(|device| {
+                // 允许显示有流量数据或基线数据的设备
+                // 即使 last_online_ts == 0，如果有累计流量，也应该显示
+                device.last_online_ts > 0 || 
+                device.total_rx_bytes > 0 || 
+                device.total_tx_bytes > 0 ||
+                device.lan_rx_bytes > 0 ||
+                device.lan_tx_bytes > 0 ||
+                device.wan_rx_bytes > 0 ||
+                device.wan_tx_bytes > 0
+            })
             .collect();
 
         let mut devices = devices;
@@ -925,7 +999,6 @@ impl TrafficApiHandler {
         }
 
         let bindings_map = self.hostname_bindings.lock().unwrap();
-        let stats_map = self.mac_stats.lock().unwrap();
 
         let mut rankings: Vec<DeviceUsageRanking> = Vec::new();
         let mut total_bytes = 0u64;
@@ -939,11 +1012,17 @@ impl TrafficApiHandler {
             total_tx_bytes = total_tx_bytes.saturating_add(stats.wan_tx_bytes);
 
             let mac_str = format_mac(mac);
-            let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
+            
+            // 从设备管理器获取设备信息
+            let device = self.device_manager.get_device_by_mac(mac);
+            let hostname = device.as_ref()
+                .map(|d| d.hostname.clone())
+                .filter(|h| !h.is_empty())
+                .or_else(|| bindings_map.get(mac).cloned())
+                .unwrap_or_default();
 
-            let ip_address = stats_map
-                .get(mac)
-                .map(|s| s.ip_address)
+            let ip_address = device.as_ref()
+                .and_then(|d| d.current_ipv4)
                 .unwrap_or([0, 0, 0, 0]);
 
             let ip_str = format!(

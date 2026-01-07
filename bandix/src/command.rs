@@ -1,6 +1,4 @@
 use crate::device::DeviceManager;
-use crate::storage::device_registry::DeviceRegistry;
-use std::path::Path;
 
 use crate::ebpf::shared::load_shared;
 use crate::monitor::{
@@ -13,7 +11,8 @@ use aya::maps::Array;
 use clap::{Args, Parser};
 use log::info;
 use log::LevelFilter;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::signal;
 
 /// 所有命令共享的通用参数
@@ -61,9 +60,9 @@ pub struct TrafficArgs {
     #[clap(
         long,
         default_value = "600",
-        help = "Traffic data flush interval (seconds), how often to persist memory ring data to disk"
+        help = "Traffic data checkpoint interval (seconds), how often to save accumulator checkpoints to disk. Long-term hourly data is saved immediately at each hour boundary."
     )]
-    pub traffic_flush_interval_seconds: u32,
+    pub traffic_persist_interval_seconds: u32,
 
     #[clap(
         long,
@@ -148,9 +147,9 @@ impl Options {
         self.traffic.traffic_retention_seconds
     }
 
-    /// 从流量参数获取流量刷新间隔秒数
+    /// 从流量参数获取流量持久化间隔秒数
     pub fn traffic_flush_interval_seconds(&self) -> u32 {
-        self.traffic.traffic_flush_interval_seconds
+        self.traffic.traffic_persist_interval_seconds
     }
 
     /// 从流量参数获取流量持久化历史
@@ -199,54 +198,12 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
 
         if opt.traffic_flush_interval_seconds() == 0 {
             return Err(anyhow::anyhow!(
-                "traffic_flush_interval_seconds must be greater than 0"
+                "traffic_persist_interval_seconds must be greater than 0"
             ));
         }
     }
 
     Ok(())
-}
-
-fn load_hostname_bindings(
-    data_dir: &str,
-) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>> {
-    let bindings = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // 从文件加载现有主机名绑定（优先来源）
-    let mut bindings_count = 0;
-    if let Ok(loaded_bindings) = crate::storage::hostname::load_hostname_bindings(data_dir) {
-        let mut bindings_map = bindings.lock().unwrap();
-        for (mac, hostname) in loaded_bindings {
-            bindings_map.insert(mac, hostname);
-            bindings_count += 1;
-        }
-        log::info!(
-            "Loaded {} hostname bindings from saved file",
-            bindings_count
-        );
-    } else {
-        log::warn!("Failed to load hostname bindings from saved file");
-    }
-
-    // 从 ubus 加载额外的主机名绑定（备用来源）
-    if let Ok(ubus_bindings) = crate::storage::hostname::load_hostname_from_ubus() {
-        let mut bindings_map = bindings.lock().unwrap();
-        let mut ubus_count = 0;
-        for (mac, hostname) in ubus_bindings {
-            if !bindings_map.contains_key(&mac) {
-                bindings_map.insert(mac, hostname);
-                ubus_count += 1;
-            }
-        }
-        if ubus_count > 0 {
-            log::info!(
-                "Loaded {} additional hostname bindings from ubus",
-                ubus_count
-            );
-        }
-    }
-
-    bindings
 }
 
 // 初始化共享的 eBPF 程序（被流量和 DNS 模块共同使用）
@@ -291,9 +248,7 @@ impl SubnetInfo {
 async fn create_module_contexts(
     options: &Options,
     subnet_info: &SubnetInfo,
-    shared_hostname_bindings: &std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>,
-    >,
+    shared_hostname_bindings: &Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
     device_manager: Arc<DeviceManager>,
 ) -> Result<Vec<ModuleContext>, anyhow::Error> {
     let mut module_contexts = Vec::new();
@@ -398,7 +353,7 @@ async fn create_module_contexts(
                 egress,
                 Arc::clone(&device_manager),
             );
-            traffic_ctx.hostname_bindings = std::sync::Arc::clone(shared_hostname_bindings);
+            traffic_ctx.hostname_bindings = Arc::clone(shared_hostname_bindings);
 
             module_contexts.push(ModuleContext::Traffic(traffic_ctx));
         }
@@ -417,7 +372,7 @@ async fn create_module_contexts(
                 ingress,
                 egress,
                 dns_map.unwrap(),
-                std::sync::Arc::clone(shared_hostname_bindings),
+                Arc::clone(shared_hostname_bindings),
             );
             module_contexts.push(ModuleContext::Dns(dns_ctx));
         }
@@ -430,7 +385,7 @@ async fn create_module_contexts(
         // 创建连接模块上下文
         let connection_ctx = ConnectionModuleContext::new(
             options.clone(),
-            std::sync::Arc::clone(shared_hostname_bindings),
+            Arc::clone(shared_hostname_bindings),
             subnet_info.interface_ip,
             subnet_info.subnet_mask,
         );
@@ -440,45 +395,6 @@ async fn create_module_contexts(
     Ok(module_contexts)
 }
 
-// 启动设备刷新任务：定期刷新 ARP 表并更新设备注册表
-fn start_device_refresh_task(
-    device_manager: Arc<DeviceManager>,
-    device_registry: Arc<DeviceRegistry>,
-    data_dir: String,
-    shutdown_notify: Arc<tokio::sync::Notify>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    // 定期 ARP 表刷新（每30秒）
-                    if let Err(e) = device_manager.refresh_arp_table() {
-                        log::warn!("Failed to refresh ARP table: {}", e);
-                    } else {
-                        log::debug!("Periodic ARP table refresh completed");
-                    }
-
-                    // 定期保存设备注册表
-                    let registry_path = Path::new(&data_dir).join("devices.json");
-                    if let Err(e) = device_registry.save_to_file(&registry_path) {
-                        log::warn!("Failed to save device registry: {}", e);
-                    }
-                }
-                _ = shutdown_notify.notified() => {
-                    log::info!("Device refresh task received shutdown signal, stopping...");
-                    // 关闭前的最终保存
-                    let registry_path = Path::new(&data_dir).join("devices.json");
-                    if let Err(e) = device_registry.save_to_file(&registry_path) {
-                        log::error!("Failed to save device registry during shutdown: {}", e);
-                    }
-                    break;
-                }
-            }
-        }
-    })
-}
 
 // 启动主机名刷新任务：定期从 ubus 更新主机名绑定
 fn start_hostname_refresh_task(
@@ -551,25 +467,28 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
 
     let subnet_info = SubnetInfo::from_interface(options.iface())?;
 
-    let shared_hostname_bindings = load_hostname_bindings(options.data_dir());
+    let hostname_bindings_vec = crate::storage::hostname::load_hostname_bindings(options.data_dir())
+        .unwrap_or_default();
+    let shared_hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>> = 
+        Arc::new(Mutex::new(
+            hostname_bindings_vec.into_iter().collect(),
+        ));
 
-    let device_registry = Arc::new(DeviceRegistry::new());
     let device_manager = Arc::new(DeviceManager::new(
         options.iface().to_string(),
         subnet_info.clone(),
-        Arc::clone(&device_registry),
-        Some(shutdown_flag.clone()),
+        Arc::clone(&shared_hostname_bindings),
     ));
 
-    if let Err(e) = device_manager.load_initial_devices(options.data_dir()) {
-        if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            log::info!("Initial device loading interrupted by shutdown signal");
-            shutdown_notify.notify_waiters();
-            return Ok(());
-        } else {
-            log::warn!("Failed to load initial devices: {}", e);
-        }
+    if let Err(e) = device_manager.refresh_devices() {
+        log::warn!("Failed to load initial devices: {}", e);
     }
+
+    // 启动设备管理器的后台任务
+    let device_refresh_task = Arc::clone(&device_manager).start_background_task(
+        Duration::from_secs(30),
+        shutdown_notify.clone(),
+    );
 
     // 创建模块上下文：加载 eBPF 程序并配置内核映射
     let module_contexts = create_module_contexts(
@@ -603,24 +522,14 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         shutdown_notify.clone(),
     );
 
-    // 启动设备刷新任务
-    // let device_refresh_task = start_device_refresh_task(
-    //     device_manager,
-    //     device_registry,
-    //     options.data_dir().to_string(),
-    //     shutdown_notify.clone(),
-    // );
-
     // 通过 MonitorManager 为所有模块启动内部循环
     let mut tasks = monitor_manager
         .start_modules(module_contexts, shutdown_notify.clone())
         .await?;
 
     tasks.push(web_task);
-
     tasks.push(hostname_refresh_task);
-
-    // tasks.push(device_refresh_task);
+    tasks.push(device_refresh_task);
 
     // 等待关闭信号
     shutdown_notify.notified().await;

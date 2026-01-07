@@ -6,7 +6,6 @@ use crate::api::ApiRouter;
 use crate::command::Options;
 use crate::device::DeviceManager;
 use crate::storage::traffic::{LongTermRingManager, RealtimeRingManager, ScheduledRateLimit};
-use bandix_common::DeviceTrafficStats;
 use std::collections::HashMap as StdHashMap;
 use std::sync::{Arc, Mutex};
 
@@ -16,13 +15,11 @@ pub use connection::ConnectionModuleContext;
 /// 流量模块上下文
 pub struct TrafficModuleContext {
     pub options: Options,
-    pub device_traffic_stats: Arc<Mutex<StdHashMap<[u8; 6], DeviceTrafficStats>>>,
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
     pub realtime_manager: Arc<RealtimeRingManager>, // 实时1秒采样（仅内存）
     pub long_term_manager: Arc<LongTermRingManager>, // 长期采样（1小时间隔，365天保留，已持久化）
-    pub device_manager: Arc<DeviceManager>,         // 设备发现管理器（ARP表）
-    pub device_registry: Arc<crate::storage::device_registry::DeviceRegistry>, // 中心化设备注册表
+    pub device_manager: Arc<DeviceManager>,         // 统一的设备管理器（包含设备信息和流量统计）
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
     pub last_ebpf_traffic: Arc<Mutex<StdHashMap<[u8; 6], [u64; 4]>>>, // 上次从 eBPF 读取的累积值
@@ -47,17 +44,13 @@ impl TrafficModuleContext {
 
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
 
-        let device_registry = device_manager.get_registry();
-
         Self {
             options,
-            device_traffic_stats: Arc::new(Mutex::new(StdHashMap::new())),
             scheduled_rate_limits: Arc::new(Mutex::new(Vec::new())),
             hostname_bindings,
             realtime_manager,
             long_term_manager,
             device_manager,
-            device_registry,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
             last_ebpf_traffic: Arc::new(Mutex::new(StdHashMap::new())),
@@ -128,13 +121,11 @@ impl Clone for ModuleContext {
         match self {
             ModuleContext::Traffic(ctx) => ModuleContext::Traffic(TrafficModuleContext {
                 options: ctx.options.clone(),
-                device_traffic_stats: Arc::clone(&ctx.device_traffic_stats),
                 scheduled_rate_limits: Arc::clone(&ctx.scheduled_rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
                 realtime_manager: Arc::clone(&ctx.realtime_manager),
                 long_term_manager: Arc::clone(&ctx.long_term_manager),
                 device_manager: Arc::clone(&ctx.device_manager),
-                device_registry: Arc::clone(&ctx.device_registry),
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 last_ebpf_traffic: Arc::clone(&ctx.last_ebpf_traffic),
@@ -177,38 +168,58 @@ impl ModuleType {
                     *srl = scheduled_limits;
                 }
 
+                // 如果开启了持久化，那么从历史数据，加载基线流量
                 if traffic_ctx.options.traffic_persist_history() {
-                    if let Err(e) = traffic_ctx.long_term_manager.load_from_files() {
-                        log::warn!("Failed to load long-term ring files: {}", e);
-                    } else {
-                        log::debug!("Successfully loaded long-term ring files");
+                    // 加载 ring 文件中的设备
+                    match traffic_ctx.long_term_manager.load_from_files() {
+                        Ok(device_macs) => {
+                            let device_count = device_macs.len();
+                            // 将 ring 文件中的设备添加到设备管理器
+                            for mac in device_macs {
+                                traffic_ctx.device_manager.add_offline_device(mac);
+                            }
+                            log::debug!("Successfully loaded long-term ring files");
+                            if device_count > 0 {
+                                log::info!("Restored {} offline devices from ring files", device_count);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to load long-term ring files: {}", e);
+                        }
+                    }
 
-                        // 从持久化数据恢复基线到 device_traffic_stats
-                        let baselines = traffic_ctx.long_term_manager.get_all_baselines();
-                        if !baselines.is_empty() {
-                            let mut stats_map = traffic_ctx.device_traffic_stats.lock().unwrap();
-                            let mut restored_count = 0;
+                    // 从持久化数据恢复基线到设备管理器
+                    let baselines_with_ts = traffic_ctx.long_term_manager.get_all_baselines_with_ts();
+                    if !baselines_with_ts.is_empty() {
+                        let mut restored_count = 0;
 
-                            for (mac, (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)) in
-                                baselines.iter()
-                            {
-                                let stats = stats_map
-                                    .entry(*mac)
-                                    .or_insert_with(|| DeviceTrafficStats::default());
-
+                        for (mac, (ts_ms, wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes, last_online_ts)) in
+                            baselines_with_ts.iter()
+                        {
+                            if let Err(e) = traffic_ctx.device_manager.update_device_traffic_stats(mac, |stats| {
                                 // 恢复WAN和LAN流量字节数作为基线
                                 stats.wan_rx_bytes = *wan_rx_bytes;
                                 stats.wan_tx_bytes = *wan_tx_bytes;
                                 stats.lan_rx_bytes = *lan_rx_bytes;
                                 stats.lan_tx_bytes = *lan_tx_bytes;
+                                
+                                // 使用 ring 文件中的 last_online_ts，如果没有则使用 ts_ms
+                                if *last_online_ts > 0 {
+                                    stats.last_online_ts = *last_online_ts;
+                                } else if stats.last_online_ts == 0 || *ts_ms > stats.last_online_ts {
+                                    stats.last_online_ts = *ts_ms;
+                                }
+                            }) {
+                                log::warn!("Failed to restore baseline for device {:?}: {}", mac, e);
+                            } else {
                                 restored_count += 1;
                             }
-
-                            log::info!(
-                                "Restored baseline for {} devices from persistent storage",
-                                restored_count
-                            );
                         }
+
+                        log::info!(
+                            "Restored baseline for {} devices from persistent storage",
+                            restored_count
+                        );
                     }
                 }
 
@@ -237,12 +248,11 @@ impl ModuleType {
 
                 // 创建流量 API 处理程序
                 let handler = ApiHandler::Traffic(TrafficApiHandler::new(
-                    Arc::clone(&traffic_ctx.device_traffic_stats),
                     Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
                     Arc::clone(&traffic_ctx.realtime_manager),
                     Arc::clone(&traffic_ctx.long_term_manager),
-                    Arc::clone(&traffic_ctx.device_registry),
+                    Arc::clone(&traffic_ctx.device_manager),
                     traffic_ctx.options.clone(),
                 ));
 

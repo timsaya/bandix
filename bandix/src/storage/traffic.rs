@@ -1,5 +1,4 @@
 use anyhow::Context;
-use bandix_common::DeviceTrafficStats;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,11 +45,11 @@ const SLOT_U64S_REALTIME: usize = 15; // 实时数据环形槽位大小（15个u
 // ------------------------------
 // 长期统计常量（1小时采样，365天保留）
 // ------------------------------
-const RING_VERSION_LONG_TERM: u32 = 4; // 长期统计环形文件格式版本（v4 添加了 LAN 统计）
-const SLOT_U64S_LONG_TERM: usize = 29; // 长期统计环形槽位大小（29个u64字段）
-const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（232字节）
+const RING_VERSION_LONG_TERM: u32 = 5; // 长期统计环形文件格式版本（v5 添加了 last_online_ts）
+const SLOT_U64S_LONG_TERM: usize = 30; // 长期统计环形槽位大小（30个u64字段）
+const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（240字节）
 
-// 长期统计环形文件槽位结构（小端字节序，29个u64字段，总共232字节）：
+// 长期统计环形文件槽位结构（小端字节序，30个u64字段，总共240字节）：
 // 索引 | 字段名              | 类型 | 说明
 // -----|---------------------|------|-------------------------------
 //   0   | ts_ms               | u64  | 时间戳（毫秒）
@@ -82,6 +81,7 @@ const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环�
 //  26   | lan_tx_rate.p99     | u64  | 局域网发送速率99th百分位数
 //  27   | lan_rx_bytes        | u64  | 局域网接收总字节数（累积）
 //  28   | lan_tx_bytes        | u64  | 局域网发送总字节数（累积）
+//  29   | last_online_ts      | u64  | 设备最后在线时间戳（毫秒）
 
 // 本地助手函数，用于解析/格式化 MAC 地址（用于文件存储交互）
 fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
@@ -228,7 +228,6 @@ pub struct ScheduledRateLimit {
     pub wan_tx_rate_limit: u64,
 }
 
-
 /// 内存中实时数据环形结构（1秒采样）
 #[derive(Debug, Clone)]
 pub struct RealtimeRing {
@@ -369,6 +368,9 @@ impl LongTermRing {
         slot[27] = stats.lan_rx_bytes;
         slot[28] = stats.lan_tx_bytes;
 
+        // 设备最后在线时间戳（索引29）
+        slot[29] = stats.last_online_ts;
+
         self.slots[idx as usize] = slot;
         self.current_index = idx;
         self.dirty = true;
@@ -422,6 +424,8 @@ impl LongTermRing {
                 // 局域网总流量字节数（索引27-28）
                 lan_rx_bytes: slot[27],
                 lan_tx_bytes: slot[28],
+                // 设备最后在线时间戳（索引29）
+                last_online_ts: slot[29],
             });
         }
 
@@ -437,14 +441,15 @@ impl LongTermRing {
         self.dirty = false;
     }
 
-    /// 获取最新的统计作为基线（返回最新的非空slot的字节数）
-    /// 返回 (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)
-    pub fn get_latest_baseline(&self) -> Option<(u64, u64, u64, u64)> {
+    /// 获取最新的统计作为基线（返回最新的非空slot的字节数和时间戳）
+    /// 返回 (ts_ms, wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes, last_online_ts)
+    pub fn get_latest_baseline_with_ts(&self) -> Option<(u64, u64, u64, u64, u64, u64)> {
         let mut latest_ts = 0u64;
         let mut latest_wan_rx_bytes = 0u64;
         let mut latest_wan_tx_bytes = 0u64;
         let mut latest_lan_rx_bytes = 0u64;
         let mut latest_lan_tx_bytes = 0u64;
+        let mut latest_last_online_ts = 0u64;
 
         for slot in &self.slots {
             let ts = slot[0];
@@ -452,15 +457,21 @@ impl LongTermRing {
                 latest_ts = ts;
                 latest_wan_rx_bytes = slot[13];
                 latest_wan_tx_bytes = slot[14];
-                // 检查是否有 LAN 数据（v4格式），如果 slot[15] 不为0说明有 LAN 速率数据（兼容v3）
-                // 对于 v3 格式，slot[15-28] 都是0，所以直接读取即可
                 latest_lan_rx_bytes = slot[27];
                 latest_lan_tx_bytes = slot[28];
+                latest_last_online_ts = slot[29];
             }
         }
 
         if latest_ts > 0 {
-            Some((latest_wan_rx_bytes, latest_wan_tx_bytes, latest_lan_rx_bytes, latest_lan_tx_bytes))
+            Some((
+                latest_ts,
+                latest_wan_rx_bytes,
+                latest_wan_tx_bytes,
+                latest_lan_rx_bytes,
+                latest_lan_tx_bytes,
+                latest_last_online_ts,
+            ))
         } else {
             None
         }
@@ -485,7 +496,7 @@ impl RealtimeRingManager {
     pub fn insert_metrics_batch(
         &self,
         ts_ms: u64,
-        rows: &Vec<([u8; 6], DeviceTrafficStats)>,
+        rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>,
     ) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
@@ -493,17 +504,18 @@ impl RealtimeRingManager {
 
         let mut rings = self.rings.lock().unwrap();
 
-        for (mac, s) in rows.iter() {
+        for (mac, device) in rows.iter() {
             let ring = rings
                 .entry(*mac)
                 .or_insert_with(|| RealtimeRing::new(self.capacity));
 
             // 将 IPv4 地址 [u8; 4] 转换为 u64（存储在低 32 位）
+            let ipv4 = device.current_ipv4.unwrap_or([0, 0, 0, 0]);
             let ip_address_u64 = u64::from_le_bytes([
-                s.ip_address[0],
-                s.ip_address[1],
-                s.ip_address[2],
-                s.ip_address[3],
+                ipv4[0],
+                ipv4[1],
+                ipv4[2],
+                ipv4[3],
                 0,
                 0,
                 0,
@@ -512,19 +524,19 @@ impl RealtimeRingManager {
 
             let rec: [u64; SLOT_U64S_REALTIME] = [
                 ts_ms,
-                s.total_rx_rate(),
-                s.total_tx_rate(),
-                s.lan_rx_rate,
-                s.lan_tx_rate,
-                s.wan_rx_rate,
-                s.wan_tx_rate,
-                s.total_rx_bytes(),
-                s.total_tx_bytes(),
-                s.lan_rx_bytes,
-                s.lan_tx_bytes,
-                s.wan_rx_bytes,
-                s.wan_tx_bytes,
-                s.last_online_ts,
+                device.total_rx_rate(),
+                device.total_tx_rate(),
+                device.lan_rx_rate,
+                device.lan_tx_rate,
+                device.wan_rx_rate,
+                device.wan_tx_rate,
+                device.total_rx_bytes(),
+                device.total_tx_bytes(),
+                device.lan_rx_bytes,
+                device.lan_tx_bytes,
+                device.wan_rx_bytes,
+                device.wan_tx_bytes,
+                device.last_online_ts,
                 ip_address_u64,
             ];
 
@@ -604,7 +616,7 @@ impl RealtimeRingManager {
 }
 
 /// 指标统计信息（平均值、最大值、最小值、p90、p95、p99）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricStats {
     pub samples: Vec<u64>, // 存储所有样本用于百分位数计算
     pub avg: u64,          // 平均值（均值）
@@ -682,9 +694,10 @@ impl MetricStats {
 
 /// 采样间隔期间设备累积统计信息
 /// 存储广域网络和局域网统计信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStatsAccumulator {
-    pub ts_end_ms: u64,
+    pub ts_start_ms: u64,         // 采样开始时间戳
+    pub ts_end_ms: u64,           // 采样结束时间戳
     pub wan_rx_rate: MetricStats, // 广域网络接收速率统计信息
     pub wan_tx_rate: MetricStats, // 广域网络发送速率统计信息
     pub wan_rx_bytes: u64,        // 广域网络接收总字节数（累积）
@@ -693,11 +706,13 @@ pub struct DeviceStatsAccumulator {
     pub lan_tx_rate: MetricStats, // 局域网发送速率统计信息
     pub lan_rx_bytes: u64,        // 局域网接收总字节数（累积）
     pub lan_tx_bytes: u64,        // 局域网发送总字节数（累积）
+    pub last_online_ts: u64,      // 设备最后在线时间戳（毫秒）
 }
 
 impl DeviceStatsAccumulator {
     pub fn new(ts_ms: u64) -> Self {
         Self {
+            ts_start_ms: ts_ms,
             ts_end_ms: ts_ms,
             wan_rx_rate: MetricStats::new(),
             wan_tx_rate: MetricStats::new(),
@@ -707,23 +722,29 @@ impl DeviceStatsAccumulator {
             lan_tx_rate: MetricStats::new(),
             lan_rx_bytes: 0,
             lan_tx_bytes: 0,
+            last_online_ts: 0,
         }
     }
 
-    pub fn add_sample(&mut self, stats: &DeviceTrafficStats, ts_ms: u64) {
+    pub fn add_sample(&mut self, device: &crate::device::UnifiedDevice, ts_ms: u64) {
         self.ts_end_ms = ts_ms;
         // 累积广域网络统计信息
-        self.wan_rx_rate.add_sample(stats.wan_rx_rate);
-        self.wan_tx_rate.add_sample(stats.wan_tx_rate);
+        self.wan_rx_rate.add_sample(device.wan_rx_rate);
+        self.wan_tx_rate.add_sample(device.wan_tx_rate);
         // 累积局域网统计信息
-        self.lan_rx_rate.add_sample(stats.lan_rx_rate);
-        self.lan_tx_rate.add_sample(stats.lan_tx_rate);
+        self.lan_rx_rate.add_sample(device.lan_rx_rate);
+        self.lan_tx_rate.add_sample(device.lan_tx_rate);
 
         // 保留最新的累积流量值
-        self.wan_rx_bytes = stats.wan_rx_bytes;
-        self.wan_tx_bytes = stats.wan_tx_bytes;
-        self.lan_rx_bytes = stats.lan_rx_bytes;
-        self.lan_tx_bytes = stats.lan_tx_bytes;
+        self.wan_rx_bytes = device.wan_rx_bytes;
+        self.wan_tx_bytes = device.wan_tx_bytes;
+        self.lan_rx_bytes = device.lan_rx_bytes;
+        self.lan_tx_bytes = device.lan_tx_bytes;
+
+        // 保留最新的最后在线时间戳
+        if device.last_online_ts > 0 {
+            self.last_online_ts = device.last_online_ts;
+        }
     }
 
     pub fn finalize(&mut self) {
@@ -762,7 +783,7 @@ impl LongTermRingManager {
     pub fn insert_metrics_batch(
         &self,
         ts_ms: u64,
-        rows: &Vec<([u8; 6], DeviceTrafficStats)>,
+        rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>,
     ) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
@@ -772,12 +793,12 @@ impl LongTermRingManager {
         let ts_sec = ts_ms / 1000;
         let should_sample = ts_sec % LONG_TERM_INTERVAL_SECONDS == 0;
 
-        for (mac, stats) in rows.iter() {
+        for (mac, device) in rows.iter() {
             let accumulator = accumulators
                 .entry(*mac)
                 .or_insert_with(|| DeviceStatsAccumulator::new(ts_ms));
 
-            accumulator.add_sample(stats, ts_ms);
+            accumulator.add_sample(device, ts_ms);
 
             if should_sample {
                 accumulator.finalize();
@@ -787,11 +808,35 @@ impl LongTermRingManager {
                     .entry(*mac)
                     .or_insert_with(|| LongTermRing::new(self.capacity));
 
+                let slot_idx = calc_slot_index_with_interval(
+                    accumulator.ts_end_ms,
+                    self.capacity,
+                    LONG_TERM_INTERVAL_SECONDS,
+                );
+
                 ring.insert_stats(
                     accumulator.ts_end_ms,
                     accumulator,
                     LONG_TERM_INTERVAL_SECONDS,
                 );
+
+                let slot = ring.slots[slot_idx as usize];
+                drop(rings);
+
+                // 整点采样后立即保存 slot 到文件
+                if let Err(e) = self.persist_single_slot(mac, accumulator.ts_end_ms, &slot) {
+                    log::error!(
+                        "Failed to immediately persist slot for MAC {}: {}",
+                        mac_to_filename(mac),
+                        e
+                    );
+                } else {
+                    log::debug!(
+                        "Immediately persisted slot for MAC {} at {}",
+                        mac_to_filename(mac),
+                        accumulator.ts_end_ms
+                    );
+                }
 
                 accumulators.remove(mac);
             }
@@ -827,13 +872,14 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn load_from_files(&self) -> Result<(), anyhow::Error> {
+    pub fn load_from_files(&self) -> Result<Vec<[u8; 6]>, anyhow::Error> {
         let dir = Path::new(&self.base_dir);
         if !dir.exists() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let mut rings = self.rings.lock().unwrap();
+        let mut device_macs = Vec::new();
 
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
@@ -865,17 +911,25 @@ impl LongTermRingManager {
 
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_LONG_TERM || ver == 3 {
+                    if ver == RING_VERSION_LONG_TERM || ver == 4 || ver == 3 {
                         let mut ring = LongTermRing::new(cap);
-                        let slot_size = if ver == 3 { 15 * 8 } else { SLOT_SIZE_LONG_TERM };
+                        let slot_size = if ver == 3 {
+                            15 * 8
+                        } else if ver == 4 {
+                            29 * 8
+                        } else {
+                            SLOT_SIZE_LONG_TERM
+                        };
 
                         for i in 0..(cap as u64) {
                             let slot_result = if ver == 3 {
                                 read_slot_v3_legacy(&f, i, slot_size)
+                            } else if ver == 4 {
+                                read_slot_v4(&f, i)
                             } else {
                                 read_slot_v3(&f, i)
                             };
-                            
+
                             if let Ok(slot) = slot_result {
                                 if slot[0] != 0 {
                                     ring.slots[i as usize] = slot;
@@ -885,10 +939,27 @@ impl LongTermRingManager {
 
                         ring.mark_clean();
                         rings.insert(mac, ring);
+                        device_macs.push(mac);
                     }
                 }
             }
         }
+
+        Ok(device_macs)
+    }
+
+    fn persist_single_slot(
+        &self,
+        mac: &[u8; 6],
+        ts_ms: u64,
+        slot: &[u64; SLOT_U64S_LONG_TERM],
+    ) -> Result<(), anyhow::Error> {
+        let path = ring_file_path_v3(&self.base_dir, mac);
+        let f = init_ring_file_v3(&path, self.capacity)?;
+
+        let idx = calc_slot_index_with_interval(ts_ms, self.capacity, LONG_TERM_INTERVAL_SECONDS);
+        write_slot_v3(&f, idx, slot)?;
+        f.sync_all()?;
 
         Ok(())
     }
@@ -926,18 +997,59 @@ impl LongTermRingManager {
     }
 
     /// 获取所有设备的最新基线（WAN和LAN流量字节数）
-    /// 返回 HashMap<MAC地址, (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)>
-    pub fn get_all_baselines(&self) -> HashMap<[u8; 6], (u64, u64, u64, u64)> {
+    /// 获取所有设备的最新基线和时间戳
+    /// 返回 HashMap<MAC地址, (ts_ms, wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes, last_online_ts)>
+    /// 包含从 ring 文件和内存中的活跃累积器数据
+    pub fn get_all_baselines_with_ts(&self) -> HashMap<[u8; 6], (u64, u64, u64, u64, u64, u64)> {
         let rings = self.rings.lock().unwrap();
         let mut baselines = HashMap::new();
 
         for (mac, ring) in rings.iter() {
-            if let Some(baseline) = ring.get_latest_baseline() {
-                baselines.insert(*mac, baseline);
+            if let Some((ts, wan_rx, wan_tx, lan_rx, lan_tx, last_online_ts)) =
+                ring.get_latest_baseline_with_ts()
+            {
+                baselines.insert(*mac, (ts, wan_rx, wan_tx, lan_rx, lan_tx, last_online_ts));
             }
         }
 
+        drop(rings);
+
+        let accumulators = self.accumulators.lock().unwrap();
+        for (mac, accumulator) in accumulators.iter() {
+            let accumulator_baseline = (
+                accumulator.ts_end_ms.max(accumulator.ts_start_ms),
+                accumulator.wan_rx_bytes,
+                accumulator.wan_tx_bytes,
+                accumulator.lan_rx_bytes,
+                accumulator.lan_tx_bytes,
+                accumulator.last_online_ts,
+            );
+
+            baselines.insert(*mac, accumulator_baseline);
+        }
+
         baselines
+    }
+
+    /// 获取当前活跃的 accumulator 数据（用于查询当前小时的流量）
+    /// 返回 HashMap<MAC地址, (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)>
+    pub fn get_active_accumulators(&self) -> HashMap<[u8; 6], (u64, u64, u64, u64)> {
+        let accumulators = self.accumulators.lock().unwrap();
+        let mut result = HashMap::new();
+
+        for (mac, accumulator) in accumulators.iter() {
+            result.insert(
+                *mac,
+                (
+                    accumulator.wan_rx_bytes,
+                    accumulator.wan_tx_bytes,
+                    accumulator.lan_rx_bytes,
+                    accumulator.lan_tx_bytes,
+                ),
+            );
+        }
+
+        result
     }
 
     pub fn query_stats_by_device(
@@ -981,6 +1093,7 @@ impl LongTermRingManager {
                 lan_tx_rate_p99: 0,
                 lan_rx_bytes: 0,
                 lan_tx_bytes: 0,
+                last_online_ts: 0,
             };
 
             if rows.is_empty() {
@@ -995,6 +1108,7 @@ impl LongTermRingManager {
                 aggregated.wan_tx_bytes = last_row.wan_tx_bytes;
                 aggregated.lan_rx_bytes = last_row.lan_rx_bytes;
                 aggregated.lan_tx_bytes = last_row.lan_tx_bytes;
+                aggregated.last_online_ts = last_row.last_online_ts;
             } else {
                 aggregated.wan_rx_bytes =
                     last_row.wan_rx_bytes.saturating_sub(first_row.wan_rx_bytes);
@@ -1004,9 +1118,11 @@ impl LongTermRingManager {
                     last_row.lan_rx_bytes.saturating_sub(first_row.lan_rx_bytes);
                 aggregated.lan_tx_bytes =
                     last_row.lan_tx_bytes.saturating_sub(first_row.lan_tx_bytes);
+                aggregated.last_online_ts = last_row.last_online_ts;
             }
 
             for row in &rows {
+                aggregated.last_online_ts = aggregated.last_online_ts.max(row.last_online_ts);
                 aggregated.wan_rx_rate_avg = aggregated
                     .wan_rx_rate_avg
                     .saturating_add(row.wan_rx_rate_avg);
@@ -1223,8 +1339,10 @@ impl LongTermRingManager {
                 lan_tx_rate_p99: 0,
                 lan_rx_bytes: 0,
                 lan_tx_bytes: 0,
+                last_online_ts: 0,
             });
 
+            entry.last_online_ts = entry.last_online_ts.max(row.last_online_ts);
             entry.wan_rx_rate_avg = entry.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
             entry.wan_rx_rate_max = entry.wan_rx_rate_max.max(row.wan_rx_rate_max);
             entry.wan_rx_rate_min = entry.wan_rx_rate_min.min(row.wan_rx_rate_min);
@@ -1370,7 +1488,7 @@ fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> 
     } else {
         // 验证头部
         let (ver, _) = read_header(&mut f)?;
-        if ver != RING_VERSION_LONG_TERM {
+        if ver != RING_VERSION_LONG_TERM && ver != 4 && ver != 3 {
             // 文件存在但版本错误，重新初始化
             f.set_len(0)?;
             write_header_v3(&mut f, cap)?;
@@ -1417,7 +1535,11 @@ fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], an
     Ok(out)
 }
 
-fn read_slot_v3_legacy(mut f: &File, idx: u64, slot_size: usize) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
+fn read_slot_v3_legacy(
+    mut f: &File,
+    idx: u64,
+    slot_size: usize,
+) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
     let offset = HEADER_SIZE as u64 + idx * (slot_size as u64);
     let mut bytes = vec![0u8; slot_size];
     f.seek(SeekFrom::Start(offset))?;
@@ -1432,10 +1554,26 @@ fn read_slot_v3_legacy(mut f: &File, idx: u64, slot_size: usize) -> Result<[u64;
     Ok(out)
 }
 
+fn read_slot_v4(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
+    const SLOT_SIZE_V4: usize = 29 * 8;
+    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_V4 as u64);
+    let mut bytes = vec![0u8; SLOT_SIZE_V4];
+    f.seek(SeekFrom::Start(offset))?;
+    f.read_exact(&mut bytes)?;
+    let mut out = [0u64; SLOT_U64S_LONG_TERM];
+    for i in 0..29 {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        out[i] = u64::from_le_bytes(b);
+    }
+    Ok(out)
+}
+
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     fs::create_dir_all(ring_dir(base_dir))
         .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
-    fs::create_dir_all(Path::new(base_dir).join("metrics").join("year"))
+    let year_dir = Path::new(base_dir).join("metrics").join("year");
+    fs::create_dir_all(&year_dir)
         .with_context(|| format!("Failed to create year metrics dir under {}", base_dir))?;
     let bindings = crate::storage::hostname::bindings_path(base_dir);
     if !bindings.exists() {
@@ -1584,6 +1722,8 @@ pub struct MetricsRowWithStats {
     // 总局域网流量（累积字节数）
     pub lan_rx_bytes: u64, // 局域网接收总字节数
     pub lan_tx_bytes: u64, // 局域网发送总字节数
+    // 设备最后在线时间戳
+    pub last_online_ts: u64, // 设备最后在线时间戳（毫秒）
 }
 
 fn limits_schedule_path(base: &str) -> PathBuf {
