@@ -395,7 +395,6 @@ async fn create_module_contexts(
     Ok(module_contexts)
 }
 
-
 // 启动主机名刷新任务：定期从 ubus 更新主机名绑定
 fn start_hostname_refresh_task(
     shared_hostname_bindings: std::sync::Arc<
@@ -467,12 +466,10 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
 
     let subnet_info = SubnetInfo::from_interface(options.iface())?;
 
-    let hostname_bindings_vec = crate::storage::hostname::load_hostname_bindings(options.data_dir())
-        .unwrap_or_default();
-    let shared_hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>> = 
-        Arc::new(Mutex::new(
-            hostname_bindings_vec.into_iter().collect(),
-        ));
+    let hostname_bindings_vec =
+        crate::storage::hostname::load_hostname_bindings(options.data_dir()).unwrap_or_default();
+    let shared_hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>> =
+        Arc::new(Mutex::new(hostname_bindings_vec.into_iter().collect()));
 
     let device_manager = Arc::new(DeviceManager::new(
         options.iface().to_string(),
@@ -480,15 +477,16 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         Arc::clone(&shared_hostname_bindings),
     ));
 
-    if let Err(e) = device_manager.refresh_devices() {
+    if let Err(e) = device_manager
+        .refresh_devices(shutdown_notify.clone())
+        .await
+    {
         log::warn!("Failed to load initial devices: {}", e);
     }
 
     // 启动设备管理器的后台任务
-    let device_refresh_task = Arc::clone(&device_manager).start_background_task(
-        Duration::from_secs(30),
-        shutdown_notify.clone(),
-    );
+    let device_refresh_task = Arc::clone(&device_manager)
+        .start_background_task(Duration::from_secs(60), shutdown_notify.clone());
 
     // 创建模块上下文：加载 eBPF 程序并配置内核映射
     let module_contexts = create_module_contexts(
@@ -503,7 +501,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let mut monitor_manager = MonitorManager::from_contexts(&module_contexts);
     monitor_manager.init_modules(&module_contexts).await?;
 
-    // 使用 API 路由器启动 Web 服务器
+    // 启动 Web 服务器
     let api_router = monitor_manager.get_api_router().clone();
     let options_for_web = options.clone();
     let shutdown_notify_for_web = shutdown_notify.clone();

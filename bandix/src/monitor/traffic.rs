@@ -71,7 +71,8 @@ impl TrafficMonitor {
         if let Err(e) = self.process_traffic_data(ctx, &ingress_ebpf) {
             log::error!("Failed to process traffic data: {}", e);
         }
-
+        
+        // 检测是否要应用限速规则
         if let Err(e) = self.apply_rate_limits(ctx, &ingress_ebpf) {
             log::error!("Failed to update rate limits: {}", e);
         }
@@ -175,6 +176,7 @@ impl TrafficMonitor {
 
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
+        
         // 获取所有设备（包括离线设备），确保它们都被处理
         let all_devices = ctx.device_manager.get_all_devices();
         let all_device_macs: std::collections::HashSet<[u8; 6]> = 

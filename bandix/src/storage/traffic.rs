@@ -45,43 +45,44 @@ const SLOT_U64S_REALTIME: usize = 15; // 实时数据环形槽位大小（15个u
 // ------------------------------
 // 长期统计常量（1小时采样，365天保留）
 // ------------------------------
-const RING_VERSION_LONG_TERM: u32 = 5; // 长期统计环形文件格式版本（v5 添加了 last_online_ts）
-const SLOT_U64S_LONG_TERM: usize = 30; // 长期统计环形槽位大小（30个u64字段）
-const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（240字节）
+const RING_VERSION_LONG_TERM: u32 = 6; // 长期统计环形文件格式版本（v6 改为存储增量，添加 start_ts_ms 和 end_ts_ms）
+const SLOT_U64S_LONG_TERM: usize = 31; // 长期统计环形槽位大小（31个u64字段）
+const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（248字节）
 
-// 长期统计环形文件槽位结构（小端字节序，30个u64字段，总共240字节）：
+// 长期统计环形文件槽位结构（小端字节序，31个u64字段，总共248字节）：
 // 索引 | 字段名              | 类型 | 说明
 // -----|---------------------|------|-------------------------------
-//   0   | ts_ms               | u64  | 时间戳（毫秒）
-//   1   | wan_rx_rate.avg     | u64  | 广域网接收速率平均值
-//   2   | wan_rx_rate.max     | u64  | 广域网接收速率最大值
-//   3   | wan_rx_rate.min     | u64  | 广域网接收速率最小值
-//   4   | wan_rx_rate.p90     | u64  | 广域网接收速率90th百分位数
-//   5   | wan_rx_rate.p95     | u64  | 广域网接收速率95th百分位数
-//   6   | wan_rx_rate.p99     | u64  | 广域网接收速率99th百分位数
-//   7   | wan_tx_rate.avg     | u64  | 广域网发送速率平均值
-//   8   | wan_tx_rate.max     | u64  | 广域网发送速率最大值
-//   9   | wan_tx_rate.min     | u64  | 广域网发送速率最小值
-//  10   | wan_tx_rate.p90     | u64  | 广域网发送速率90th百分位数
-//  11   | wan_tx_rate.p95     | u64  | 广域网发送速率95th百分位数
-//  12   | wan_tx_rate.p99     | u64  | 广域网发送速率99th百分位数
-//  13   | wan_rx_bytes        | u64  | 广域网接收总字节数（累积）
-//  14   | wan_tx_bytes        | u64  | 广域网发送总字节数（累积）
-//  15   | lan_rx_rate.avg     | u64  | 局域网接收速率平均值
-//  16   | lan_rx_rate.max     | u64  | 局域网接收速率最大值
-//  17   | lan_rx_rate.min     | u64  | 局域网接收速率最小值
-//  18   | lan_rx_rate.p90     | u64  | 局域网接收速率90th百分位数
-//  19   | lan_rx_rate.p95     | u64  | 局域网接收速率95th百分位数
-//  20   | lan_rx_rate.p99     | u64  | 局域网接收速率99th百分位数
-//  21   | lan_tx_rate.avg     | u64  | 局域网发送速率平均值
-//  22   | lan_tx_rate.max     | u64  | 局域网发送速率最大值
-//  23   | lan_tx_rate.min     | u64  | 局域网发送速率最小值
-//  24   | lan_tx_rate.p90     | u64  | 局域网发送速率90th百分位数
-//  25   | lan_tx_rate.p95     | u64  | 局域网发送速率95th百分位数
-//  26   | lan_tx_rate.p99     | u64  | 局域网发送速率99th百分位数
-//  27   | lan_rx_bytes        | u64  | 局域网接收总字节数（累积）
-//  28   | lan_tx_bytes        | u64  | 局域网发送总字节数（累积）
-//  29   | last_online_ts      | u64  | 设备最后在线时间戳（毫秒）
+//   0   | start_ts_ms         | u64  | 时间段开始时间戳（毫秒）
+//   1   | end_ts_ms           | u64  | 时间段结束时间戳（毫秒）
+//   2   | wan_rx_rate.avg     | u64  | 广域网接收速率平均值
+//   3   | wan_rx_rate.max     | u64  | 广域网接收速率最大值
+//   4   | wan_rx_rate.min     | u64  | 广域网接收速率最小值
+//   5   | wan_rx_rate.p90     | u64  | 广域网接收速率90th百分位数
+//   6   | wan_rx_rate.p95     | u64  | 广域网接收速率95th百分位数
+//   7   | wan_rx_rate.p99     | u64  | 广域网接收速率99th百分位数
+//   8   | wan_tx_rate.avg     | u64  | 广域网发送速率平均值
+//   9   | wan_tx_rate.max     | u64  | 广域网发送速率最大值
+//  10   | wan_tx_rate.min     | u64  | 广域网发送速率最小值
+//  11   | wan_tx_rate.p90     | u64  | 广域网发送速率90th百分位数
+//  12   | wan_tx_rate.p95     | u64  | 广域网发送速率95th百分位数
+//  13   | wan_tx_rate.p99     | u64  | 广域网发送速率99th百分位数
+//  14   | wan_rx_bytes_inc    | u64  | 广域网接收字节数增量（本时段内）
+//  15   | wan_tx_bytes_inc    | u64  | 广域网发送字节数增量（本时段内）
+//  16   | lan_rx_rate.avg     | u64  | 局域网接收速率平均值
+//  17   | lan_rx_rate.max     | u64  | 局域网接收速率最大值
+//  18   | lan_rx_rate.min     | u64  | 局域网接收速率最小值
+//  19   | lan_rx_rate.p90     | u64  | 局域网接收速率90th百分位数
+//  20   | lan_rx_rate.p95     | u64  | 局域网接收速率95th百分位数
+//  21   | lan_rx_rate.p99     | u64  | 局域网接收速率99th百分位数
+//  22   | lan_tx_rate.avg     | u64  | 局域网发送速率平均值
+//  23   | lan_tx_rate.max     | u64  | 局域网发送速率最大值
+//  24   | lan_tx_rate.min     | u64  | 局域网发送速率最小值
+//  25   | lan_tx_rate.p90     | u64  | 局域网发送速率90th百分位数
+//  26   | lan_tx_rate.p95     | u64  | 局域网发送速率95th百分位数
+//  27   | lan_tx_rate.p99     | u64  | 局域网发送速率99th百分位数
+//  28   | lan_rx_bytes_inc    | u64  | 局域网接收字节数增量（本时段内）
+//  29   | lan_tx_bytes_inc    | u64  | 局域网发送字节数增量（本时段内）
+//  30   | last_online_ts      | u64  | 设备最后在线时间戳（毫秒）
 
 // 本地助手函数，用于解析/格式化 MAC 地址（用于文件存储交互）
 fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
@@ -279,10 +280,10 @@ impl RealtimeRing {
                 wan_tx_rate: slot[6],
                 total_rx_bytes: slot[7],
                 total_tx_bytes: slot[8],
-                lan_rx_bytes: slot[9],
-                lan_tx_bytes: slot[10],
-                wan_rx_bytes: slot[11],
-                wan_tx_bytes: slot[12],
+                lan_rx_bytes_inc: slot[9],
+                lan_tx_bytes_inc: slot[10],
+                wan_rx_bytes_inc: slot[11],
+                wan_tx_bytes_inc: slot[12],
             });
         }
 
@@ -325,51 +326,52 @@ impl LongTermRing {
         let idx = calc_slot_index_with_interval(ts_ms, self.capacity, interval_seconds);
         let mut slot = [0u64; SLOT_U64S_LONG_TERM];
 
-        // ts_ms
-        slot[0] = ts_ms;
+        // 时间段：start_ts_ms 和 end_ts_ms
+        slot[0] = stats.ts_start_ms;
+        slot[1] = stats.ts_end_ms;
 
-        // wan_rx_rate: avg, max, min, p90, p95, p99 (indices 1-6)
-        slot[1] = stats.wan_rx_rate.avg;
-        slot[2] = stats.wan_rx_rate.max;
-        slot[3] = stats.wan_rx_rate.min;
-        slot[4] = stats.wan_rx_rate.p90;
-        slot[5] = stats.wan_rx_rate.p95;
-        slot[6] = stats.wan_rx_rate.p99;
+        // wan_rx_rate: avg, max, min, p90, p95, p99 (indices 2-7)
+        slot[2] = stats.wan_rx_rate.avg;
+        slot[3] = stats.wan_rx_rate.max;
+        slot[4] = stats.wan_rx_rate.min;
+        slot[5] = stats.wan_rx_rate.p90;
+        slot[6] = stats.wan_rx_rate.p95;
+        slot[7] = stats.wan_rx_rate.p99;
 
-        // wan_tx_rate: avg, max, min, p90, p95, p99 (indices 7-12)
-        slot[7] = stats.wan_tx_rate.avg;
-        slot[8] = stats.wan_tx_rate.max;
-        slot[9] = stats.wan_tx_rate.min;
-        slot[10] = stats.wan_tx_rate.p90;
-        slot[11] = stats.wan_tx_rate.p95;
-        slot[12] = stats.wan_tx_rate.p99;
+        // wan_tx_rate: avg, max, min, p90, p95, p99 (indices 8-13)
+        slot[8] = stats.wan_tx_rate.avg;
+        slot[9] = stats.wan_tx_rate.max;
+        slot[10] = stats.wan_tx_rate.min;
+        slot[11] = stats.wan_tx_rate.p90;
+        slot[12] = stats.wan_tx_rate.p95;
+        slot[13] = stats.wan_tx_rate.p99;
 
-        // 广域网络总流量字节数（索引13-14）
-        slot[13] = stats.wan_rx_bytes;
-        slot[14] = stats.wan_tx_bytes;
+        // 广域网络流量字节数增量（索引14-15）
+        slot[14] = stats.get_wan_rx_bytes_increment();
+        slot[15] = stats.get_wan_tx_bytes_increment();
 
-        // lan_rx_rate: avg, max, min, p90, p95, p99 (indices 15-20)
-        slot[15] = stats.lan_rx_rate.avg;
-        slot[16] = stats.lan_rx_rate.max;
-        slot[17] = stats.lan_rx_rate.min;
-        slot[18] = stats.lan_rx_rate.p90;
-        slot[19] = stats.lan_rx_rate.p95;
-        slot[20] = stats.lan_rx_rate.p99;
+        // lan_rx_rate: avg, max, min, p90, p95, p99 (indices 16-21)
+        slot[16] = stats.lan_rx_rate.avg;
+        slot[17] = stats.lan_rx_rate.max;
+        slot[18] = stats.lan_rx_rate.min;
+        slot[19] = stats.lan_rx_rate.p90;
+        slot[20] = stats.lan_rx_rate.p95;
+        slot[21] = stats.lan_rx_rate.p99;
 
-        // lan_tx_rate: avg, max, min, p90, p95, p99 (indices 21-26)
-        slot[21] = stats.lan_tx_rate.avg;
-        slot[22] = stats.lan_tx_rate.max;
-        slot[23] = stats.lan_tx_rate.min;
-        slot[24] = stats.lan_tx_rate.p90;
-        slot[25] = stats.lan_tx_rate.p95;
-        slot[26] = stats.lan_tx_rate.p99;
+        // lan_tx_rate: avg, max, min, p90, p95, p99 (indices 22-27)
+        slot[22] = stats.lan_tx_rate.avg;
+        slot[23] = stats.lan_tx_rate.max;
+        slot[24] = stats.lan_tx_rate.min;
+        slot[25] = stats.lan_tx_rate.p90;
+        slot[26] = stats.lan_tx_rate.p95;
+        slot[27] = stats.lan_tx_rate.p99;
 
-        // 局域网总流量字节数（索引27-28）
-        slot[27] = stats.lan_rx_bytes;
-        slot[28] = stats.lan_tx_bytes;
+        // 局域网流量字节数增量（索引28-29）
+        slot[28] = stats.get_lan_rx_bytes_increment();
+        slot[29] = stats.get_lan_tx_bytes_increment();
 
-        // 设备最后在线时间戳（索引29）
-        slot[29] = stats.last_online_ts;
+        // 设备最后在线时间戳（索引30）
+        slot[30] = stats.last_online_ts;
 
         self.slots[idx as usize] = slot;
         self.current_index = idx;
@@ -380,56 +382,58 @@ impl LongTermRing {
         let mut rows = Vec::new();
 
         for slot in &self.slots {
-            let ts = slot[0];
-            if ts == 0 {
+            let start_ts = slot[0];
+            let end_ts = slot[1];
+            if end_ts == 0 {
                 continue;
             }
-            if ts < start_ms || ts > end_ms {
+            if end_ts < start_ms || start_ts > end_ms {
                 continue;
             }
 
             rows.push(MetricsRowWithStats {
-                ts_ms: slot[0],
-                // wan_rx_rate stats (indices 1-6)
-                wan_rx_rate_avg: slot[1],
-                wan_rx_rate_max: slot[2],
-                wan_rx_rate_min: slot[3],
-                wan_rx_rate_p90: slot[4],
-                wan_rx_rate_p95: slot[5],
-                wan_rx_rate_p99: slot[6],
-                // wan_tx_rate stats (indices 7-12)
-                wan_tx_rate_avg: slot[7],
-                wan_tx_rate_max: slot[8],
-                wan_tx_rate_min: slot[9],
-                wan_tx_rate_p90: slot[10],
-                wan_tx_rate_p95: slot[11],
-                wan_tx_rate_p99: slot[12],
-                // 广域网络总流量字节数（索引13-14）
-                wan_rx_bytes: slot[13],
-                wan_tx_bytes: slot[14],
-                // lan_rx_rate stats (indices 15-20)
-                lan_rx_rate_avg: slot[15],
-                lan_rx_rate_max: slot[16],
-                lan_rx_rate_min: slot[17],
-                lan_rx_rate_p90: slot[18],
-                lan_rx_rate_p95: slot[19],
-                lan_rx_rate_p99: slot[20],
-                // lan_tx_rate stats (indices 21-26)
-                lan_tx_rate_avg: slot[21],
-                lan_tx_rate_max: slot[22],
-                lan_tx_rate_min: slot[23],
-                lan_tx_rate_p90: slot[24],
-                lan_tx_rate_p95: slot[25],
-                lan_tx_rate_p99: slot[26],
-                // 局域网总流量字节数（索引27-28）
-                lan_rx_bytes: slot[27],
-                lan_tx_bytes: slot[28],
-                // 设备最后在线时间戳（索引29）
-                last_online_ts: slot[29],
+                start_ts_ms: slot[0],
+                end_ts_ms: slot[1],
+                // wan_rx_rate stats (indices 2-7)
+                wan_rx_rate_avg: slot[2],
+                wan_rx_rate_max: slot[3],
+                wan_rx_rate_min: slot[4],
+                wan_rx_rate_p90: slot[5],
+                wan_rx_rate_p95: slot[6],
+                wan_rx_rate_p99: slot[7],
+                // wan_tx_rate stats (indices 8-13)
+                wan_tx_rate_avg: slot[8],
+                wan_tx_rate_max: slot[9],
+                wan_tx_rate_min: slot[10],
+                wan_tx_rate_p90: slot[11],
+                wan_tx_rate_p95: slot[12],
+                wan_tx_rate_p99: slot[13],
+                // 广域网络流量字节数增量（索引14-15）
+                wan_rx_bytes_inc: slot[14],
+                wan_tx_bytes_inc: slot[15],
+                // lan_rx_rate stats (indices 16-21)
+                lan_rx_rate_avg: slot[16],
+                lan_rx_rate_max: slot[17],
+                lan_rx_rate_min: slot[18],
+                lan_rx_rate_p90: slot[19],
+                lan_rx_rate_p95: slot[20],
+                lan_rx_rate_p99: slot[21],
+                // lan_tx_rate stats (indices 22-27)
+                lan_tx_rate_avg: slot[22],
+                lan_tx_rate_max: slot[23],
+                lan_tx_rate_min: slot[24],
+                lan_tx_rate_p90: slot[25],
+                lan_tx_rate_p95: slot[26],
+                lan_tx_rate_p99: slot[27],
+                // 局域网流量字节数增量（索引28-29）
+                lan_rx_bytes_inc: slot[28],
+                lan_tx_bytes_inc: slot[29],
+                // 设备最后在线时间戳（索引30）
+                last_online_ts: slot[30],
             });
         }
 
-        rows.sort_by_key(|r| r.ts_ms);
+        rows.sort_by_key(|r| r.end_ts_ms);
         rows
     }
 
@@ -441,35 +445,41 @@ impl LongTermRing {
         self.dirty = false;
     }
 
-    /// 获取最新的统计作为基线（返回最新的非空slot的字节数和时间戳）
-    /// 返回 (ts_ms, wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes, last_online_ts)
+    /// 获取所有增量累加后的总流量作为基线
+    /// 返回 (end_ts_ms, wan_rx_bytes_total, wan_tx_bytes_total, lan_rx_bytes_total, lan_tx_bytes_total, last_online_ts)
     pub fn get_latest_baseline_with_ts(&self) -> Option<(u64, u64, u64, u64, u64, u64)> {
-        let mut latest_ts = 0u64;
-        let mut latest_wan_rx_bytes = 0u64;
-        let mut latest_wan_tx_bytes = 0u64;
-        let mut latest_lan_rx_bytes = 0u64;
-        let mut latest_lan_tx_bytes = 0u64;
+        let mut latest_end_ts = 0u64;
+        let mut total_wan_rx_bytes = 0u64;
+        let mut total_wan_tx_bytes = 0u64;
+        let mut total_lan_rx_bytes = 0u64;
+        let mut total_lan_tx_bytes = 0u64;
         let mut latest_last_online_ts = 0u64;
 
         for slot in &self.slots {
-            let ts = slot[0];
-            if ts != 0 && ts > latest_ts {
-                latest_ts = ts;
-                latest_wan_rx_bytes = slot[13];
-                latest_wan_tx_bytes = slot[14];
-                latest_lan_rx_bytes = slot[27];
-                latest_lan_tx_bytes = slot[28];
-                latest_last_online_ts = slot[29];
+            let start_ts = slot[0];
+            if start_ts == 0 {
+                continue;
+            }
+
+            let end_ts = slot[1];
+            total_wan_rx_bytes = total_wan_rx_bytes.saturating_add(slot[14]);
+            total_wan_tx_bytes = total_wan_tx_bytes.saturating_add(slot[15]);
+            total_lan_rx_bytes = total_lan_rx_bytes.saturating_add(slot[28]);
+            total_lan_tx_bytes = total_lan_tx_bytes.saturating_add(slot[29]);
+
+            if end_ts > latest_end_ts {
+                latest_end_ts = end_ts;
+                latest_last_online_ts = slot[30];
             }
         }
 
-        if latest_ts > 0 {
+        if latest_end_ts > 0 {
             Some((
-                latest_ts,
-                latest_wan_rx_bytes,
-                latest_wan_tx_bytes,
-                latest_lan_rx_bytes,
-                latest_lan_tx_bytes,
+                latest_end_ts,
+                total_wan_rx_bytes,
+                total_wan_tx_bytes,
+                total_lan_rx_bytes,
+                total_lan_tx_bytes,
                 latest_last_online_ts,
             ))
         } else {
@@ -511,16 +521,8 @@ impl RealtimeRingManager {
 
             // 将 IPv4 地址 [u8; 4] 转换为 u64（存储在低 32 位）
             let ipv4 = device.current_ipv4.unwrap_or([0, 0, 0, 0]);
-            let ip_address_u64 = u64::from_le_bytes([
-                ipv4[0],
-                ipv4[1],
-                ipv4[2],
-                ipv4[3],
-                0,
-                0,
-                0,
-                0,
-            ]);
+            let ip_address_u64 =
+                u64::from_le_bytes([ipv4[0], ipv4[1], ipv4[2], ipv4[3], 0, 0, 0, 0]);
 
             let rec: [u64; SLOT_U64S_REALTIME] = [
                 ts_ms,
@@ -604,10 +606,10 @@ impl RealtimeRingManager {
                 wan_tx_rate: rec[6],
                 total_rx_bytes: rec[7],
                 total_tx_bytes: rec[8],
-                lan_rx_bytes: rec[9],
-                lan_tx_bytes: rec[10],
-                wan_rx_bytes: rec[11],
-                wan_tx_bytes: rec[12],
+                lan_rx_bytes_inc: rec[9],
+                lan_tx_bytes_inc: rec[10],
+                wan_rx_bytes_inc: rec[11],
+                wan_tx_bytes_inc: rec[12],
             })
             .collect();
 
@@ -700,13 +702,18 @@ pub struct DeviceStatsAccumulator {
     pub ts_end_ms: u64,           // 采样结束时间戳
     pub wan_rx_rate: MetricStats, // 广域网络接收速率统计信息
     pub wan_tx_rate: MetricStats, // 广域网络发送速率统计信息
-    pub wan_rx_bytes: u64,        // 广域网络接收总字节数（累积）
-    pub wan_tx_bytes: u64,        // 广域网络发送总字节数（累积）
+    pub wan_rx_bytes_start: u64,  // 广域网络接收字节数基线（时段开始时）
+    pub wan_tx_bytes_start: u64,  // 广域网络发送字节数基线（时段开始时）
+    pub wan_rx_bytes: u64,        // 广域网络接收字节数（时段结束时）
+    pub wan_tx_bytes: u64,        // 广域网络发送字节数（时段结束时）
     pub lan_rx_rate: MetricStats, // 局域网接收速率统计信息
     pub lan_tx_rate: MetricStats, // 局域网发送速率统计信息
-    pub lan_rx_bytes: u64,        // 局域网接收总字节数（累积）
-    pub lan_tx_bytes: u64,        // 局域网发送总字节数（累积）
+    pub lan_rx_bytes_start: u64,  // 局域网接收字节数基线（时段开始时）
+    pub lan_tx_bytes_start: u64,  // 局域网发送字节数基线（时段开始时）
+    pub lan_rx_bytes: u64,        // 局域网接收字节数（时段结束时）
+    pub lan_tx_bytes: u64,        // 局域网发送字节数（时段结束时）
     pub last_online_ts: u64,      // 设备最后在线时间戳（毫秒）
+    pub is_first_sample: bool,    // 是否是第一次采样
 }
 
 impl DeviceStatsAccumulator {
@@ -716,32 +723,42 @@ impl DeviceStatsAccumulator {
             ts_end_ms: ts_ms,
             wan_rx_rate: MetricStats::new(),
             wan_tx_rate: MetricStats::new(),
+            wan_rx_bytes_start: 0,
+            wan_tx_bytes_start: 0,
             wan_rx_bytes: 0,
             wan_tx_bytes: 0,
             lan_rx_rate: MetricStats::new(),
             lan_tx_rate: MetricStats::new(),
+            lan_rx_bytes_start: 0,
+            lan_tx_bytes_start: 0,
             lan_rx_bytes: 0,
             lan_tx_bytes: 0,
             last_online_ts: 0,
+            is_first_sample: true,
         }
     }
 
     pub fn add_sample(&mut self, device: &crate::device::UnifiedDevice, ts_ms: u64) {
         self.ts_end_ms = ts_ms;
-        // 累积广域网络统计信息
+
+        if self.is_first_sample {
+            self.wan_rx_bytes_start = device.wan_rx_bytes;
+            self.wan_tx_bytes_start = device.wan_tx_bytes;
+            self.lan_rx_bytes_start = device.lan_rx_bytes;
+            self.lan_tx_bytes_start = device.lan_tx_bytes;
+            self.is_first_sample = false;
+        }
+
         self.wan_rx_rate.add_sample(device.wan_rx_rate);
         self.wan_tx_rate.add_sample(device.wan_tx_rate);
-        // 累积局域网统计信息
         self.lan_rx_rate.add_sample(device.lan_rx_rate);
         self.lan_tx_rate.add_sample(device.lan_tx_rate);
 
-        // 保留最新的累积流量值
         self.wan_rx_bytes = device.wan_rx_bytes;
         self.wan_tx_bytes = device.wan_tx_bytes;
         self.lan_rx_bytes = device.lan_rx_bytes;
         self.lan_tx_bytes = device.lan_tx_bytes;
 
-        // 保留最新的最后在线时间戳
         if device.last_online_ts > 0 {
             self.last_online_ts = device.last_online_ts;
         }
@@ -750,6 +767,24 @@ impl DeviceStatsAccumulator {
     pub fn finalize(&mut self) {
         self.wan_rx_rate.finalize();
         self.wan_tx_rate.finalize();
+        self.lan_rx_rate.finalize();
+        self.lan_tx_rate.finalize();
+    }
+
+    pub fn get_wan_rx_bytes_increment(&self) -> u64 {
+        self.wan_rx_bytes.saturating_sub(self.wan_rx_bytes_start)
+    }
+
+    pub fn get_wan_tx_bytes_increment(&self) -> u64 {
+        self.wan_tx_bytes.saturating_sub(self.wan_tx_bytes_start)
+    }
+
+    pub fn get_lan_rx_bytes_increment(&self) -> u64 {
+        self.lan_rx_bytes.saturating_sub(self.lan_rx_bytes_start)
+    }
+
+    pub fn get_lan_tx_bytes_increment(&self) -> u64 {
+        self.lan_tx_bytes.saturating_sub(self.lan_tx_bytes_start)
     }
 }
 
@@ -772,7 +807,7 @@ impl LongTermRingManager {
             rings: Arc::new(Mutex::new(HashMap::new())),
             base_dir: Path::new(&base_dir)
                 .join("metrics")
-                .join("year")
+                .join("longterm")
                 .to_string_lossy()
                 .to_string(),
             capacity,
@@ -1031,9 +1066,9 @@ impl LongTermRingManager {
         baselines
     }
 
-    /// 获取当前活跃的 accumulator 数据（用于查询当前小时的流量）
-    /// 返回 HashMap<MAC地址, (wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes)>
-    pub fn get_active_accumulators(&self) -> HashMap<[u8; 6], (u64, u64, u64, u64)> {
+    /// 获取当前活跃的 accumulator 的增量数据（用于查询当前小时的增量）
+    /// 返回 HashMap<MAC地址, (wan_rx_bytes_inc, wan_tx_bytes_inc, lan_rx_bytes_inc, lan_tx_bytes_inc)>
+    pub fn get_active_increments(&self) -> HashMap<[u8; 6], (u64, u64, u64, u64)> {
         let accumulators = self.accumulators.lock().unwrap();
         let mut result = HashMap::new();
 
@@ -1041,10 +1076,10 @@ impl LongTermRingManager {
             result.insert(
                 *mac,
                 (
-                    accumulator.wan_rx_bytes,
-                    accumulator.wan_tx_bytes,
-                    accumulator.lan_rx_bytes,
-                    accumulator.lan_tx_bytes,
+                    accumulator.get_wan_rx_bytes_increment(),
+                    accumulator.get_wan_tx_bytes_increment(),
+                    accumulator.get_lan_rx_bytes_increment(),
+                    accumulator.get_lan_tx_bytes_increment(),
                 ),
             );
         }
@@ -1064,7 +1099,8 @@ impl LongTermRingManager {
             let rows = ring.query_stats(start_ms, end_ms);
 
             let mut aggregated = MetricsRowWithStats {
-                ts_ms: start_ms,
+                start_ts_ms: start_ms,
+                end_ts_ms: end_ms,
                 wan_rx_rate_avg: 0,
                 wan_rx_rate_max: 0,
                 wan_rx_rate_min: u64::MAX,
@@ -1077,8 +1113,8 @@ impl LongTermRingManager {
                 wan_tx_rate_p90: 0,
                 wan_tx_rate_p95: 0,
                 wan_tx_rate_p99: 0,
-                wan_rx_bytes: 0,
-                wan_tx_bytes: 0,
+                wan_rx_bytes_inc: 0,
+                wan_tx_bytes_inc: 0,
                 lan_rx_rate_avg: 0,
                 lan_rx_rate_max: 0,
                 lan_rx_rate_min: u64::MAX,
@@ -1091,8 +1127,8 @@ impl LongTermRingManager {
                 lan_tx_rate_p90: 0,
                 lan_tx_rate_p95: 0,
                 lan_tx_rate_p99: 0,
-                lan_rx_bytes: 0,
-                lan_tx_bytes: 0,
+                lan_rx_bytes_inc: 0,
+                lan_tx_bytes_inc: 0,
                 last_online_ts: 0,
             };
 
@@ -1104,20 +1140,24 @@ impl LongTermRingManager {
             let last_row = &rows[rows.len() - 1];
 
             if rows.len() == 1 {
-                aggregated.wan_rx_bytes = last_row.wan_rx_bytes;
-                aggregated.wan_tx_bytes = last_row.wan_tx_bytes;
-                aggregated.lan_rx_bytes = last_row.lan_rx_bytes;
-                aggregated.lan_tx_bytes = last_row.lan_tx_bytes;
+                aggregated.wan_rx_bytes_inc = last_row.wan_rx_bytes_inc;
+                aggregated.wan_tx_bytes_inc = last_row.wan_tx_bytes_inc;
+                aggregated.lan_rx_bytes_inc = last_row.lan_rx_bytes_inc;
+                aggregated.lan_tx_bytes_inc = last_row.lan_tx_bytes_inc;
                 aggregated.last_online_ts = last_row.last_online_ts;
             } else {
-                aggregated.wan_rx_bytes =
-                    last_row.wan_rx_bytes.saturating_sub(first_row.wan_rx_bytes);
-                aggregated.wan_tx_bytes =
-                    last_row.wan_tx_bytes.saturating_sub(first_row.wan_tx_bytes);
-                aggregated.lan_rx_bytes =
-                    last_row.lan_rx_bytes.saturating_sub(first_row.lan_rx_bytes);
-                aggregated.lan_tx_bytes =
-                    last_row.lan_tx_bytes.saturating_sub(first_row.lan_tx_bytes);
+                aggregated.wan_rx_bytes_inc = last_row
+                    .wan_rx_bytes_inc
+                    .saturating_sub(first_row.wan_rx_bytes_inc);
+                aggregated.wan_tx_bytes_inc = last_row
+                    .wan_tx_bytes_inc
+                    .saturating_sub(first_row.wan_tx_bytes_inc);
+                aggregated.lan_rx_bytes_inc = last_row
+                    .lan_rx_bytes_inc
+                    .saturating_sub(first_row.lan_rx_bytes_inc);
+                aggregated.lan_tx_bytes_inc = last_row
+                    .lan_tx_bytes_inc
+                    .saturating_sub(first_row.lan_tx_bytes_inc);
                 aggregated.last_online_ts = last_row.last_online_ts;
             }
 
@@ -1196,40 +1236,10 @@ impl LongTermRingManager {
         let rings = self.rings.lock().unwrap();
         if let Some(ring) = rings.get(mac) {
             let rows = ring.query_stats(start_ms, end_ms);
-
-            if rows.is_empty() {
-                return Ok(Vec::new());
-            }
-
-            let mut increments = Vec::new();
-            let mut prev_rx = rows[0].wan_rx_bytes;
-            let mut prev_tx = rows[0].wan_tx_bytes;
-
-            for (idx, row) in rows.iter().enumerate() {
-                if idx == 0 {
-                    prev_rx = row.wan_rx_bytes;
-                    prev_tx = row.wan_tx_bytes;
-                    continue;
-                }
-
-                let rx_inc = if row.wan_rx_bytes >= prev_rx {
-                    row.wan_rx_bytes - prev_rx
-                } else {
-                    row.wan_rx_bytes
-                };
-
-                let tx_inc = if row.wan_tx_bytes >= prev_tx {
-                    row.wan_tx_bytes - prev_tx
-                } else {
-                    row.wan_tx_bytes
-                };
-
-                increments.push((row.ts_ms, rx_inc, tx_inc));
-
-                prev_rx = row.wan_rx_bytes;
-                prev_tx = row.wan_tx_bytes;
-            }
-
+            let increments: Vec<(u64, u64, u64)> = rows
+                .into_iter()
+                .map(|row| (row.end_ts_ms, row.wan_rx_bytes_inc, row.wan_tx_bytes_inc))
+                .collect();
             Ok(increments)
         } else {
             Ok(Vec::new())
@@ -1248,46 +1258,16 @@ impl LongTermRingManager {
         for (_mac, ring) in rings.iter() {
             let rows = ring.query_stats(start_ms, end_ms);
             for row in rows {
-                let entry = all_rows_by_ts.entry(row.ts_ms).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(row.wan_rx_bytes);
-                entry.1 = entry.1.saturating_add(row.wan_tx_bytes);
+                let entry = all_rows_by_ts.entry(row.end_ts_ms).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(row.wan_rx_bytes_inc);
+                entry.1 = entry.1.saturating_add(row.wan_tx_bytes_inc);
             }
         }
 
-        if all_rows_by_ts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut increments = Vec::new();
-        let mut prev_rx = 0u64;
-        let mut prev_tx = 0u64;
-        let mut is_first = true;
-
-        for (_ts_ms, (rx_bytes, tx_bytes)) in all_rows_by_ts.iter() {
-            if is_first {
-                prev_rx = *rx_bytes;
-                prev_tx = *tx_bytes;
-                is_first = false;
-                continue;
-            }
-
-            let rx_inc = if *rx_bytes >= prev_rx {
-                *rx_bytes - prev_rx
-            } else {
-                *rx_bytes
-            };
-
-            let tx_inc = if *tx_bytes >= prev_tx {
-                *tx_bytes - prev_tx
-            } else {
-                *tx_bytes
-            };
-
-            increments.push((*_ts_ms, rx_inc, tx_inc));
-
-            prev_rx = *rx_bytes;
-            prev_tx = *tx_bytes;
-        }
+        let increments: Vec<(u64, u64, u64)> = all_rows_by_ts
+            .into_iter()
+            .map(|(ts_ms, (rx_bytes, tx_bytes))| (ts_ms, rx_bytes, tx_bytes))
+            .collect();
 
         Ok(increments)
     }
@@ -1309,38 +1289,41 @@ impl LongTermRingManager {
         let mut ts_to_stats: BTreeMap<u64, MetricsRowWithStats> = BTreeMap::new();
 
         for row in all_rows {
-            let entry = ts_to_stats.entry(row.ts_ms).or_insert(MetricsRowWithStats {
-                ts_ms: row.ts_ms,
-                wan_rx_rate_avg: 0,
-                wan_rx_rate_max: 0,
-                wan_rx_rate_min: u64::MAX,
-                wan_rx_rate_p90: 0,
-                wan_rx_rate_p95: 0,
-                wan_rx_rate_p99: 0,
-                wan_tx_rate_avg: 0,
-                wan_tx_rate_max: 0,
-                wan_tx_rate_min: u64::MAX,
-                wan_tx_rate_p90: 0,
-                wan_tx_rate_p95: 0,
-                wan_tx_rate_p99: 0,
-                wan_rx_bytes: 0,
-                wan_tx_bytes: 0,
-                lan_rx_rate_avg: 0,
-                lan_rx_rate_max: 0,
-                lan_rx_rate_min: u64::MAX,
-                lan_rx_rate_p90: 0,
-                lan_rx_rate_p95: 0,
-                lan_rx_rate_p99: 0,
-                lan_tx_rate_avg: 0,
-                lan_tx_rate_max: 0,
-                lan_tx_rate_min: u64::MAX,
-                lan_tx_rate_p90: 0,
-                lan_tx_rate_p95: 0,
-                lan_tx_rate_p99: 0,
-                lan_rx_bytes: 0,
-                lan_tx_bytes: 0,
-                last_online_ts: 0,
-            });
+            let entry = ts_to_stats
+                .entry(row.end_ts_ms)
+                .or_insert(MetricsRowWithStats {
+                    start_ts_ms: row.start_ts_ms,
+                    end_ts_ms: row.end_ts_ms,
+                    wan_rx_rate_avg: 0,
+                    wan_rx_rate_max: 0,
+                    wan_rx_rate_min: u64::MAX,
+                    wan_rx_rate_p90: 0,
+                    wan_rx_rate_p95: 0,
+                    wan_rx_rate_p99: 0,
+                    wan_tx_rate_avg: 0,
+                    wan_tx_rate_max: 0,
+                    wan_tx_rate_min: u64::MAX,
+                    wan_tx_rate_p90: 0,
+                    wan_tx_rate_p95: 0,
+                    wan_tx_rate_p99: 0,
+                    wan_rx_bytes_inc: 0,
+                    wan_tx_bytes_inc: 0,
+                    lan_rx_rate_avg: 0,
+                    lan_rx_rate_max: 0,
+                    lan_rx_rate_min: u64::MAX,
+                    lan_rx_rate_p90: 0,
+                    lan_rx_rate_p95: 0,
+                    lan_rx_rate_p99: 0,
+                    lan_tx_rate_avg: 0,
+                    lan_tx_rate_max: 0,
+                    lan_tx_rate_min: u64::MAX,
+                    lan_tx_rate_p90: 0,
+                    lan_tx_rate_p95: 0,
+                    lan_tx_rate_p99: 0,
+                    lan_rx_bytes_inc: 0,
+                    lan_tx_bytes_inc: 0,
+                    last_online_ts: 0,
+                });
 
             entry.last_online_ts = entry.last_online_ts.max(row.last_online_ts);
             entry.wan_rx_rate_avg = entry.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
@@ -1357,8 +1340,8 @@ impl LongTermRingManager {
             entry.wan_tx_rate_p95 = entry.wan_tx_rate_p95.max(row.wan_tx_rate_p95);
             entry.wan_tx_rate_p99 = entry.wan_tx_rate_p99.max(row.wan_tx_rate_p99);
 
-            entry.wan_rx_bytes = entry.wan_rx_bytes.saturating_add(row.wan_rx_bytes);
-            entry.wan_tx_bytes = entry.wan_tx_bytes.saturating_add(row.wan_tx_bytes);
+            entry.wan_rx_bytes_inc = entry.wan_rx_bytes_inc.saturating_add(row.wan_rx_bytes_inc);
+            entry.wan_tx_bytes_inc = entry.wan_tx_bytes_inc.saturating_add(row.wan_tx_bytes_inc);
 
             entry.lan_rx_rate_avg = entry.lan_rx_rate_avg.saturating_add(row.lan_rx_rate_avg);
             entry.lan_rx_rate_max = entry.lan_rx_rate_max.max(row.lan_rx_rate_max);
@@ -1374,8 +1357,8 @@ impl LongTermRingManager {
             entry.lan_tx_rate_p95 = entry.lan_tx_rate_p95.max(row.lan_tx_rate_p95);
             entry.lan_tx_rate_p99 = entry.lan_tx_rate_p99.max(row.lan_tx_rate_p99);
 
-            entry.lan_rx_bytes = entry.lan_rx_bytes.saturating_add(row.lan_rx_bytes);
-            entry.lan_tx_bytes = entry.lan_tx_bytes.saturating_add(row.lan_tx_bytes);
+            entry.lan_rx_bytes_inc = entry.lan_rx_bytes_inc.saturating_add(row.lan_rx_bytes_inc);
+            entry.lan_tx_bytes_inc = entry.lan_tx_bytes_inc.saturating_add(row.lan_tx_bytes_inc);
         }
 
         for stats in ts_to_stats.values_mut() {
@@ -1572,9 +1555,9 @@ fn read_slot_v4(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], an
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     fs::create_dir_all(ring_dir(base_dir))
         .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
-    let year_dir = Path::new(base_dir).join("metrics").join("year");
-    fs::create_dir_all(&year_dir)
-        .with_context(|| format!("Failed to create year metrics dir under {}", base_dir))?;
+    let longterm_dir = Path::new(base_dir).join("metrics").join("longterm");
+    fs::create_dir_all(&longterm_dir)
+        .with_context(|| format!("Failed to create longterm metrics dir under {}", base_dir))?;
     let bindings = crate::storage::hostname::bindings_path(base_dir);
     if !bindings.exists() {
         File::create(&bindings)?;
@@ -1677,17 +1660,17 @@ pub struct MetricsRow {
     pub wan_tx_rate: u64,
     pub total_rx_bytes: u64,
     pub total_tx_bytes: u64,
-    pub lan_rx_bytes: u64,
-    pub lan_tx_bytes: u64,
-    pub wan_rx_bytes: u64,
-    pub wan_tx_bytes: u64,
+    pub lan_rx_bytes_inc: u64,
+    pub lan_tx_bytes_inc: u64,
+    pub wan_rx_bytes_inc: u64,
+    pub wan_tx_bytes_inc: u64,
 }
 
-/// 带统计信息的指标行（用于多级别采样）
 #[derive(Debug, Clone, Copy)]
 /// 包含广域网络和局域网统计信息的指标行
 pub struct MetricsRowWithStats {
-    pub ts_ms: u64,
+    pub start_ts_ms: u64, // 时间段开始时间戳（毫秒）
+    pub end_ts_ms: u64,   // 时间段结束时间戳（毫秒）
     // 广域网络接收速率统计信息（平均值、最大值、最小值、p90、p95、p99）
     pub wan_rx_rate_avg: u64, // 平均值：典型带宽使用量
     pub wan_rx_rate_max: u64, // 最大值：峰值负载或突发流量
@@ -1702,9 +1685,9 @@ pub struct MetricsRowWithStats {
     pub wan_tx_rate_p90: u64, // 90th 百分位数
     pub wan_tx_rate_p95: u64, // 95th 百分位数
     pub wan_tx_rate_p99: u64, // 99th 百分位数
-    // 总广域网络流量（累积字节数）
-    pub wan_rx_bytes: u64, // 广域网络接收总字节数
-    pub wan_tx_bytes: u64, // 广域网络发送总字节数
+    // 广域网络流量增量（本时段内）
+    pub wan_rx_bytes_inc: u64, // 广域网络接收字节数增量
+    pub wan_tx_bytes_inc: u64, // 广域网络发送字节数增量
     // 局域网接收速率统计信息（平均值、最大值、最小值、p90、p95、p99）
     pub lan_rx_rate_avg: u64, // 平均值：典型带宽使用量
     pub lan_rx_rate_max: u64, // 最大值：峰值负载或突发流量
@@ -1719,9 +1702,9 @@ pub struct MetricsRowWithStats {
     pub lan_tx_rate_p90: u64, // 90th 百分位数
     pub lan_tx_rate_p95: u64, // 95th 百分位数
     pub lan_tx_rate_p99: u64, // 99th 百分位数
-    // 总局域网流量（累积字节数）
-    pub lan_rx_bytes: u64, // 局域网接收总字节数
-    pub lan_tx_bytes: u64, // 局域网发送总字节数
+    // 局域网流量增量（本时段内）
+    pub lan_rx_bytes_inc: u64, // 局域网接收字节数增量
+    pub lan_tx_bytes_inc: u64, // 局域网发送字节数增量
     // 设备最后在线时间戳
     pub last_online_ts: u64, // 设备最后在线时间戳（毫秒）
 }

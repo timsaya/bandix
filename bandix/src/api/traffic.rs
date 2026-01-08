@@ -208,9 +208,9 @@ pub struct DeleteScheduledLimitRequest {
 pub struct TrafficApiHandler {
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-    realtime_manager: Arc<RealtimeRingManager>, // 实时 1 秒采样（仅内存）
-    long_term_manager: Arc<LongTermRingManager>, // 长期采样（1 小时间隔，365 天保留，已持久化）
-    device_manager: Arc<crate::device::DeviceManager>, // 统一的设备管理器（包含设备信息和流量统计）
+    realtime_manager: Arc<RealtimeRingManager>,
+    long_term_manager: Arc<LongTermRingManager>,
+    device_manager: Arc<crate::device::DeviceManager>,
     options: Options,
 }
 
@@ -240,7 +240,7 @@ impl TrafficApiHandler {
             "/api/traffic/devices",
             "/api/traffic/limits/schedule",
             "/api/traffic/metrics",
-            "/api/traffic/metrics/year",
+            "/api/traffic/longterm",
             "/api/traffic/bindings",
             "/api/traffic/usage/ranking",
             "/api/traffic/usage/increments",
@@ -271,9 +271,9 @@ impl TrafficApiHandler {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
             }
-            "/api/traffic/metrics/year" => {
+            "/api/traffic/longterm" => {
                 if request.method == "GET" {
-                    self.handle_metrics_year(request).await
+                    self.handle_longterm(request).await
                 } else {
                     Ok(HttpResponse::error(405, "Method not allowed".to_string()))
                 }
@@ -309,7 +309,7 @@ impl TrafficApiHandler {
     fn calculate_time_range(period: &str) -> Option<(u64, u64)> {
         let now = Local::now();
         let now_ms = now.timestamp_millis() as u64;
-        
+
         let start_ms = match period {
             "today" => {
                 let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
@@ -318,7 +318,8 @@ impl TrafficApiHandler {
             }
             "week" => {
                 let days_from_monday = now.weekday().num_days_from_monday();
-                let week_start = now.date_naive()
+                let week_start = now
+                    .date_naive()
                     .checked_sub_signed(chrono::Duration::days(days_from_monday as i64))
                     .unwrap()
                     .and_hms_opt(0, 0, 0)
@@ -327,7 +328,8 @@ impl TrafficApiHandler {
                 week_start_local.timestamp_millis() as u64
             }
             "month" => {
-                let month_start = now.date_naive()
+                let month_start = now
+                    .date_naive()
                     .with_day(1)
                     .unwrap()
                     .and_hms_opt(0, 0, 0)
@@ -338,183 +340,115 @@ impl TrafficApiHandler {
             "all" => return None,
             _ => return None,
         };
-        
+
         Some((start_ms, now_ms))
     }
 
     /// 处理/api/devices endpoint
-    /// 查询参数：
     ///   - period: "today" | "week" | "month" | "all" (可选，默认为 "all")
     async fn handle_devices(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        let period = request.query_params
+        let period = request
+            .query_params
             .get("period")
             .map(|s| s.to_lowercase())
             .unwrap_or_else(|| "all".to_string());
-        
+
         let time_range = Self::calculate_time_range(&period);
-        
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
         let all_devices = self.device_manager.get_all_devices();
-        let all_macs: HashSet<[u8; 6]> = all_devices.iter().map(|d| d.mac).collect();
 
-        let devices: Vec<DeviceInfo> = all_macs
+        let devices: Vec<DeviceInfo> = all_devices
             .into_iter()
-            .map(|mac| {
-                // 格式化 MAC 地址
+            .map(|device| {
+                let mac = device.mac;
                 let mac_str = format_mac(&mac);
 
-                // 从设备管理器获取设备信息（包含所有信息：IP、流量统计等）
-                let device = self.device_manager.get_device_by_mac(&mac);
-                
-                let (final_ipv4, ipv6_addresses_set) = if let Some(device) = &device {
-                    let final_ipv4 = device.get_current_ipv4();
-                    let mut ipv6_set: HashSet<[u8; 16]> = HashSet::new();
-                    
-                    // 添加所有 IPv6 地址（当前和历史）
-                    for addr in device.get_all_ipv6() {
-                        if addr != [0u8; 16] {
-                            ipv6_set.insert(addr);
-                        }
-                    }
-                    
-                    (final_ipv4, ipv6_set)
-                } else {
-                    // 设备不存在，使用默认值
-                    ([0, 0, 0, 0], HashSet::new())
-                };
+                // 获取 IPv4 和 IPv6 地址
+                let final_ipv4 = device.get_current_ipv4();
+                let mut ipv6_set: HashSet<[u8; 16]> = HashSet::new();
 
-                // 格式化IP address
+                for addr in device.get_all_ipv6() {
+                    if addr != [0u8; 16] {
+                        ipv6_set.insert(addr);
+                    }
+                }
+
                 let ip_str = format!(
                     "{}.{}.{}.{}",
                     final_ipv4[0], final_ipv4[1], final_ipv4[2], final_ipv4[3]
                 );
 
-                // 转换为格式化的字符串并按字典序排序
-                let mut ipv6_addresses: Vec<String> = ipv6_addresses_set
+                let mut ipv6_addresses: Vec<String> = ipv6_set
                     .iter()
                     .map(|addr| crate::utils::network_utils::format_ipv6(addr))
                     .collect();
                 ipv6_addresses.sort();
 
-                // Get hostname from device or bindings
-                let hostname = device.as_ref()
-                    .map(|d| d.hostname.clone())
-                    .filter(|h| !h.is_empty())
-                    .or_else(|| bindings_map.get(&mac).cloned())
-                    .unwrap_or_default();
+                let hostname = if !device.hostname.is_empty() {
+                    device.hostname.clone()
+                } else {
+                    bindings_map.get(&mac).cloned().unwrap_or_default()
+                };
 
-                // 如果指定了时间范围，计算该时间范围内的流量增量
-                let (final_total_rx_bytes, final_total_tx_bytes, final_lan_rx_bytes, 
-                      final_lan_tx_bytes, final_wan_rx_bytes, final_wan_tx_bytes) = 
-                    if let Some((start_ms, end_ms)) = time_range {
-                        // 检查结束时间是否在当前小时内（需要从 checkpoint 获取数据）
-                        let now_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or(Duration::from_secs(0))
-                            .as_millis() as u64;
-                        let now_sec = now_ms / 1000;
-                        let current_hour_start = (now_sec / 3600) * 3600;
-                        let end_sec = end_ms / 1000;
-                        let end_hour_start = (end_sec / 3600) * 3600;
-                        let is_current_hour = end_hour_start == current_hour_start;
+                // 计算指定时间段的流量
+                let (
+                    final_total_rx_bytes,
+                    final_total_tx_bytes,
+                    final_lan_rx_bytes,
+                    final_lan_tx_bytes,
+                    final_wan_rx_bytes,
+                    final_wan_tx_bytes,
+                ) = if let Some((start_ms, end_ms)) = time_range {
+                    // 查询时间段内的增量（从ring文件累加已保存的增量）
+                    let mut period_wan_rx = 0u64;
+                    let mut period_wan_tx = 0u64;
+                    let mut period_lan_rx = 0u64;
+                    let mut period_lan_tx = 0u64;
 
-                        // 从长期数据查询该时间范围内的流量增量
-                        if let Ok(stats_rows) = self.long_term_manager.query_stats(&mac, start_ms, end_ms) {
-                            // 获取开始时间点的数据（作为起始基线）
-                            let start_baseline = stats_rows.first().map(|row| {
-                                (row.wan_rx_bytes, row.wan_tx_bytes, row.lan_rx_bytes, row.lan_tx_bytes)
-                            }).unwrap_or((0, 0, 0, 0));
-                            
-                            // 获取结束时间点的数据
-                            let mut end_baseline = if !stats_rows.is_empty() {
-                                stats_rows.last().map(|row| {
-                                    (row.wan_rx_bytes, row.wan_tx_bytes, row.lan_rx_bytes, row.lan_tx_bytes)
-                                }).unwrap_or((0, 0, 0, 0))
-                            } else {
-                                (0, 0, 0, 0)
-                            };
-
-                            // 如果结束时间在当前小时内，尝试从内存中的累积器获取最新数据
-                            if is_current_hour {
-                                let active_accumulators = self.long_term_manager.get_active_accumulators();
-                                if let Some(&(wan_rx, wan_tx, lan_rx, lan_tx)) = active_accumulators.get(&mac) {
-                                    // 使用内存中累积器的数据作为结束值（更准确）
-                                    end_baseline = (wan_rx, wan_tx, lan_rx, lan_tx);
-                                }
-                            }
-                            
-                            // 计算增量
-                            let period_wan_rx = end_baseline.0.saturating_sub(start_baseline.0);
-                            let period_wan_tx = end_baseline.1.saturating_sub(start_baseline.1);
-                            let period_lan_rx = end_baseline.2.saturating_sub(start_baseline.2);
-                            let period_lan_tx = end_baseline.3.saturating_sub(start_baseline.3);
-                            
-                            (period_wan_rx + period_lan_rx, 
-                             period_wan_tx + period_lan_tx,
-                             period_lan_rx,
-                             period_lan_tx,
-                             period_wan_rx,
-                             period_wan_tx)
-                        } else {
-                            // 查询失败，如果是在当前小时内，尝试使用内存中的累积器数据
-                            if is_current_hour {
-                                let active_accumulators = self.long_term_manager.get_active_accumulators();
-                                if let Some(&(wan_rx, wan_tx, lan_rx, lan_tx)) = active_accumulators.get(&mac) {
-                                    // 使用内存中累积器的数据，起始基线为 0（因为没有历史数据）
-                                    (wan_rx + lan_rx, wan_tx + lan_tx, lan_rx, lan_tx, wan_rx, wan_tx)
-                                } else {
-                                    // 没有累积器数据，使用当前统计值
-                                    if let Some(device) = &device {
-                                        (device.total_rx_bytes(), device.total_tx_bytes(), device.lan_rx_bytes, device.lan_tx_bytes, device.wan_rx_bytes, device.wan_tx_bytes)
-                                    } else {
-                                        (0, 0, 0, 0, 0, 0)
-                                    }
-                                }
-                            } else {
-                                // 不在当前小时内，使用当前统计值
-                                if let Some(device) = &device {
-                                    (device.total_rx_bytes(), device.total_tx_bytes(), device.lan_rx_bytes, device.lan_tx_bytes, device.wan_rx_bytes, device.wan_tx_bytes)
-                                } else {
-                                    (0, 0, 0, 0, 0, 0)
-                                }
-                            }
+                    // 从ring文件获取start_ms到end_ms之间已保存的增量
+                    if let Ok(stats_rows) =
+                        self.long_term_manager.query_stats(&mac, start_ms, end_ms)
+                    {
+                        for row in &stats_rows {
+                            period_wan_rx = period_wan_rx.saturating_add(row.wan_rx_bytes_inc);
+                            period_wan_tx = period_wan_tx.saturating_add(row.wan_tx_bytes_inc);
+                            period_lan_rx = period_lan_rx.saturating_add(row.lan_rx_bytes_inc);
+                            period_lan_tx = period_lan_tx.saturating_add(row.lan_tx_bytes_inc);
                         }
-                    } else {
-                        // period == "all"，使用累计流量
-                        // 优先使用内存中的累积器数据（如果存在，包含当前小时的累积数据）
-                        let active_accumulators = self.long_term_manager.get_active_accumulators();
-                        if let Some(&(wan_rx_acc, wan_tx_acc, lan_rx_acc, lan_tx_acc)) = 
-                            active_accumulators.get(&mac) {
-                            // 使用内存中累积器的数据（更准确，包含当前小时的累积数据）
-                            (wan_rx_acc + lan_rx_acc,
-                             wan_tx_acc + lan_tx_acc,
-                             lan_rx_acc,
-                             lan_tx_acc,
-                             wan_rx_acc,
-                             wan_tx_acc)
-                        } else {
-                            // 没有累积器数据，使用当前统计值
-                            if let Some(device) = &device {
-                                (device.total_rx_bytes(), device.total_tx_bytes(), device.lan_rx_bytes, device.lan_tx_bytes, device.wan_rx_bytes, device.wan_tx_bytes)
-                            } else {
-                                (0, 0, 0, 0, 0, 0)
-                            }
-                        }
-                    };
+                    }
 
-                // 从 device 获取流量统计信息
-                let (total_rx_rate, total_tx_rate, wan_rx_rate_limit, wan_tx_rate_limit,
-                     lan_rx_rate, lan_tx_rate, wan_rx_rate, wan_tx_rate, last_online_ts) = 
-                    if let Some(device) = &device {
-                        (device.total_rx_rate(), device.total_tx_rate(), 
-                         device.wan_rx_rate_limit, device.wan_tx_rate_limit,
-                         device.lan_rx_rate, device.lan_tx_rate,
-                         device.wan_rx_rate, device.wan_tx_rate, device.last_online_ts)
-                    } else {
-                        (0, 0, 0, 0, 0, 0, 0, 0, 0)
-                    };
+                    // 加上当前小时的增量（accumulator中是最新数据，ring文件1小时才保存一次）
+                    let active_increments = self.long_term_manager.get_active_increments();
+                    if let Some(&(wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) =
+                        active_increments.get(&mac)
+                    {
+                        period_wan_rx = period_wan_rx.saturating_add(wan_rx_inc);
+                        period_wan_tx = period_wan_tx.saturating_add(wan_tx_inc);
+                        period_lan_rx = period_lan_rx.saturating_add(lan_rx_inc);
+                        period_lan_tx = period_lan_tx.saturating_add(lan_tx_inc);
+                    }
+
+                    (
+                        period_wan_rx + period_lan_rx,
+                        period_wan_tx + period_lan_tx,
+                        period_lan_rx,
+                        period_lan_tx,
+                        period_wan_rx,
+                        period_wan_tx,
+                    )
+                } else {
+                    // period == "all"，使用device的总累积流量（最新最准确）
+                    (
+                        device.total_rx_bytes(),
+                        device.total_tx_bytes(),
+                        device.lan_rx_bytes,
+                        device.lan_tx_bytes,
+                        device.wan_rx_bytes,
+                        device.wan_tx_bytes,
+                    )
+                };
 
                 DeviceInfo {
                     ip: ip_str,
@@ -523,31 +457,20 @@ impl TrafficApiHandler {
                     hostname,
                     total_rx_bytes: final_total_rx_bytes,
                     total_tx_bytes: final_total_tx_bytes,
-                    total_rx_rate,
-                    total_tx_rate,
-                    wan_rx_rate_limit,
-                    wan_tx_rate_limit,
+                    total_rx_rate: device.total_rx_rate(),
+                    total_tx_rate: device.total_tx_rate(),
+                    wan_rx_rate_limit: device.wan_rx_rate_limit,
+                    wan_tx_rate_limit: device.wan_tx_rate_limit,
                     lan_rx_bytes: final_lan_rx_bytes,
                     lan_tx_bytes: final_lan_tx_bytes,
-                    lan_rx_rate,
-                    lan_tx_rate,
+                    lan_rx_rate: device.lan_rx_rate,
+                    lan_tx_rate: device.lan_tx_rate,
                     wan_rx_bytes: final_wan_rx_bytes,
                     wan_tx_bytes: final_wan_tx_bytes,
-                    wan_rx_rate,
-                    wan_tx_rate,
-                    last_online_ts,
+                    wan_rx_rate: device.wan_rx_rate,
+                    wan_tx_rate: device.wan_tx_rate,
+                    last_online_ts: device.last_online_ts,
                 }
-            })
-            .filter(|device| {
-                // 允许显示有流量数据或基线数据的设备
-                // 即使 last_online_ts == 0，如果有累计流量，也应该显示
-                device.last_online_ts > 0 || 
-                device.total_rx_bytes > 0 || 
-                device.total_tx_bytes > 0 ||
-                device.lan_rx_bytes > 0 ||
-                device.lan_tx_bytes > 0 ||
-                device.wan_rx_bytes > 0 ||
-                device.wan_tx_bytes > 0
             })
             .collect();
 
@@ -619,10 +542,10 @@ impl TrafficApiHandler {
                             r.wan_tx_rate,
                             r.total_rx_bytes,
                             r.total_tx_bytes,
-                            r.lan_rx_bytes,
-                            r.lan_tx_bytes,
-                            r.wan_rx_bytes,
-                            r.wan_tx_bytes,
+                            r.lan_rx_bytes_inc,
+                            r.lan_tx_bytes_inc,
+                            r.wan_rx_bytes_inc,
+                            r.wan_tx_bytes_inc,
                         ]
                     })
                     .collect();
@@ -641,13 +564,9 @@ impl TrafficApiHandler {
         }
     }
 
-    /// 处理/api/traffic/metrics/year endpoint - 年级统计（已持久化）
-    async fn handle_metrics_year(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    /// 处理/api/traffic/longterm endpoint - 长期统计数据（1小时采样，365天保留）
+    async fn handle_longterm(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let mac_opt = request.query_params.get("mac").cloned();
-
 
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -662,7 +581,8 @@ impl TrafficApiHandler {
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    self.long_term_manager.query_stats_aggregate_all(start_ms, end_ms),
+                    self.long_term_manager
+                        .query_stats_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
@@ -678,22 +598,28 @@ impl TrafficApiHandler {
             }
         } else {
             (
-                self.long_term_manager.query_stats_aggregate_all(start_ms, end_ms),
+                self.long_term_manager
+                    .query_stats_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
         };
 
         match rows_result {
             Ok(rows) => {
-                // 转换为包含统计信息的数组格式：
-                // [ts_ms, wan_rx_rate_avg, wan_rx_rate_max, wan_rx_rate_min, wan_rx_rate_p90, wan_rx_rate_p95, wan_rx_rate_p99,
+                // 转换为包含完整统计信息的数组格式：
+                // [start_ts_ms, end_ts_ms,
+                //  wan_rx_rate_avg, wan_rx_rate_max, wan_rx_rate_min, wan_rx_rate_p90, wan_rx_rate_p95, wan_rx_rate_p99,
                 //  wan_tx_rate_avg, wan_tx_rate_max, wan_tx_rate_min, wan_tx_rate_p90, wan_tx_rate_p95, wan_tx_rate_p99,
-                //  wan_rx_bytes, wan_tx_bytes]
+                //  wan_rx_bytes_inc, wan_tx_bytes_inc,
+                //  lan_rx_rate_avg, lan_rx_rate_max, lan_rx_rate_min, lan_rx_rate_p90, lan_rx_rate_p95, lan_rx_rate_p99,
+                //  lan_tx_rate_avg, lan_tx_rate_max, lan_tx_rate_min, lan_tx_rate_p90, lan_tx_rate_p95, lan_tx_rate_p99,
+                //  lan_rx_bytes_inc, lan_tx_bytes_inc]
                 let metrics: Vec<Vec<u64>> = rows
                     .iter()
                     .map(|r| {
                         vec![
-                            r.ts_ms,
+                            r.start_ts_ms,
+                            r.end_ts_ms,
                             r.wan_rx_rate_avg,
                             r.wan_rx_rate_max,
                             r.wan_rx_rate_min,
@@ -706,8 +632,22 @@ impl TrafficApiHandler {
                             r.wan_tx_rate_p90,
                             r.wan_tx_rate_p95,
                             r.wan_tx_rate_p99,
-                            r.wan_rx_bytes,
-                            r.wan_tx_bytes,
+                            r.wan_rx_bytes_inc,
+                            r.wan_tx_bytes_inc,
+                            r.lan_rx_rate_avg,
+                            r.lan_rx_rate_max,
+                            r.lan_rx_rate_min,
+                            r.lan_rx_rate_p90,
+                            r.lan_rx_rate_p95,
+                            r.lan_rx_rate_p99,
+                            r.lan_tx_rate_avg,
+                            r.lan_tx_rate_max,
+                            r.lan_tx_rate_min,
+                            r.lan_tx_rate_p90,
+                            r.lan_tx_rate_p95,
+                            r.lan_tx_rate_p99,
+                            r.lan_rx_bytes_inc,
+                            r.lan_tx_bytes_inc,
                         ]
                     })
                     .collect();
@@ -942,7 +882,6 @@ impl TrafficApiHandler {
         &self,
         request: &HttpRequest,
     ) -> Result<HttpResponse, anyhow::Error> {
-
         // 从查询参数解析时间范围
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -972,8 +911,11 @@ impl TrafficApiHandler {
             ));
         }
 
-        // 查询所有设备的统计信息
-        let device_stats = match self.long_term_manager.query_stats_by_device(start_ms, end_ms) {
+        // 查询所有设备的统计信息（已保存到ring的数据）
+        let mut device_stats = match self
+            .long_term_manager
+            .query_stats_by_device(start_ms, end_ms)
+        {
             Ok(stats) => stats,
             Err(e) => {
                 return Ok(HttpResponse::error(
@@ -982,6 +924,53 @@ impl TrafficApiHandler {
                 ));
             }
         };
+
+        // 加上当前小时的增量（从accumulator获取）
+        let active_increments = self.long_term_manager.get_active_increments();
+        for (mac, (wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) in active_increments.iter() {
+            let entry = device_stats.entry(*mac).or_insert_with(|| {
+                use crate::storage::traffic::MetricsRowWithStats;
+                MetricsRowWithStats {
+                    start_ts_ms: start_ms,
+                    end_ts_ms: end_ms,
+                    wan_rx_rate_avg: 0,
+                    wan_rx_rate_max: 0,
+                    wan_rx_rate_min: 0,
+                    wan_rx_rate_p90: 0,
+                    wan_rx_rate_p95: 0,
+                    wan_rx_rate_p99: 0,
+                    wan_tx_rate_avg: 0,
+                    wan_tx_rate_max: 0,
+                    wan_tx_rate_min: 0,
+                    wan_tx_rate_p90: 0,
+                    wan_tx_rate_p95: 0,
+                    wan_tx_rate_p99: 0,
+                    wan_rx_bytes_inc: 0,
+                    wan_tx_bytes_inc: 0,
+                    lan_rx_rate_avg: 0,
+                    lan_rx_rate_max: 0,
+                    lan_rx_rate_min: 0,
+                    lan_rx_rate_p90: 0,
+                    lan_rx_rate_p95: 0,
+                    lan_rx_rate_p99: 0,
+                    lan_tx_rate_avg: 0,
+                    lan_tx_rate_max: 0,
+                    lan_tx_rate_min: 0,
+                    lan_tx_rate_p90: 0,
+                    lan_tx_rate_p95: 0,
+                    lan_tx_rate_p99: 0,
+                    lan_rx_bytes_inc: 0,
+                    lan_tx_bytes_inc: 0,
+                    last_online_ts: 0,
+                }
+            });
+            
+            // 加上当前小时的增量
+            entry.wan_rx_bytes_inc = entry.wan_rx_bytes_inc.saturating_add(*wan_rx_inc);
+            entry.wan_tx_bytes_inc = entry.wan_tx_bytes_inc.saturating_add(*wan_tx_inc);
+            entry.lan_rx_bytes_inc = entry.lan_rx_bytes_inc.saturating_add(*lan_rx_inc);
+            entry.lan_tx_bytes_inc = entry.lan_tx_bytes_inc.saturating_add(*lan_tx_inc);
+        }
 
         if device_stats.is_empty() {
             let response = DeviceUsageRankingResponse {
@@ -1006,22 +995,24 @@ impl TrafficApiHandler {
         let mut total_tx_bytes = 0u64;
 
         for (mac, stats) in device_stats.iter() {
-            let total_device_bytes = stats.wan_rx_bytes + stats.wan_tx_bytes;
+            let total_device_bytes = stats.wan_rx_bytes_inc + stats.wan_tx_bytes_inc;
             total_bytes = total_bytes.saturating_add(total_device_bytes);
-            total_rx_bytes = total_rx_bytes.saturating_add(stats.wan_rx_bytes);
-            total_tx_bytes = total_tx_bytes.saturating_add(stats.wan_tx_bytes);
+            total_rx_bytes = total_rx_bytes.saturating_add(stats.wan_rx_bytes_inc);
+            total_tx_bytes = total_tx_bytes.saturating_add(stats.wan_tx_bytes_inc);
 
             let mac_str = format_mac(mac);
-            
+
             // 从设备管理器获取设备信息
             let device = self.device_manager.get_device_by_mac(mac);
-            let hostname = device.as_ref()
+            let hostname = device
+                .as_ref()
                 .map(|d| d.hostname.clone())
                 .filter(|h| !h.is_empty())
                 .or_else(|| bindings_map.get(mac).cloned())
                 .unwrap_or_default();
 
-            let ip_address = device.as_ref()
+            let ip_address = device
+                .as_ref()
                 .and_then(|d| d.current_ipv4)
                 .unwrap_or([0, 0, 0, 0]);
 
@@ -1035,8 +1026,8 @@ impl TrafficApiHandler {
                 hostname,
                 ip: ip_str,
                 total_bytes: total_device_bytes,
-                rx_bytes: stats.wan_rx_bytes,
-                tx_bytes: stats.wan_tx_bytes,
+                rx_bytes: stats.wan_rx_bytes_inc,
+                tx_bytes: stats.wan_tx_bytes_inc,
                 percentage: 0.0, // Will calculate after sorting
                 rank: 0,         // Will set after sorting
             });
@@ -1079,7 +1070,6 @@ impl TrafficApiHandler {
         &self,
         request: &HttpRequest,
     ) -> Result<HttpResponse, anyhow::Error> {
-
         // 解析聚合模式
         let aggregation = request
             .query_params
@@ -1119,21 +1109,56 @@ impl TrafficApiHandler {
             ));
         }
 
-        // 查询增量
-        let hourly_increments = if let Some(mac_str) = request.query_params.get("mac") {
+        // 查询增量（已保存到ring的数据）
+        let mac_param = request.query_params.get("mac");
+        let query_mac = if let Some(mac_str) = mac_param {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
-                self.long_term_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
+                None
             } else {
                 match crate::utils::network_utils::parse_mac_address(mac_str) {
-                    Ok(mac) => self.long_term_manager.query_time_series_increments(&mac, start_ms, end_ms)?,
+                    Ok(mac) => Some(mac),
                     Err(e) => {
                         return Ok(HttpResponse::error(400, format!("Invalid MAC: {}", e)));
                     }
                 }
             }
         } else {
-            self.long_term_manager.query_time_series_increments_aggregate(start_ms, end_ms)?
+            None
         };
+
+        let mut hourly_increments = if let Some(mac) = query_mac {
+            self.long_term_manager
+                .query_time_series_increments(&mac, start_ms, end_ms)?
+        } else {
+            self.long_term_manager
+                .query_time_series_increments_aggregate(start_ms, end_ms)?
+        };
+
+        // 加上当前小时的增量（从accumulator获取）
+        let current_hour_start = (now_ms / 1000 / 3600) * 3600 * 1000;
+        let active_increments = self.long_term_manager.get_active_increments();
+        
+        if let Some(mac) = query_mac {
+            // 查询单个设备
+            if let Some(&(wan_rx_inc, wan_tx_inc, _lan_rx_inc, _lan_tx_inc)) =
+                active_increments.get(&mac)
+            {
+                hourly_increments.push((current_hour_start, wan_rx_inc, wan_tx_inc));
+            }
+        } else {
+            // 查询所有设备（聚合）
+            let mut total_rx = 0u64;
+            let mut total_tx = 0u64;
+            for (_mac, (wan_rx_inc, wan_tx_inc, _lan_rx_inc, _lan_tx_inc)) in
+                active_increments.iter()
+            {
+                total_rx = total_rx.saturating_add(*wan_rx_inc);
+                total_tx = total_tx.saturating_add(*wan_tx_inc);
+            }
+            if total_rx > 0 || total_tx > 0 {
+                hourly_increments.push((current_hour_start, total_rx, total_tx));
+            }
+        }
 
         let mac_label = request
             .query_params
