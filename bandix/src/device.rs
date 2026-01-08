@@ -222,7 +222,7 @@ impl DeviceManager {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 5 {
+                if parts.len() < 4 {
                     continue;
                 }
 
@@ -269,7 +269,7 @@ impl DeviceManager {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() < 5 {
+                if parts.len() < 4 {
                     continue;
                 }
 

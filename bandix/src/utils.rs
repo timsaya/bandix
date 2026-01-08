@@ -199,26 +199,33 @@ pub mod network_utils {
         Ok(mapping)
     }
 
-    /// 获取IP to MAC address mapping from ARP table (uncached, internal implementation)
+    /// 获取IP to MAC address mapping from neighbor table (uncached, internal implementation)
     /// Also includes local machine IP-MAC mapping
     fn get_ip_mac_mapping_uncached() -> Result<HashMap<[u8; 4], [u8; 6]>> {
         let mut mapping = HashMap::new();
 
-        // Read ARP table from /proc/net/arp
-        let content = fs::read_to_string("/proc/net/arp")?;
+        // Read neighbor table using ip -4 neigh show
+        if let Ok(output) = Command::new("ip").args(["-4", "neigh", "show"]).output() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 4 {
+                    continue;
+                }
 
-        for line in content.lines().skip(1) {
-            // Skip header
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                // 解析IP address
+                let state = parts.get(parts.len() - 1).unwrap_or(&"");
+                if matches!(*state, "FAILED" | "INCOMPLETE" | "INVALID") {
+                    continue;
+                }
+
                 if let Ok(ip) = parts[0].parse::<Ipv4Addr>() {
                     let ip_bytes = ip.octets();
 
-                    // 解析MAC address
-                    if parts[3] != "00:00:00:00:00:00" && parts[3] != "<incomplete>" {
-                        if let Ok(mac) = parse_mac_address(parts[3]) {
-                            mapping.insert(ip_bytes, mac);
+                    if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
+                        if lladdr_pos + 1 < parts.len() {
+                            if let Ok(mac) = parse_mac_address(parts[lladdr_pos + 1]) {
+                                mapping.insert(ip_bytes, mac);
+                            }
                         }
                     }
                 }
@@ -226,11 +233,9 @@ pub mod network_utils {
         }
 
         // 添加local machine IP-MAC mapping for all network interfaces
-        // 这ensures that connections from/to the local machine are also counted
         if let Ok(output) = Command::new("ip").args(["addr", "show"]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
-                // Look for lines with "inet " (IPv4 addresses)
                 if line.trim().starts_with("inet ") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
@@ -240,9 +245,7 @@ pub mod network_utils {
                             if let Ok(ip) = Ipv4Addr::from_str(ip_cidr[0]) {
                                 let ip_bytes = ip.octets();
 
-                                // Skip loopback addresses (127.x.x.x)
                                 if ip_bytes[0] != 127 {
-                                    // 获取the MAC address for this interface
                                     if let Some(mac) =
                                         get_interface_mac_from_ip_output(&output_str, ip_cidr[0])
                                     {
@@ -403,21 +406,24 @@ pub mod network_utils {
         if let Ok(output) = Command::new("ip").args(["-6", "neigh", "show"]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
-                // Format: <ipv6> dev <iface> lladdr <mac> <state>
-                // Example: 2001:db8::1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    // Try to parse IPv6 address (first part)
-                    if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
-                        // Find "lladdr" keyword
-                        if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
-                            if lladdr_pos + 1 < parts.len() {
-                                if let Ok(mac) = parse_mac_address(parts[lladdr_pos + 1]) {
-                                    mapping
-                                        .entry(mac)
-                                        .or_insert_with(Vec::new)
-                                        .push(ipv6.octets());
-                                }
+                if parts.len() < 4 {
+                    continue;
+                }
+
+                let state = parts.get(parts.len() - 1).unwrap_or(&"");
+                if matches!(*state, "FAILED" | "INCOMPLETE" | "INVALID") {
+                    continue;
+                }
+
+                if let Ok(ipv6) = Ipv6Addr::from_str(parts[0]) {
+                    if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
+                        if lladdr_pos + 1 < parts.len() {
+                            if let Ok(mac) = parse_mac_address(parts[lladdr_pos + 1]) {
+                                mapping
+                                    .entry(mac)
+                                    .or_insert_with(Vec::new)
+                                    .push(ipv6.octets());
                             }
                         }
                     }
