@@ -172,11 +172,11 @@ impl ModuleType {
                 if traffic_ctx.options.traffic_persist_history() {
                     // 加载 ring 文件中的设备
                     match traffic_ctx.long_term_manager.load_from_files() {
-                        Ok(device_macs) => {
-                            let device_count = device_macs.len();
+                        Ok(device_info) => {
+                            let device_count = device_info.len();
                             // 将 ring 文件中的设备添加到设备管理器
-                            for mac in device_macs {
-                                traffic_ctx.device_manager.add_offline_device(mac);
+                            for (mac, ipv4) in device_info.into_iter() {
+                                traffic_ctx.device_manager.add_offline_device(mac, ipv4);
                             }
                             log::debug!("Successfully loaded long-term ring files");
                             if device_count > 0 {
@@ -186,6 +186,11 @@ impl ModuleType {
                         Err(e) => {
                             log::warn!("Failed to load long-term ring files: {}", e);
                         }
+                    }
+
+                    // 加载 accumulator 文件（未完成的小时数据）
+                    if let Err(e) = traffic_ctx.long_term_manager.load_accumulators() {
+                        log::warn!("Failed to load accumulator file: {}", e);
                     }
 
                     // 从持久化数据恢复基线到设备管理器

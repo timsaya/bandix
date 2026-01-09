@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // 常量定义
@@ -45,11 +46,11 @@ const SLOT_U64S_REALTIME: usize = 15; // 实时数据环形槽位大小（15个u
 // ------------------------------
 // 长期统计常量（1小时采样，365天保留）
 // ------------------------------
-const RING_VERSION_LONG_TERM: u32 = 6; // 长期统计环形文件格式版本（v6 改为存储增量，添加 start_ts_ms 和 end_ts_ms）
-const SLOT_U64S_LONG_TERM: usize = 31; // 长期统计环形槽位大小（31个u64字段）
-const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环形文件槽位大小（248字节）
+const RING_VERSION_LONG_TERM: u32 = 4;
+const SLOT_U64S_LONG_TERM: usize = 32;
+const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8;
 
-// 长期统计环形文件槽位结构（小端字节序，31个u64字段，总共248字节）：
+// 长期统计环形文件槽位结构（小端字节序，32个u64字段，总共256字节）：
 // 索引 | 字段名              | 类型 | 说明
 // -----|---------------------|------|-------------------------------
 //   0   | start_ts_ms         | u64  | 时间段开始时间戳（毫秒）
@@ -83,6 +84,7 @@ const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8; // 长期统计环�
 //  28   | lan_rx_bytes_inc    | u64  | 局域网接收字节数增量（本时段内）
 //  29   | lan_tx_bytes_inc    | u64  | 局域网发送字节数增量（本时段内）
 //  30   | last_online_ts      | u64  | 设备最后在线时间戳（毫秒）
+//  31   | ipv4_address        | u64  | IPv4地址（存储在低32位）
 
 // 本地助手函数，用于解析/格式化 MAC 地址（用于文件存储交互）
 fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
@@ -372,6 +374,13 @@ impl LongTermRing {
 
         // 设备最后在线时间戳（索引30）
         slot[30] = stats.last_online_ts;
+
+        // IPv4地址（索引31，存储在低32位）
+        slot[31] = if let Some(ipv4) = stats.ipv4 {
+            u32::from_be_bytes(ipv4) as u64
+        } else {
+            0
+        };
 
         self.slots[idx as usize] = slot;
         self.current_index = idx;
@@ -694,6 +703,13 @@ impl MetricStats {
     }
 }
 
+/// Accumulator 持久化存储结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccumulatorSnapshot {
+    pub saved_at_ms: u64,
+    pub accumulators: Vec<(String, DeviceStatsAccumulator)>,
+}
+
 /// 采样间隔期间设备累积统计信息
 /// 存储广域网络和局域网统计信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -713,6 +729,7 @@ pub struct DeviceStatsAccumulator {
     pub lan_rx_bytes: u64,        // 局域网接收字节数（时段结束时）
     pub lan_tx_bytes: u64,        // 局域网发送字节数（时段结束时）
     pub last_online_ts: u64,      // 设备最后在线时间戳（毫秒）
+    pub ipv4: Option<[u8; 4]>,    // IPv4地址
     pub is_first_sample: bool,    // 是否是第一次采样
 }
 
@@ -734,6 +751,7 @@ impl DeviceStatsAccumulator {
             lan_rx_bytes: 0,
             lan_tx_bytes: 0,
             last_online_ts: 0,
+            ipv4: None,
             is_first_sample: true,
         }
     }
@@ -761,6 +779,10 @@ impl DeviceStatsAccumulator {
 
         if device.last_online_ts > 0 {
             self.last_online_ts = device.last_online_ts;
+        }
+
+        if self.ipv4.is_none() {
+            self.ipv4 = device.current_ipv4;
         }
     }
 
@@ -815,6 +837,106 @@ impl LongTermRingManager {
         }
     }
 
+    fn accumulator_file_path(&self) -> PathBuf {
+        Path::new(&self.base_dir).join("accumulator.json")
+    }
+
+    pub fn save_accumulators(&self) -> Result<(), anyhow::Error> {
+        let accumulators = self.accumulators.lock().unwrap();
+        
+        if accumulators.is_empty() {
+            let path = self.accumulator_file_path();
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            return Ok(());
+        }
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+
+        let accumulators_vec: Vec<(String, DeviceStatsAccumulator)> = accumulators
+            .iter()
+            .map(|(mac, acc)| (mac_to_filename(mac), acc.clone()))
+            .collect();
+
+        let snapshot = AccumulatorSnapshot {
+            saved_at_ms: now_ms,
+            accumulators: accumulators_vec,
+        };
+
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        let path = self.accumulator_file_path();
+        ensure_parent_dir(&path)?;
+        fs::write(&path, json)?;
+
+        log::debug!("Saved {} accumulator(s) to {}", accumulators.len(), path.display());
+        Ok(())
+    }
+
+    pub fn load_accumulators(&self) -> Result<(), anyhow::Error> {
+        let path = self.accumulator_file_path();
+        if !path.exists() {
+            log::debug!("No accumulator file found, starting fresh");
+            return Ok(());
+        }
+
+        let json = fs::read_to_string(&path)?;
+        let snapshot: AccumulatorSnapshot = serde_json::from_str(&json)?;
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        let age_seconds = (now_ms.saturating_sub(snapshot.saved_at_ms)) / 1000;
+
+        if age_seconds > LONG_TERM_INTERVAL_SECONDS {
+            log::warn!(
+                "Accumulator file is {} seconds old (>{} seconds), discarding",
+                age_seconds,
+                LONG_TERM_INTERVAL_SECONDS
+            );
+            fs::remove_file(&path)?;
+            return Ok(());
+        }
+
+        let mut accumulators = self.accumulators.lock().unwrap();
+        accumulators.clear();
+
+        for (mac_str, acc) in snapshot.accumulators {
+            if mac_str.len() != 12 {
+                log::warn!("Invalid MAC address in accumulator file: {}", mac_str);
+                continue;
+            }
+
+            let mut mac = [0u8; 6];
+            let mut valid = true;
+            for i in 0..6 {
+                if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
+                    mac[i] = v;
+                } else {
+                    log::warn!("Invalid MAC address in accumulator file: {}", mac_str);
+                    valid = false;
+                    break;
+                }
+            }
+
+            if valid {
+                accumulators.insert(mac, acc);
+            }
+        }
+
+        log::info!(
+            "Restored {} accumulator(s) from previous session ({} seconds ago)",
+            accumulators.len(),
+            age_seconds
+        );
+
+        Ok(())
+    }
+
     pub fn insert_metrics_batch(
         &self,
         ts_ms: u64,
@@ -858,7 +980,6 @@ impl LongTermRingManager {
                 let slot = ring.slots[slot_idx as usize];
                 drop(rings);
 
-                // 整点采样后立即保存 slot 到文件
                 if let Err(e) = self.persist_single_slot(mac, accumulator.ts_end_ms, &slot) {
                     log::error!(
                         "Failed to immediately persist slot for MAC {}: {}",
@@ -877,10 +998,29 @@ impl LongTermRingManager {
             }
         }
 
+        drop(accumulators);
+
+        if should_sample {
+            if let Err(e) = self.save_accumulators() {
+                log::error!("Failed to save accumulators after hourly sample: {}", e);
+            }
+        } else {
+            let save_interval_sec = ts_sec % 60;
+            if save_interval_sec == 0 {
+                if let Err(e) = self.save_accumulators() {
+                    log::error!("Failed to save accumulators: {}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 
     pub async fn flush_dirty_rings(&self) -> Result<(), anyhow::Error> {
+        if let Err(e) = self.save_accumulators() {
+            log::error!("Failed to save accumulators during shutdown: {}", e);
+        }
+        
         let dirty_macs: Vec<[u8; 6]> = {
             let rings = self.rings.lock().unwrap();
             rings
@@ -907,14 +1047,14 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn load_from_files(&self) -> Result<Vec<[u8; 6]>, anyhow::Error> {
+    pub fn load_from_files(&self) -> Result<Vec<([u8; 6], Option<[u8; 4]>)>, anyhow::Error> {
         let dir = Path::new(&self.base_dir);
         if !dir.exists() {
             return Ok(Vec::new());
         }
 
         let mut rings = self.rings.lock().unwrap();
-        let mut device_macs = Vec::new();
+        let mut device_info = Vec::new();
 
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
@@ -946,41 +1086,36 @@ impl LongTermRingManager {
 
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_LONG_TERM || ver == 4 || ver == 3 {
+                    if ver == RING_VERSION_LONG_TERM {
                         let mut ring = LongTermRing::new(cap);
-                        let slot_size = if ver == 3 {
-                            15 * 8
-                        } else if ver == 4 {
-                            29 * 8
-                        } else {
-                            SLOT_SIZE_LONG_TERM
-                        };
+                        let mut latest_ipv4: Option<[u8; 4]> = None;
+                        let mut latest_ts: u64 = 0;
 
                         for i in 0..(cap as u64) {
-                            let slot_result = if ver == 3 {
-                                read_slot_v3_legacy(&f, i, slot_size)
-                            } else if ver == 4 {
-                                read_slot_v4(&f, i)
-                            } else {
-                                read_slot_v3(&f, i)
-                            };
-
-                            if let Ok(slot) = slot_result {
+                            if let Ok(slot) = read_slot_v3(&f, i) {
                                 if slot[0] != 0 {
                                     ring.slots[i as usize] = slot;
+
+                                    if slot[0] > latest_ts {
+                                        latest_ts = slot[0];
+                                        if slot[31] != 0 {
+                                            let ip_u32 = slot[31] as u32;
+                                            latest_ipv4 = Some(ip_u32.to_be_bytes());
+                                        }
+                                    }
                                 }
                             }
                         }
 
                         ring.mark_clean();
                         rings.insert(mac, ring);
-                        device_macs.push(mac);
+                        device_info.push((mac, latest_ipv4));
                     }
                 }
             }
         }
 
-        Ok(device_macs)
+        Ok(device_info)
     }
 
     fn persist_single_slot(
@@ -1469,10 +1604,8 @@ fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> 
         }
         f.flush()?;
     } else {
-        // 验证头部
         let (ver, _) = read_header(&mut f)?;
-        if ver != RING_VERSION_LONG_TERM && ver != 4 && ver != 3 {
-            // 文件存在但版本错误，重新初始化
+        if ver != RING_VERSION_LONG_TERM {
             f.set_len(0)?;
             write_header_v3(&mut f, cap)?;
             let zero_chunk = vec![0u8; 4096];
@@ -1511,40 +1644,6 @@ fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], an
     f.read_exact(&mut bytes)?;
     let mut out = [0u64; SLOT_U64S_LONG_TERM];
     for i in 0..SLOT_U64S_LONG_TERM {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
-        out[i] = u64::from_le_bytes(b);
-    }
-    Ok(out)
-}
-
-fn read_slot_v3_legacy(
-    mut f: &File,
-    idx: u64,
-    slot_size: usize,
-) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
-    let offset = HEADER_SIZE as u64 + idx * (slot_size as u64);
-    let mut bytes = vec![0u8; slot_size];
-    f.seek(SeekFrom::Start(offset))?;
-    f.read_exact(&mut bytes)?;
-    let mut out = [0u64; SLOT_U64S_LONG_TERM];
-    let legacy_slot_u64s = slot_size / 8;
-    for i in 0..legacy_slot_u64s.min(SLOT_U64S_LONG_TERM) {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
-        out[i] = u64::from_le_bytes(b);
-    }
-    Ok(out)
-}
-
-fn read_slot_v4(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
-    const SLOT_SIZE_V4: usize = 29 * 8;
-    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_V4 as u64);
-    let mut bytes = vec![0u8; SLOT_SIZE_V4];
-    f.seek(SeekFrom::Start(offset))?;
-    f.read_exact(&mut bytes)?;
-    let mut out = [0u64; SLOT_U64S_LONG_TERM];
-    for i in 0..29 {
         let mut b = [0u8; 8];
         b.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
         out[i] = u64::from_le_bytes(b);

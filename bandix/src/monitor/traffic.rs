@@ -68,7 +68,7 @@ impl TrafficMonitor {
             }
         };
 
-        if let Err(e) = self.process_traffic_data(ctx, &ingress_ebpf) {
+        if let Err(e) = self.process_traffic_data(ctx, &ingress_ebpf).await {
             log::error!("Failed to process traffic data: {}", e);
         }
         
@@ -164,20 +164,44 @@ impl TrafficMonitor {
         Ok(traffic)
     }
 
-    fn process_traffic_data(
+    async fn process_traffic_data(
         &self,
         ctx: &mut TrafficModuleContext,
         ebpf: &Arc<aya::Ebpf>,
     ) -> Result<(), anyhow::Error> {
         let traffic_data = self.collect_traffic_data(ebpf)?;
 
+        // 获取所有已知设备
+        let all_devices = ctx.device_manager.get_all_devices();
+        let all_device_macs: std::collections::HashSet<[u8; 6]> = 
+            all_devices.iter().map(|d| d.mac).collect();
+
+        // 检测是否有新设备（使用原始的 traffic_data）
+        let mut has_new_device = false;
+        for mac in traffic_data.keys() {
+            if !all_device_macs.contains(mac) {
+                has_new_device = true;
+                break;
+            }
+        }
+
+        // 如果发现新设备，立即刷新设备列表以获取 IP 地址
+        if has_new_device {
+            log::info!("Detected new device(s) with traffic, refreshing device list...");
+            let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+            if let Err(e) = ctx.device_manager.refresh_devices(shutdown_notify).await {
+                log::warn!("Failed to refresh devices for new device detection: {}", e);
+            }
+        }
+
+        // 现在构建流量数据（新设备已经在设备管理器中了）
         let raw_device_traffic =
             self.build_raw_device_traffic(&traffic_data, &ctx.device_manager)?;
 
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
         
-        // 获取所有设备（包括离线设备），确保它们都被处理
+        // 重新获取所有设备（包括刚刚添加的新设备）
         let all_devices = ctx.device_manager.get_all_devices();
         let all_device_macs: std::collections::HashSet<[u8; 6]> = 
             all_devices.iter().map(|d| d.mac).collect();
@@ -186,7 +210,7 @@ impl TrafficMonitor {
         for (mac, raw_traffic) in raw_device_traffic.iter() {
             // 确保设备存在，如果不存在则创建
             if ctx.device_manager.get_device_by_mac(mac).is_none() {
-                ctx.device_manager.add_offline_device(*mac);
+                ctx.device_manager.add_offline_device(*mac, None);
             }
             
             // 更新设备的 IP 地址（从 eBPF 收集的数据到 UnifiedDevice）

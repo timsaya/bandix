@@ -149,7 +149,9 @@ impl UnifiedDevice {
     }
 
     pub fn get_current_ipv4(&self) -> [u8; 4] {
-        self.current_ipv4.unwrap_or([0, 0, 0, 0])
+        self.current_ipv4
+            .or_else(|| self.historical_ipv4.last().copied())
+            .unwrap_or([0, 0, 0, 0])
     }
 
     pub fn get_all_ipv6(&self) -> Vec<[u8; 16]> {
@@ -413,7 +415,7 @@ impl DeviceManager {
 
     /// 添加离线设备（从 ring 文件恢复的设备）
     /// 如果设备已存在，则只更新主机名；如果不存在，则创建新设备
-    pub fn add_offline_device(&self, mac: [u8; 6]) {
+    pub fn add_offline_device(&self, mac: [u8; 6], ipv4: Option<[u8; 4]>) {
         let hostname_bindings = self.hostname_bindings.lock().unwrap();
         let mut devices = self.devices.lock().unwrap();
 
@@ -425,7 +427,11 @@ impl DeviceManager {
             device.update_hostname(hostname.clone());
         }
 
-        // 不更新 last_seen_ts，保持设备为离线状态
+        if let Some(ip) = ipv4 {
+            if device.current_ipv4.is_none() && !device.historical_ipv4.contains(&ip) {
+                device.historical_ipv4.push(ip);
+            }
+        }
     }
 
     fn is_special_mac_address(mac: &[u8; 6]) -> bool {

@@ -494,6 +494,7 @@ impl TrafficApiHandler {
             .collect();
 
         let mut devices = devices;
+        devices.retain(|device| device.ip != "0.0.0.0");
         devices.sort_by(|a, b| {
             let a_ip: std::net::Ipv4Addr =
                 a.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
@@ -949,6 +950,9 @@ impl TrafficApiHandler {
                 rank: 0,         // Will set after sorting
             });
         }
+
+        // 过滤掉 IP 为 0.0.0.0 的设备
+        rankings.retain(|r| r.ip != "0.0.0.0");
 
         // 排序by total_bytes descending
         rankings.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
