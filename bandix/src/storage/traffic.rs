@@ -94,8 +94,7 @@ fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
     }
     let mut mac = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16)
-            .with_context(|| format!("Invalid MAC segment '{}': not hex", part))?;
+        mac[i] = u8::from_str_radix(part, 16).with_context(|| format!("Invalid MAC segment '{}': not hex", part))?;
     }
     Ok(mac)
 }
@@ -163,12 +162,8 @@ impl TimeSlot {
         if parts.len() != 2 {
             return Err(anyhow::anyhow!("无效时间格式，期望 HH:MM"));
         }
-        let hour: u8 = parts[0]
-            .parse()
-            .with_context(|| format!("Invalid hour: {}", parts[0]))?;
-        let minute: u8 = parts[1]
-            .parse()
-            .with_context(|| format!("Invalid minute: {}", parts[1]))?;
+        let hour: u8 = parts[0].parse().with_context(|| format!("Invalid hour: {}", parts[0]))?;
+        let minute: u8 = parts[1].parse().with_context(|| format!("Invalid minute: {}", parts[1]))?;
         if hour > 24 {
             return Err(anyhow::anyhow!("小时必须是 0-24"));
         }
@@ -201,10 +196,7 @@ impl TimeSlot {
             // 逗号分隔格式："1,2,3,4,5" (1=周一, 7=周日)
             let mut days = 0u8;
             for part in days_str.split(',') {
-                let day: u8 = part
-                    .trim()
-                    .parse()
-                    .with_context(|| format!("无效的天数：{}", part))?;
+                let day: u8 = part.trim().parse().with_context(|| format!("无效的天数：{}", part))?;
                 if day < 1 || day > 7 {
                     return Err(anyhow::anyhow!("天数必须是 1-7（周一到周日）"));
                 }
@@ -216,9 +208,7 @@ impl TimeSlot {
 
     /// 将星期几格式化为二进制字符串
     pub fn format_days(days: u8) -> String {
-        (0..7)
-            .map(|i| if (days & (1 << i)) != 0 { '1' } else { '0' })
-            .collect()
+        (0..7).map(|i| if (days & (1 << i)) != 0 { '1' } else { '0' }).collect()
     }
 }
 
@@ -241,11 +231,7 @@ pub struct RealtimeRing {
 
 impl RealtimeRing {
     pub fn new(capacity: u32) -> Self {
-        let cap = if capacity == 0 {
-            DEFAULT_RING_CAPACITY
-        } else {
-            capacity
-        };
+        let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
 
         Self {
             capacity: cap,
@@ -305,11 +291,7 @@ pub struct LongTermRing {
 
 impl LongTermRing {
     pub fn new(capacity: u32) -> Self {
-        let cap = if capacity == 0 {
-            DEFAULT_RING_CAPACITY
-        } else {
-            capacity
-        };
+        let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
 
         Self {
             capacity: cap,
@@ -319,12 +301,7 @@ impl LongTermRing {
         }
     }
 
-    pub fn insert_stats(
-        &mut self,
-        ts_ms: u64,
-        stats: &DeviceStatsAccumulator,
-        interval_seconds: u64,
-    ) {
+    pub fn insert_stats(&mut self, ts_ms: u64, stats: &DeviceStatsAccumulator, interval_seconds: u64) {
         let idx = calc_slot_index_with_interval(ts_ms, self.capacity, interval_seconds);
         let mut slot = [0u64; SLOT_U64S_LONG_TERM];
 
@@ -376,11 +353,7 @@ impl LongTermRing {
         slot[30] = stats.last_online_ts;
 
         // IPv4地址（索引31，存储在低32位）
-        slot[31] = if let Some(ipv4) = stats.ipv4 {
-            u32::from_be_bytes(ipv4) as u64
-        } else {
-            0
-        };
+        slot[31] = if let Some(ipv4) = stats.ipv4 { u32::from_be_bytes(ipv4) as u64 } else { 0 };
 
         self.slots[idx as usize] = slot;
         self.current_index = idx;
@@ -514,7 +487,7 @@ impl RealtimeRingManager {
     /// 将数据插入内存环形缓冲区
     pub fn insert_metrics_batch(
         &self,
-        ts_ms: u64,
+        current_ts_ms: u64,
         rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>,
     ) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
@@ -524,17 +497,14 @@ impl RealtimeRingManager {
         let mut rings = self.rings.lock().unwrap();
 
         for (mac, device) in rows.iter() {
-            let ring = rings
-                .entry(*mac)
-                .or_insert_with(|| RealtimeRing::new(self.capacity));
+            let ring = rings.entry(*mac).or_insert_with(|| RealtimeRing::new(self.capacity));
 
             // 将 IPv4 地址 [u8; 4] 转换为 u64（存储在低 32 位）
             let ipv4 = device.current_ipv4.unwrap_or([0, 0, 0, 0]);
-            let ip_address_u64 =
-                u64::from_le_bytes([ipv4[0], ipv4[1], ipv4[2], ipv4[3], 0, 0, 0, 0]);
+            let ip_address_u64 = u64::from_le_bytes([ipv4[0], ipv4[1], ipv4[2], ipv4[3], 0, 0, 0, 0]);
 
             let rec: [u64; SLOT_U64S_REALTIME] = [
-                ts_ms,
+                current_ts_ms,
                 device.total_rx_rate(),
                 device.total_tx_rate(),
                 device.lan_rx_rate,
@@ -551,19 +521,14 @@ impl RealtimeRingManager {
                 ip_address_u64,
             ];
 
-            ring.insert(ts_ms, &rec);
+            ring.insert(current_ts_ms, &rec);
         }
 
         Ok(())
     }
 
     /// 从内存环形缓冲区查询数据
-    pub fn query_metrics(
-        &self,
-        mac: &[u8; 6],
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<Vec<MetricsRow>, anyhow::Error> {
+    pub fn query_metrics_by_mac(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRow>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
 
         if let Some(ring) = rings.get(mac) {
@@ -574,11 +539,7 @@ impl RealtimeRingManager {
     }
 
     /// 从所有设备聚合查询数据
-    pub fn query_metrics_aggregate_all(
-        &self,
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<Vec<MetricsRow>, anyhow::Error> {
+    pub fn query_metrics_aggregate_all(&self, start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRow>, anyhow::Error> {
         use std::collections::BTreeMap;
 
         let rings = self.rings.lock().unwrap();
@@ -843,7 +804,7 @@ impl LongTermRingManager {
 
     pub fn save_accumulators(&self) -> Result<(), anyhow::Error> {
         let accumulators = self.accumulators.lock().unwrap();
-        
+
         if accumulators.is_empty() {
             let path = self.accumulator_file_path();
             if path.exists() {
@@ -937,11 +898,7 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn insert_metrics_batch(
-        &self,
-        ts_ms: u64,
-        rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>,
-    ) -> Result<(), anyhow::Error> {
+    pub fn insert_metrics_batch(&self, ts_ms: u64, rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
         }
@@ -951,9 +908,7 @@ impl LongTermRingManager {
         let should_sample = ts_sec % LONG_TERM_INTERVAL_SECONDS == 0;
 
         for (mac, device) in rows.iter() {
-            let accumulator = accumulators
-                .entry(*mac)
-                .or_insert_with(|| DeviceStatsAccumulator::new(ts_ms));
+            let accumulator = accumulators.entry(*mac).or_insert_with(|| DeviceStatsAccumulator::new(ts_ms));
 
             accumulator.add_sample(device, ts_ms);
 
@@ -961,31 +916,17 @@ impl LongTermRingManager {
                 accumulator.finalize();
 
                 let mut rings = self.rings.lock().unwrap();
-                let ring = rings
-                    .entry(*mac)
-                    .or_insert_with(|| LongTermRing::new(self.capacity));
+                let ring = rings.entry(*mac).or_insert_with(|| LongTermRing::new(self.capacity));
 
-                let slot_idx = calc_slot_index_with_interval(
-                    accumulator.ts_end_ms,
-                    self.capacity,
-                    LONG_TERM_INTERVAL_SECONDS,
-                );
+                let slot_idx = calc_slot_index_with_interval(accumulator.ts_end_ms, self.capacity, LONG_TERM_INTERVAL_SECONDS);
 
-                ring.insert_stats(
-                    accumulator.ts_end_ms,
-                    accumulator,
-                    LONG_TERM_INTERVAL_SECONDS,
-                );
+                ring.insert_stats(accumulator.ts_end_ms, accumulator, LONG_TERM_INTERVAL_SECONDS);
 
                 let slot = ring.slots[slot_idx as usize];
                 drop(rings);
 
                 if let Err(e) = self.persist_single_slot(mac, accumulator.ts_end_ms, &slot) {
-                    log::error!(
-                        "Failed to immediately persist slot for MAC {}: {}",
-                        mac_to_filename(mac),
-                        e
-                    );
+                    log::error!("Failed to immediately persist slot for MAC {}: {}", mac_to_filename(mac), e);
                 } else {
                     log::debug!(
                         "Immediately persisted slot for MAC {} at {}",
@@ -1020,14 +961,10 @@ impl LongTermRingManager {
         if let Err(e) = self.save_accumulators() {
             log::error!("Failed to save accumulators during shutdown: {}", e);
         }
-        
+
         let dirty_macs: Vec<[u8; 6]> = {
             let rings = self.rings.lock().unwrap();
-            rings
-                .iter()
-                .filter(|(_, ring)| ring.is_dirty())
-                .map(|(mac, _)| *mac)
-                .collect()
+            rings.iter().filter(|(_, ring)| ring.is_dirty()).map(|(mac, _)| *mac).collect()
         };
 
         for mac in dirty_macs {
@@ -1118,12 +1055,7 @@ impl LongTermRingManager {
         Ok(device_info)
     }
 
-    fn persist_single_slot(
-        &self,
-        mac: &[u8; 6],
-        ts_ms: u64,
-        slot: &[u64; SLOT_U64S_LONG_TERM],
-    ) -> Result<(), anyhow::Error> {
+    fn persist_single_slot(&self, mac: &[u8; 6], ts_ms: u64, slot: &[u64; SLOT_U64S_LONG_TERM]) -> Result<(), anyhow::Error> {
         let path = ring_file_path_v3(&self.base_dir, mac);
         let f = init_ring_file_v3(&path, self.capacity)?;
 
@@ -1134,11 +1066,7 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    fn persist_ring_to_file(
-        &self,
-        mac: &[u8; 6],
-        ring: &LongTermRing,
-    ) -> Result<(), anyhow::Error> {
+    fn persist_ring_to_file(&self, mac: &[u8; 6], ring: &LongTermRing) -> Result<(), anyhow::Error> {
         let path = ring_file_path_v3(&self.base_dir, mac);
         let f = init_ring_file_v3(&path, ring.capacity)?;
 
@@ -1152,12 +1080,7 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn query_stats(
-        &self,
-        mac: &[u8; 6],
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
+    pub fn query_stats(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
         if let Some(ring) = rings.get(mac) {
             Ok(ring.query_stats(start_ms, end_ms))
@@ -1175,9 +1098,7 @@ impl LongTermRingManager {
         let mut baselines = HashMap::new();
 
         for (mac, ring) in rings.iter() {
-            if let Some((ts, wan_rx, wan_tx, lan_rx, lan_tx, last_online_ts)) =
-                ring.get_latest_baseline_with_ts()
-            {
+            if let Some((ts, wan_rx, wan_tx, lan_rx, lan_tx, last_online_ts)) = ring.get_latest_baseline_with_ts() {
                 baselines.insert(*mac, (ts, wan_rx, wan_tx, lan_rx, lan_tx, last_online_ts));
             }
         }
@@ -1186,12 +1107,17 @@ impl LongTermRingManager {
 
         let accumulators = self.accumulators.lock().unwrap();
         for (mac, accumulator) in accumulators.iter() {
+            let ring_baseline = baselines
+                .get(mac)
+                .map(|(_, wan_rx, wan_tx, lan_rx, lan_tx, _)| (*wan_rx, *wan_tx, *lan_rx, *lan_tx))
+                .unwrap_or((0, 0, 0, 0));
+
             let accumulator_baseline = (
                 accumulator.ts_end_ms.max(accumulator.ts_start_ms),
-                accumulator.wan_rx_bytes,
-                accumulator.wan_tx_bytes,
-                accumulator.lan_rx_bytes,
-                accumulator.lan_tx_bytes,
+                ring_baseline.0.saturating_add(accumulator.get_wan_rx_bytes_increment()),
+                ring_baseline.1.saturating_add(accumulator.get_wan_tx_bytes_increment()),
+                ring_baseline.2.saturating_add(accumulator.get_lan_rx_bytes_increment()),
+                ring_baseline.3.saturating_add(accumulator.get_lan_tx_bytes_increment()),
                 accumulator.last_online_ts,
             );
 
@@ -1222,11 +1148,7 @@ impl LongTermRingManager {
         result
     }
 
-    pub fn query_stats_by_device(
-        &self,
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<HashMap<[u8; 6], MetricsRowWithStats>, anyhow::Error> {
+    pub fn query_stats_by_device(&self, start_ms: u64, end_ms: u64) -> Result<HashMap<[u8; 6], MetricsRowWithStats>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
         let mut device_stats: HashMap<[u8; 6], MetricsRowWithStats> = HashMap::new();
 
@@ -1271,63 +1193,34 @@ impl LongTermRingManager {
                 continue;
             }
 
-            let first_row = &rows[0];
-            let last_row = &rows[rows.len() - 1];
-
-            if rows.len() == 1 {
-                aggregated.wan_rx_bytes_inc = last_row.wan_rx_bytes_inc;
-                aggregated.wan_tx_bytes_inc = last_row.wan_tx_bytes_inc;
-                aggregated.lan_rx_bytes_inc = last_row.lan_rx_bytes_inc;
-                aggregated.lan_tx_bytes_inc = last_row.lan_tx_bytes_inc;
-                aggregated.last_online_ts = last_row.last_online_ts;
-            } else {
-                aggregated.wan_rx_bytes_inc = last_row
-                    .wan_rx_bytes_inc
-                    .saturating_sub(first_row.wan_rx_bytes_inc);
-                aggregated.wan_tx_bytes_inc = last_row
-                    .wan_tx_bytes_inc
-                    .saturating_sub(first_row.wan_tx_bytes_inc);
-                aggregated.lan_rx_bytes_inc = last_row
-                    .lan_rx_bytes_inc
-                    .saturating_sub(first_row.lan_rx_bytes_inc);
-                aggregated.lan_tx_bytes_inc = last_row
-                    .lan_tx_bytes_inc
-                    .saturating_sub(first_row.lan_tx_bytes_inc);
-                aggregated.last_online_ts = last_row.last_online_ts;
-            }
-
             for row in &rows {
+                aggregated.wan_rx_bytes_inc = aggregated.wan_rx_bytes_inc.saturating_add(row.wan_rx_bytes_inc);
+                aggregated.wan_tx_bytes_inc = aggregated.wan_tx_bytes_inc.saturating_add(row.wan_tx_bytes_inc);
+                aggregated.lan_rx_bytes_inc = aggregated.lan_rx_bytes_inc.saturating_add(row.lan_rx_bytes_inc);
+                aggregated.lan_tx_bytes_inc = aggregated.lan_tx_bytes_inc.saturating_add(row.lan_tx_bytes_inc);
                 aggregated.last_online_ts = aggregated.last_online_ts.max(row.last_online_ts);
-                aggregated.wan_rx_rate_avg = aggregated
-                    .wan_rx_rate_avg
-                    .saturating_add(row.wan_rx_rate_avg);
+                aggregated.wan_rx_rate_avg = aggregated.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
                 aggregated.wan_rx_rate_max = aggregated.wan_rx_rate_max.max(row.wan_rx_rate_max);
                 aggregated.wan_rx_rate_min = aggregated.wan_rx_rate_min.min(row.wan_rx_rate_min);
                 aggregated.wan_rx_rate_p90 = aggregated.wan_rx_rate_p90.max(row.wan_rx_rate_p90);
                 aggregated.wan_rx_rate_p95 = aggregated.wan_rx_rate_p95.max(row.wan_rx_rate_p95);
                 aggregated.wan_rx_rate_p99 = aggregated.wan_rx_rate_p99.max(row.wan_rx_rate_p99);
 
-                aggregated.wan_tx_rate_avg = aggregated
-                    .wan_tx_rate_avg
-                    .saturating_add(row.wan_tx_rate_avg);
+                aggregated.wan_tx_rate_avg = aggregated.wan_tx_rate_avg.saturating_add(row.wan_tx_rate_avg);
                 aggregated.wan_tx_rate_max = aggregated.wan_tx_rate_max.max(row.wan_tx_rate_max);
                 aggregated.wan_tx_rate_min = aggregated.wan_tx_rate_min.min(row.wan_tx_rate_min);
                 aggregated.wan_tx_rate_p90 = aggregated.wan_tx_rate_p90.max(row.wan_tx_rate_p90);
                 aggregated.wan_tx_rate_p95 = aggregated.wan_tx_rate_p95.max(row.wan_tx_rate_p95);
                 aggregated.wan_tx_rate_p99 = aggregated.wan_tx_rate_p99.max(row.wan_tx_rate_p99);
 
-                aggregated.lan_rx_rate_avg = aggregated
-                    .lan_rx_rate_avg
-                    .saturating_add(row.lan_rx_rate_avg);
+                aggregated.lan_rx_rate_avg = aggregated.lan_rx_rate_avg.saturating_add(row.lan_rx_rate_avg);
                 aggregated.lan_rx_rate_max = aggregated.lan_rx_rate_max.max(row.lan_rx_rate_max);
                 aggregated.lan_rx_rate_min = aggregated.lan_rx_rate_min.min(row.lan_rx_rate_min);
                 aggregated.lan_rx_rate_p90 = aggregated.lan_rx_rate_p90.max(row.lan_rx_rate_p90);
                 aggregated.lan_rx_rate_p95 = aggregated.lan_rx_rate_p95.max(row.lan_rx_rate_p95);
                 aggregated.lan_rx_rate_p99 = aggregated.lan_rx_rate_p99.max(row.lan_rx_rate_p99);
 
-                aggregated.lan_tx_rate_avg = aggregated
-                    .lan_tx_rate_avg
-                    .saturating_add(row.lan_tx_rate_avg);
+                aggregated.lan_tx_rate_avg = aggregated.lan_tx_rate_avg.saturating_add(row.lan_tx_rate_avg);
                 aggregated.lan_tx_rate_max = aggregated.lan_tx_rate_max.max(row.lan_tx_rate_max);
                 aggregated.lan_tx_rate_min = aggregated.lan_tx_rate_min.min(row.lan_tx_rate_min);
                 aggregated.lan_tx_rate_p90 = aggregated.lan_tx_rate_p90.max(row.lan_tx_rate_p90);
@@ -1362,12 +1255,7 @@ impl LongTermRingManager {
         Ok(device_stats)
     }
 
-    pub fn query_time_series_increments(
-        &self,
-        mac: &[u8; 6],
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
+    pub fn query_time_series_increments(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
         if let Some(ring) = rings.get(mac) {
             let rows = ring.query_stats(start_ms, end_ms);
@@ -1381,14 +1269,9 @@ impl LongTermRingManager {
         }
     }
 
-    pub fn query_time_series_increments_aggregate(
-        &self,
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
+    pub fn query_time_series_increments_aggregate(&self, start_ms: u64, end_ms: u64) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
-        let mut all_rows_by_ts: std::collections::BTreeMap<u64, (u64, u64)> =
-            std::collections::BTreeMap::new();
+        let mut all_rows_by_ts: std::collections::BTreeMap<u64, (u64, u64)> = std::collections::BTreeMap::new();
 
         for (_mac, ring) in rings.iter() {
             let rows = ring.query_stats(start_ms, end_ms);
@@ -1407,11 +1290,7 @@ impl LongTermRingManager {
         Ok(increments)
     }
 
-    pub fn query_stats_aggregate_all(
-        &self,
-        start_ms: u64,
-        end_ms: u64,
-    ) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
+    pub fn query_stats_aggregate_all(&self, start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
         let mut all_rows = Vec::new();
 
@@ -1424,41 +1303,39 @@ impl LongTermRingManager {
         let mut ts_to_stats: BTreeMap<u64, MetricsRowWithStats> = BTreeMap::new();
 
         for row in all_rows {
-            let entry = ts_to_stats
-                .entry(row.end_ts_ms)
-                .or_insert(MetricsRowWithStats {
-                    start_ts_ms: row.start_ts_ms,
-                    end_ts_ms: row.end_ts_ms,
-                    wan_rx_rate_avg: 0,
-                    wan_rx_rate_max: 0,
-                    wan_rx_rate_min: u64::MAX,
-                    wan_rx_rate_p90: 0,
-                    wan_rx_rate_p95: 0,
-                    wan_rx_rate_p99: 0,
-                    wan_tx_rate_avg: 0,
-                    wan_tx_rate_max: 0,
-                    wan_tx_rate_min: u64::MAX,
-                    wan_tx_rate_p90: 0,
-                    wan_tx_rate_p95: 0,
-                    wan_tx_rate_p99: 0,
-                    wan_rx_bytes_inc: 0,
-                    wan_tx_bytes_inc: 0,
-                    lan_rx_rate_avg: 0,
-                    lan_rx_rate_max: 0,
-                    lan_rx_rate_min: u64::MAX,
-                    lan_rx_rate_p90: 0,
-                    lan_rx_rate_p95: 0,
-                    lan_rx_rate_p99: 0,
-                    lan_tx_rate_avg: 0,
-                    lan_tx_rate_max: 0,
-                    lan_tx_rate_min: u64::MAX,
-                    lan_tx_rate_p90: 0,
-                    lan_tx_rate_p95: 0,
-                    lan_tx_rate_p99: 0,
-                    lan_rx_bytes_inc: 0,
-                    lan_tx_bytes_inc: 0,
-                    last_online_ts: 0,
-                });
+            let entry = ts_to_stats.entry(row.end_ts_ms).or_insert(MetricsRowWithStats {
+                start_ts_ms: row.start_ts_ms,
+                end_ts_ms: row.end_ts_ms,
+                wan_rx_rate_avg: 0,
+                wan_rx_rate_max: 0,
+                wan_rx_rate_min: u64::MAX,
+                wan_rx_rate_p90: 0,
+                wan_rx_rate_p95: 0,
+                wan_rx_rate_p99: 0,
+                wan_tx_rate_avg: 0,
+                wan_tx_rate_max: 0,
+                wan_tx_rate_min: u64::MAX,
+                wan_tx_rate_p90: 0,
+                wan_tx_rate_p95: 0,
+                wan_tx_rate_p99: 0,
+                wan_rx_bytes_inc: 0,
+                wan_tx_bytes_inc: 0,
+                lan_rx_rate_avg: 0,
+                lan_rx_rate_max: 0,
+                lan_rx_rate_min: u64::MAX,
+                lan_rx_rate_p90: 0,
+                lan_rx_rate_p95: 0,
+                lan_rx_rate_p99: 0,
+                lan_tx_rate_avg: 0,
+                lan_tx_rate_max: 0,
+                lan_tx_rate_min: u64::MAX,
+                lan_tx_rate_p90: 0,
+                lan_tx_rate_p95: 0,
+                lan_tx_rate_p99: 0,
+                lan_rx_bytes_inc: 0,
+                lan_tx_bytes_inc: 0,
+                last_online_ts: 0,
+            });
 
             entry.last_online_ts = entry.last_online_ts.max(row.last_online_ts);
             entry.wan_rx_rate_avg = entry.wan_rx_rate_avg.saturating_add(row.wan_rx_rate_avg);
@@ -1576,18 +1453,10 @@ fn write_header_v3(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
 
 fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
     ensure_parent_dir(path)?;
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(path)?;
+    let mut f = OpenOptions::new().read(true).write(true).create(true).open(path)?;
 
     let metadata = f.metadata()?;
-    let cap = if capacity == 0 {
-        DEFAULT_RING_CAPACITY
-    } else {
-        capacity
-    };
+    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
     let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE_LONG_TERM as u64);
 
     if metadata.len() != expected_size {
@@ -1621,11 +1490,7 @@ fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> 
     Ok(f)
 }
 
-fn write_slot_v3(
-    mut f: &File,
-    idx: u64,
-    data: &[u64; SLOT_U64S_LONG_TERM],
-) -> Result<(), anyhow::Error> {
+fn write_slot_v3(mut f: &File, idx: u64, data: &[u64; SLOT_U64S_LONG_TERM]) -> Result<(), anyhow::Error> {
     let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_LONG_TERM as u64);
     let mut bytes = vec![0u8; SLOT_SIZE_LONG_TERM];
     for (i, v) in data.iter().enumerate() {
@@ -1652,11 +1517,9 @@ fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], an
 }
 
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
-    fs::create_dir_all(ring_dir(base_dir))
-        .with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
+    fs::create_dir_all(ring_dir(base_dir)).with_context(|| format!("Failed to create metrics dir under {}", base_dir))?;
     let longterm_dir = Path::new(base_dir).join("metrics").join("longterm");
-    fs::create_dir_all(&longterm_dir)
-        .with_context(|| format!("Failed to create longterm metrics dir under {}", base_dir))?;
+    fs::create_dir_all(&longterm_dir).with_context(|| format!("Failed to create longterm metrics dir under {}", base_dir))?;
     let bindings = crate::storage::hostname::bindings_path(base_dir);
     if !bindings.exists() {
         File::create(&bindings)?;
@@ -1694,22 +1557,14 @@ pub fn load_all_limits(base_dir: &str) -> Result<Vec<([u8; 6], u64, u64)>, anyho
         } else {
             Err(anyhow::anyhow!("invalid mac format at line {}", lineno + 1))
         }?;
-        let rx: u64 = parts[1]
-            .parse()
-            .with_context(|| format!("invalid rx at line {}", lineno + 1))?;
-        let tx: u64 = parts[2]
-            .parse()
-            .with_context(|| format!("invalid tx at line {}", lineno + 1))?;
+        let rx: u64 = parts[1].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
+        let tx: u64 = parts[2].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
         out.push((mac, rx, tx));
     }
     Ok(out)
 }
 
-pub fn upsert_hostname_binding(
-    base_dir: &str,
-    mac: &[u8; 6],
-    hostname: &str,
-) -> Result<(), anyhow::Error> {
+pub fn upsert_hostname_binding(base_dir: &str, mac: &[u8; 6], hostname: &str) -> Result<(), anyhow::Error> {
     let path = crate::storage::hostname::bindings_path(base_dir);
     ensure_parent_dir(&path)?;
     let mut map: std::collections::BTreeMap<String, String> = Default::default();
@@ -1828,8 +1683,15 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
         // 跳过 rx 和 tx 都为 0 的条目（无限制，无需存储）
         for (mac, rx, tx) in legacy_limits.iter() {
             if *rx == 0 && *tx == 0 {
-                log::debug!("Skipping migration of unlimited rate limit for MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", 
-                           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                log::debug!(
+                    "Skipping migration of unlimited rate limit for MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    mac[0],
+                    mac[1],
+                    mac[2],
+                    mac[3],
+                    mac[4],
+                    mac[5]
+                );
                 continue;
             }
 
@@ -1854,10 +1716,7 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
 
         // 迁移后删除旧版文件（即使所有条目都是无限制的）
         if let Err(e) = fs::remove_file(&legacy_path) {
-            log::warn!(
-                "Failed to remove legacy rate_limits.txt after migration: {}",
-                e
-            );
+            log::warn!("Failed to remove legacy rate_limits.txt after migration: {}", e);
         }
     }
 
@@ -1899,19 +1758,13 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             Err(anyhow::anyhow!("invalid mac format at line {}", lineno + 1))
         }?;
 
-        let (start_hour, start_minute) = TimeSlot::parse_time(parts[2])
-            .with_context(|| format!("invalid start time at line {}", lineno + 1))?;
-        let (end_hour, end_minute) = TimeSlot::parse_time(parts[3])
-            .with_context(|| format!("invalid end time at line {}", lineno + 1))?;
-        let days_of_week = TimeSlot::parse_days(parts[4])
-            .with_context(|| format!("invalid days format at line {}", lineno + 1))?;
+        let (start_hour, start_minute) =
+            TimeSlot::parse_time(parts[2]).with_context(|| format!("invalid start time at line {}", lineno + 1))?;
+        let (end_hour, end_minute) = TimeSlot::parse_time(parts[3]).with_context(|| format!("invalid end time at line {}", lineno + 1))?;
+        let days_of_week = TimeSlot::parse_days(parts[4]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
 
-        let rx: u64 = parts[5]
-            .parse()
-            .with_context(|| format!("invalid rx at line {}", lineno + 1))?;
-        let tx: u64 = parts[6]
-            .parse()
-            .with_context(|| format!("invalid tx at line {}", lineno + 1))?;
+        let rx: u64 = parts[5].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
+        let tx: u64 = parts[6].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
 
         out.push(ScheduledRateLimit {
             mac,
@@ -1931,10 +1784,7 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
 }
 
 /// 将预定速率限制保存到文件
-pub fn upsert_scheduled_limit(
-    base_dir: &str,
-    scheduled_limit: &ScheduledRateLimit,
-) -> Result<(), anyhow::Error> {
+pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLimit) -> Result<(), anyhow::Error> {
     let path = limits_schedule_path(base_dir);
     ensure_parent_dir(&path)?;
 
@@ -2037,8 +1887,7 @@ pub fn upsert_scheduled_limit(
     buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
     for rule in rules {
         let mac_str = mac_to_filename(&rule.mac);
-        let start_str =
-            TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
+        let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
         let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
         buf.push_str(&format!(
@@ -2052,11 +1901,7 @@ pub fn upsert_scheduled_limit(
 }
 
 /// 删除预定速率限制规则
-pub fn delete_scheduled_limit(
-    base_dir: &str,
-    mac: &[u8; 6],
-    time_slot: &TimeSlot,
-) -> Result<(), anyhow::Error> {
+pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlot) -> Result<(), anyhow::Error> {
     let path = limits_schedule_path(base_dir);
     if !path.exists() {
         return Ok(());
@@ -2153,8 +1998,7 @@ pub fn delete_scheduled_limit(
     buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
     for rule in rules {
         let mac_str = mac_to_filename(&rule.mac);
-        let start_str =
-            TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
+        let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
         let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
         buf.push_str(&format!(
@@ -2168,10 +2012,7 @@ pub fn delete_scheduled_limit(
 }
 
 /// 根据预定规则计算 MAC 地址的当前有效速率限制
-pub fn calculate_current_rate_limit(
-    scheduled_limits: &[ScheduledRateLimit],
-    mac: &[u8; 6],
-) -> Option<[u64; 2]> {
+pub fn calculate_current_rate_limit(scheduled_limits: &[ScheduledRateLimit], mac: &[u8; 6]) -> Option<[u64; 2]> {
     let now = Local::now();
 
     // 查找此 MAC 的所有匹配规则
@@ -2191,14 +2032,10 @@ pub fn calculate_current_rate_limit(
 
     for rule in matching_rules {
         if rule.wan_rx_rate_limit > 0 {
-            rx_limit = Some(rx_limit.map_or(rule.wan_rx_rate_limit, |current: u64| {
-                current.min(rule.wan_rx_rate_limit)
-            }));
+            rx_limit = Some(rx_limit.map_or(rule.wan_rx_rate_limit, |current: u64| current.min(rule.wan_rx_rate_limit)));
         }
         if rule.wan_tx_rate_limit > 0 {
-            tx_limit = Some(tx_limit.map_or(rule.wan_tx_rate_limit, |current: u64| {
-                current.min(rule.wan_tx_rate_limit)
-            }));
+            tx_limit = Some(tx_limit.map_or(rule.wan_tx_rate_limit, |current: u64| current.min(rule.wan_tx_rate_limit)));
         }
     }
 

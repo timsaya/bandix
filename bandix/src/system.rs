@@ -54,10 +54,7 @@ fn mem_total_mb() -> Option<u64> {
     if let Ok(content) = fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .find_map(|t| t.parse().ok())
-                    .unwrap_or(0);
+                let kb: u64 = rest.split_whitespace().find_map(|t| t.parse().ok()).unwrap_or(0);
                 return Some(kb / 1024);
             }
         }
@@ -66,9 +63,7 @@ fn mem_total_mb() -> Option<u64> {
 }
 
 fn cpu_model_and_cores() -> Option<(String, usize)> {
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     if let Ok(content) = fs::read_to_string("/proc/cpuinfo") {
         for line in content.lines() {
             if let Some(model) = line.strip_prefix("model name\t: ") {
@@ -158,12 +153,7 @@ pub fn log_startup_info(options: &Options) {
     info!("Data directory: {}", options.data_dir());
     info!("Log level: {}", options.log_level());
     info!("Retention seconds: {}", options.traffic_retention_seconds());
-    info!(
-        "Interface: {} (IP: {}, Mask: {})",
-        options.iface(),
-        ip_str,
-        mask_str
-    );
+    info!("Interface: {} (IP: {}, Mask: {})", options.iface(), ip_str, mask_str);
 
     // Display enabled monitoring modules with their configurations
     let mut enabled_count = 0;
@@ -184,10 +174,7 @@ pub fn log_startup_info(options: &Options) {
         info!("Enabled monitoring modules ({}):", enabled_count);
 
         if options.enable_traffic() {
-            info!(
-                "  • Traffic monitoring (retention: {}s)",
-                options.traffic_retention_seconds()
-            );
+            info!("  • Traffic monitoring (retention: {}s)", options.traffic_retention_seconds());
         }
 
         if options.enable_dns() {

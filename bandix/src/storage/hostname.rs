@@ -54,12 +54,7 @@ pub fn load_hostname_from_ubus() -> Result<Vec<([u8; 6], String)>, anyhow::Error
     use std::process::Command;
 
     // Try to execute ubus command, silently return empty vec if it fails
-    let output = match Command::new("ubus")
-        .arg("call")
-        .arg("luci-rpc")
-        .arg("getHostHints")
-        .output()
-    {
+    let output = match Command::new("ubus").arg("call").arg("luci-rpc").arg("getHostHints").output() {
         Ok(output) => output,
         Err(_) => {
             // Command failed (e.g., ubus not found), return empty vec silently

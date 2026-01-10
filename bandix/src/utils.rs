@@ -63,10 +63,7 @@ pub mod network_utils {
     // 获取interface IP and subnet mask
     pub fn get_interface_info(interface: &str) -> Option<([u8; 4], [u8; 4])> {
         // Primary: ip addr show <iface>
-        if let Ok(output) = Command::new("ip")
-            .args(["addr", "show", interface])
-            .output()
-        {
+        if let Ok(output) = Command::new("ip").args(["addr", "show", interface]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
                 if line.trim().starts_with("inet ") {
@@ -246,9 +243,7 @@ pub mod network_utils {
                                 let ip_bytes = ip.octets();
 
                                 if ip_bytes[0] != 127 {
-                                    if let Some(mac) =
-                                        get_interface_mac_from_ip_output(&output_str, ip_cidr[0])
-                                    {
+                                    if let Some(mac) = get_interface_mac_from_ip_output(&output_str, ip_cidr[0]) {
                                         mapping.insert(ip_bytes, mac);
                                     }
                                 }
@@ -337,10 +332,7 @@ pub mod network_utils {
     pub fn get_interface_ipv6_info(interface: &str) -> Vec<([u8; 16], u8)> {
         let mut ipv6_addresses = Vec::new();
 
-        if let Ok(output) = Command::new("ip")
-            .args(["-6", "addr", "show", interface])
-            .output()
-        {
+        if let Ok(output) = Command::new("ip").args(["-6", "addr", "show", interface]).output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
                 // Look for "inet6 <addr>/<prefix_len> scope ..."
@@ -420,10 +412,7 @@ pub mod network_utils {
                     if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
                         if lladdr_pos + 1 < parts.len() {
                             if let Ok(mac) = parse_mac_address(parts[lladdr_pos + 1]) {
-                                mapping
-                                    .entry(mac)
-                                    .or_insert_with(Vec::new)
-                                    .push(ipv6.octets());
+                                mapping.entry(mac).or_insert_with(Vec::new).push(ipv6.octets());
                             }
                         }
                     }
@@ -619,23 +608,11 @@ pub mod network_utils {
             let subnet_mask = [255, 255, 255, 0];
 
             // IPs in the same subnet
-            assert!(is_ip_in_subnet(
-                [192, 168, 1, 10],
-                interface_ip,
-                subnet_mask
-            ));
-            assert!(is_ip_in_subnet(
-                [192, 168, 1, 254],
-                interface_ip,
-                subnet_mask
-            ));
+            assert!(is_ip_in_subnet([192, 168, 1, 10], interface_ip, subnet_mask));
+            assert!(is_ip_in_subnet([192, 168, 1, 254], interface_ip, subnet_mask));
 
             // IPs not in the same subnet
-            assert!(!is_ip_in_subnet(
-                [192, 168, 2, 1],
-                interface_ip,
-                subnet_mask
-            ));
+            assert!(!is_ip_in_subnet([192, 168, 2, 1], interface_ip, subnet_mask));
             assert!(!is_ip_in_subnet([10, 0, 0, 1], interface_ip, subnet_mask));
             assert!(!is_ip_in_subnet([127, 0, 0, 1], interface_ip, subnet_mask));
         }
@@ -647,54 +624,33 @@ pub mod network_utils {
 
             // Test Global Unicast (GUA) - 2000::/3
             let gua = Ipv6Addr::from_str("2408:820c:a93d:44b0::1").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&gua.octets()),
-                Ipv6AddressType::GlobalUnicast
-            );
+            assert_eq!(classify_ipv6_address(&gua.octets()), Ipv6AddressType::GlobalUnicast);
             assert_eq!(Ipv6AddressType::GlobalUnicast.network_scope(), "WAN");
 
             // Test Unique Local (ULA) - fd00::/8
             let ula = Ipv6Addr::from_str("fd00:1234:5678::1").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&ula.octets()),
-                Ipv6AddressType::UniqueLocal
-            );
+            assert_eq!(classify_ipv6_address(&ula.octets()), Ipv6AddressType::UniqueLocal);
             assert_eq!(Ipv6AddressType::UniqueLocal.network_scope(), "LAN");
 
             let ula2 = Ipv6Addr::from_str("fd76:3d06:2ad2::882").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&ula2.octets()),
-                Ipv6AddressType::UniqueLocal
-            );
+            assert_eq!(classify_ipv6_address(&ula2.octets()), Ipv6AddressType::UniqueLocal);
 
             // Test Link-Local - fe80::/10
             let link_local = Ipv6Addr::from_str("fe80::1").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&link_local.octets()),
-                Ipv6AddressType::LinkLocal
-            );
+            assert_eq!(classify_ipv6_address(&link_local.octets()), Ipv6AddressType::LinkLocal);
             assert_eq!(Ipv6AddressType::LinkLocal.network_scope(), "LAN");
 
             // Test Loopback - ::1
             let loopback = Ipv6Addr::from_str("::1").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&loopback.octets()),
-                Ipv6AddressType::Loopback
-            );
+            assert_eq!(classify_ipv6_address(&loopback.octets()), Ipv6AddressType::Loopback);
 
             // Test Unspecified - ::
             let unspecified = Ipv6Addr::from_str("::").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&unspecified.octets()),
-                Ipv6AddressType::Unspecified
-            );
+            assert_eq!(classify_ipv6_address(&unspecified.octets()), Ipv6AddressType::Unspecified);
 
             // Test Multicast - ff00::/8
             let multicast = Ipv6Addr::from_str("ff02::1").unwrap();
-            assert_eq!(
-                classify_ipv6_address(&multicast.octets()),
-                Ipv6AddressType::Multicast
-            );
+            assert_eq!(classify_ipv6_address(&multicast.octets()), Ipv6AddressType::Multicast);
         }
 
         #[test]
@@ -705,27 +661,15 @@ pub mod network_utils {
             // Test WAN address (GUA) - should be masked
             let gua = Ipv6Addr::from_str("2408:820c:a93d:44b0:e251:d8ff:fe11:b45c").unwrap();
             let formatted = format_ipv6_with_privacy(&gua.octets());
-            assert!(
-                formatted.contains("****"),
-                "WAN address should contain asterisks"
-            );
-            assert!(
-                formatted.starts_with("2408:820c:"),
-                "Should preserve first two segments"
-            );
+            assert!(formatted.contains("****"), "WAN address should contain asterisks");
+            assert!(formatted.starts_with("2408:820c:"), "Should preserve first two segments");
             assert!(formatted.ends_with(":b45c"), "Should preserve last segment");
 
             // Test LAN address (ULA) - should be shown in full
             let ula = Ipv6Addr::from_str("fd37:c22a:b039:0:e251:d8ff:fe11:b45c").unwrap();
             let formatted_ula = format_ipv6_with_privacy(&ula.octets());
-            assert!(
-                !formatted_ula.contains("****"),
-                "LAN address should not contain asterisks"
-            );
-            assert!(
-                formatted_ula.contains("fd37:c22a:b039"),
-                "LAN address should be shown in full"
-            );
+            assert!(!formatted_ula.contains("****"), "LAN address should not contain asterisks");
+            assert!(formatted_ula.contains("fd37:c22a:b039"), "LAN address should be shown in full");
 
             // Test Link-Local - should be shown in full
             let link_local = Ipv6Addr::from_str("fe80::61c6:f554:bf4b:2e2d").unwrap();

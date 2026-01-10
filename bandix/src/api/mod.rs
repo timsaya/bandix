@@ -60,9 +60,8 @@ impl HttpResponse {
 
     pub fn error(status: u16, message: String) -> Self {
         let error_response = ApiResponse::<()>::error(message);
-        let body = serde_json::to_string(&error_response).unwrap_or_else(|_| {
-            r#"{"status":"error","message":"JSON serialization failed"}"#.to_string()
-        });
+        let body = serde_json::to_string(&error_response)
+            .unwrap_or_else(|_| r#"{"status":"error","message":"JSON serialization failed"}"#.to_string());
         Self {
             status,
             content_type: "application/json".to_string(),
@@ -104,10 +103,7 @@ impl ApiHandler {
         }
     }
 
-    pub async fn handle_request(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         match self {
             ApiHandler::Traffic(handler) => handler.handle_request(request).await,
             ApiHandler::Dns(handler) => handler.handle_request(request).await,
@@ -124,22 +120,16 @@ pub struct ApiRouter {
 
 impl ApiRouter {
     pub fn new() -> Self {
-        Self {
-            handlers: HashMap::new(),
-        }
+        Self { handlers: HashMap::new() }
     }
 
     /// Register an API handler for a module
     pub fn register_handler(&mut self, handler: ApiHandler) {
-        self.handlers
-            .insert(handler.module_name().to_string(), handler);
+        self.handlers.insert(handler.module_name().to_string(), handler);
     }
 
     /// Route a request to the appropriate handler
-    pub async fn route_request(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn route_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         // Try to find a handler that supports this route
         for handler in self.handlers.values() {
             for route in handler.supported_routes() {
@@ -174,10 +164,7 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
 
     // 分割path and query parameters
     let (path, query_str) = if let Some(pos) = path_with_query.find('?') {
-        (
-            path_with_query[..pos].to_string(),
-            Some(&path_with_query[pos + 1..]),
-        )
+        (path_with_query[..pos].to_string(), Some(&path_with_query[pos + 1..]))
     } else {
         (path_with_query.to_string(), None)
     };
@@ -210,10 +197,7 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
 }
 
 /// 向客户端发送 HTTP 响应
-pub async fn send_http_response(
-    stream: &mut TcpStream,
-    response: &HttpResponse,
-) -> Result<(), anyhow::Error> {
+pub async fn send_http_response(stream: &mut TcpStream, response: &HttpResponse) -> Result<(), anyhow::Error> {
     use tokio::io::AsyncWriteExt;
 
     let status_text = match response.status {

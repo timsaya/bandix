@@ -1,8 +1,6 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
-use crate::storage::traffic::{
-    self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot,
-};
+use crate::storage::traffic::{self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -123,13 +121,13 @@ pub struct TimeSeriesIncrement {
 pub struct TimeSeriesIncrementResponse {
     pub start_ms: u64,
     pub end_ms: u64,
-    pub aggregation: String,   // "hourly" 或 "daily"
-    pub mac: String,           // MAC 地址（或 "all" 表示聚合）
-    pub network_type: String,  // "wan" 或 "lan"
+    pub aggregation: String,  // "hourly" 或 "daily"
+    pub mac: String,          // MAC 地址（或 "all" 表示聚合）
+    pub network_type: String, // "wan" 或 "lan"
     pub increments: Vec<TimeSeriesIncrement>,
-    pub total_rx_bytes: u64,   // 范围内的总 RX 字节数
-    pub total_tx_bytes: u64,   // 范围内的总 TX 字节数
-    pub total_bytes: u64,      // 范围内的总字节数
+    pub total_rx_bytes: u64, // 范围内的总 RX 字节数
+    pub total_tx_bytes: u64, // 范围内的总 TX 字节数
+    pub total_bytes: u64,    // 范围内的总字节数
 }
 
 /// 主机名绑定信息，用于 API 响应
@@ -273,10 +271,7 @@ impl TrafficApiHandler {
         ]
     }
 
-    pub async fn handle_request(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         match request.path.as_str() {
             "/api/traffic/devices" => {
                 if request.method == "GET" {
@@ -347,12 +342,7 @@ impl TrafficApiHandler {
                 week_start_local.timestamp_millis() as u64
             }
             "month" => {
-                let month_start = now
-                    .date_naive()
-                    .with_day(1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap();
+                let month_start = now.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap();
                 let month_start_local = Local.from_local_datetime(&month_start).unwrap();
                 month_start_local.timestamp_millis() as u64
             }
@@ -376,12 +366,12 @@ impl TrafficApiHandler {
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
-        let all_devices = self.device_manager.get_all_devices();
+        let all_devices = self.device_manager.get_all_devices_with_mac();
 
         let devices: Vec<DeviceInfo> = all_devices
             .into_iter()
-            .map(|device| {
-                let mac = device.mac;
+            .map(|(mac, device)| {
+                let mac = mac;
                 let mac_str = format_mac(&mac);
 
                 // 获取 IPv4 和 IPv6 地址
@@ -394,10 +384,7 @@ impl TrafficApiHandler {
                     }
                 }
 
-                let ip_str = format!(
-                    "{}.{}.{}.{}",
-                    final_ipv4[0], final_ipv4[1], final_ipv4[2], final_ipv4[3]
-                );
+                let ip_str = format!("{}.{}.{}.{}", final_ipv4[0], final_ipv4[1], final_ipv4[2], final_ipv4[3]);
 
                 let mut ipv6_addresses: Vec<String> = ipv6_set
                     .iter()
@@ -427,9 +414,7 @@ impl TrafficApiHandler {
                     let mut period_lan_tx = 0u64;
 
                     // 从ring文件获取start_ms到end_ms之间已保存的增量
-                    if let Ok(stats_rows) =
-                        self.long_term_manager.query_stats(&mac, start_ms, end_ms)
-                    {
+                    if let Ok(stats_rows) = self.long_term_manager.query_stats(&mac, start_ms, end_ms) {
                         for row in &stats_rows {
                             period_wan_rx = period_wan_rx.saturating_add(row.wan_rx_bytes_inc);
                             period_wan_tx = period_wan_tx.saturating_add(row.wan_tx_bytes_inc);
@@ -440,9 +425,7 @@ impl TrafficApiHandler {
 
                     // 加上当前小时的增量（accumulator中是最新数据，ring文件1小时才保存一次）
                     let active_increments = self.long_term_manager.get_active_increments();
-                    if let Some(&(wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) =
-                        active_increments.get(&mac)
-                    {
+                    if let Some(&(wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) = active_increments.get(&mac) {
                         period_wan_rx = period_wan_rx.saturating_add(wan_rx_inc);
                         period_wan_tx = period_wan_tx.saturating_add(wan_tx_inc);
                         period_lan_rx = period_lan_rx.saturating_add(lan_rx_inc);
@@ -496,10 +479,8 @@ impl TrafficApiHandler {
         let mut devices = devices;
         devices.retain(|device| device.ip != "0.0.0.0");
         devices.sort_by(|a, b| {
-            let a_ip: std::net::Ipv4Addr =
-                a.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
-            let b_ip: std::net::Ipv4Addr =
-                b.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+            let a_ip: std::net::Ipv4Addr = a.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
+            let b_ip: std::net::Ipv4Addr = b.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
             a_ip.cmp(&b_ip)
         });
 
@@ -509,7 +490,7 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// 处理/api/metrics endpoint - 实时指标（仅内存，未持久化）
+    /// 处理/api/traffic/metrics endpoint - 实时指标（仅内存，未持久化）
     async fn handle_metrics(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let mac_opt = request.query_params.get("mac").cloned();
 
@@ -517,21 +498,21 @@ impl TrafficApiHandler {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
-        let start_ms =
-            now_ms.saturating_sub(self.options.traffic_retention_seconds() as u64 * 1000);
+
+        let start_ms = now_ms.saturating_sub(self.options.traffic_retention_seconds() as u64 * 1000);
+
         let end_ms = now_ms;
 
         let (rows_result, mac_label) = if let Some(mac_str) = mac_opt {
             if mac_str.to_ascii_lowercase() == "all" || mac_str.trim().is_empty() {
                 (
-                    self.realtime_manager
-                        .query_metrics_aggregate_all(start_ms, end_ms),
+                    self.realtime_manager.query_metrics_aggregate_all(start_ms, end_ms),
                     "all".to_string(),
                 )
             } else {
                 match crate::utils::network_utils::parse_mac_address(&mac_str) {
                     Ok(mac) => (
-                        self.realtime_manager.query_metrics(&mac, start_ms, end_ms),
+                        self.realtime_manager.query_metrics_by_mac(&mac, start_ms, end_ms),
                         format_mac(&mac),
                     ),
                     Err(e) => {
@@ -541,8 +522,7 @@ impl TrafficApiHandler {
             }
         } else {
             (
-                self.realtime_manager
-                    .query_metrics_aggregate_all(start_ms, end_ms),
+                self.realtime_manager.query_metrics_aggregate_all(start_ms, end_ms),
                 "all".to_string(),
             )
         };
@@ -606,14 +586,8 @@ impl TrafficApiHandler {
     }
 
     /// 处理/api/traffic/bindings endpoint (POST)
-    async fn handle_set_hostname_binding(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
-        let body = request
-            .body
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+    async fn handle_set_hostname_binding(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
         // 解析JSON request body using serde
         let set_binding_request: SetHostnameBindingRequest = serde_json::from_str(body)?;
@@ -642,11 +616,7 @@ impl TrafficApiHandler {
         if hostname.is_empty() {
             log::info!("Hostname binding cleared for MAC: {}", format_mac(&mac));
         } else {
-            log::info!(
-                "Hostname binding set for MAC: {} -> {}",
-                format_mac(&mac),
-                hostname
-            );
+            log::info!("Hostname binding set for MAC: {} -> {}", format_mac(&mac), hostname);
         }
 
         let api_response = ApiResponse::success(());
@@ -675,21 +645,14 @@ impl TrafficApiHandler {
     }
 
     /// 处理/api/traffic/limits/schedule endpoint (POST)
-    async fn handle_set_scheduled_limit(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
-        let body = request
-            .body
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+    async fn handle_set_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
         // 解析JSON request body
         let set_request: SetScheduledLimitRequest = serde_json::from_str(body)?;
 
         let mac = crate::utils::network_utils::parse_mac_address(&set_request.mac)?;
-        let time_slot = TimeSlot::try_from(&set_request.time_slot)
-            .map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
+        let time_slot = TimeSlot::try_from(&set_request.time_slot).map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
 
         let scheduled_limit = ScheduledRateLimit {
             mac,
@@ -745,21 +708,14 @@ impl TrafficApiHandler {
     }
 
     /// 处理/api/traffic/limits/schedule endpoint (DELETE)
-    async fn handle_delete_scheduled_limit(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
-        let body = request
-            .body
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+    async fn handle_delete_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
         // 解析JSON request body
         let delete_request: DeleteScheduledLimitRequest = serde_json::from_str(body)?;
 
         let mac = crate::utils::network_utils::parse_mac_address(&delete_request.mac)?;
-        let time_slot = TimeSlot::try_from(&delete_request.time_slot)
-            .map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
+        let time_slot = TimeSlot::try_from(&delete_request.time_slot).map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
 
         // 移除from in-memory scheduled rate limits
         {
@@ -792,14 +748,10 @@ impl TrafficApiHandler {
     }
 
     /// 处理/api/traffic/usage/ranking endpoint
-    /// 从年级数据查询指定时间范围内的设备使用排名
     /// 查询参数：
     ///   - start_ms: 开始时间戳，毫秒（可选，默认为 365 天前）
     ///   - end_ms: 结束时间戳，毫秒（可选，默认为现在）
-    async fn handle_usage_ranking(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_usage_ranking(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         // 从查询参数解析时间范围
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -821,6 +773,8 @@ impl TrafficApiHandler {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(now_ms);
 
+        println!("{},{}", start_ms, end_ms);
+
         // 验证时间范围
         if start_ms >= end_ms {
             return Ok(HttpResponse::error(
@@ -829,65 +783,67 @@ impl TrafficApiHandler {
             ));
         }
 
-        // 查询所有设备的统计信息（已保存到ring的数据）
-        let mut device_stats = match self
-            .long_term_manager
-            .query_stats_by_device(start_ms, end_ms)
-        {
+        // 查询所有设备的统计信息
+        let mut device_stats = match self.long_term_manager.query_stats_by_device(start_ms, end_ms) {
             Ok(stats) => stats,
             Err(e) => {
-                return Ok(HttpResponse::error(
-                    500,
-                    format!("Failed to query stats: {}", e),
-                ));
+                return Ok(HttpResponse::error(500, format!("Failed to query stats: {}", e)));
             }
         };
 
-        // 加上当前小时的增量（从accumulator获取）
-        let active_increments = self.long_term_manager.get_active_increments();
-        for (mac, (wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) in active_increments.iter() {
-            let entry = device_stats.entry(*mac).or_insert_with(|| {
-                use crate::storage::traffic::MetricsRowWithStats;
-                MetricsRowWithStats {
-                    start_ts_ms: start_ms,
-                    end_ts_ms: end_ms,
-                    wan_rx_rate_avg: 0,
-                    wan_rx_rate_max: 0,
-                    wan_rx_rate_min: 0,
-                    wan_rx_rate_p90: 0,
-                    wan_rx_rate_p95: 0,
-                    wan_rx_rate_p99: 0,
-                    wan_tx_rate_avg: 0,
-                    wan_tx_rate_max: 0,
-                    wan_tx_rate_min: 0,
-                    wan_tx_rate_p90: 0,
-                    wan_tx_rate_p95: 0,
-                    wan_tx_rate_p99: 0,
-                    wan_rx_bytes_inc: 0,
-                    wan_tx_bytes_inc: 0,
-                    lan_rx_rate_avg: 0,
-                    lan_rx_rate_max: 0,
-                    lan_rx_rate_min: 0,
-                    lan_rx_rate_p90: 0,
-                    lan_rx_rate_p95: 0,
-                    lan_rx_rate_p99: 0,
-                    lan_tx_rate_avg: 0,
-                    lan_tx_rate_max: 0,
-                    lan_tx_rate_min: 0,
-                    lan_tx_rate_p90: 0,
-                    lan_tx_rate_p95: 0,
-                    lan_tx_rate_p99: 0,
-                    lan_rx_bytes_inc: 0,
-                    lan_tx_bytes_inc: 0,
-                    last_online_ts: 0,
-                }
-            });
-            
-            // 加上当前小时的增量
-            entry.wan_rx_bytes_inc = entry.wan_rx_bytes_inc.saturating_add(*wan_rx_inc);
-            entry.wan_tx_bytes_inc = entry.wan_tx_bytes_inc.saturating_add(*wan_tx_inc);
-            entry.lan_rx_bytes_inc = entry.lan_rx_bytes_inc.saturating_add(*lan_rx_inc);
-            entry.lan_tx_bytes_inc = entry.lan_tx_bytes_inc.saturating_add(*lan_tx_inc);
+        // 只有当查询时间范围包含当前小时时，才加上当前小时的增量（从accumulator获取）
+        let current_hour_start = (now_ms / (3600 * 1000)) * (3600 * 1000); // 当前小时开始时间
+        let current_hour_end = current_hour_start + (3600 * 1000); // 当前小时结束时间
+
+        // 检查查询时间范围是否与当前小时有重叠
+        let query_overlaps_current_hour = start_ms < current_hour_end && end_ms > current_hour_start;
+
+        if query_overlaps_current_hour {
+            let active_increments = self.long_term_manager.get_active_increments();
+            for (mac, (wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) in active_increments.iter() {
+                let entry = device_stats.entry(*mac).or_insert_with(|| {
+                    use crate::storage::traffic::MetricsRowWithStats;
+                    MetricsRowWithStats {
+                        start_ts_ms: start_ms,
+                        end_ts_ms: end_ms,
+                        wan_rx_rate_avg: 0,
+                        wan_rx_rate_max: 0,
+                        wan_rx_rate_min: 0,
+                        wan_rx_rate_p90: 0,
+                        wan_rx_rate_p95: 0,
+                        wan_rx_rate_p99: 0,
+                        wan_tx_rate_avg: 0,
+                        wan_tx_rate_max: 0,
+                        wan_tx_rate_min: 0,
+                        wan_tx_rate_p90: 0,
+                        wan_tx_rate_p95: 0,
+                        wan_tx_rate_p99: 0,
+                        wan_rx_bytes_inc: 0,
+                        wan_tx_bytes_inc: 0,
+                        lan_rx_rate_avg: 0,
+                        lan_rx_rate_max: 0,
+                        lan_rx_rate_min: 0,
+                        lan_rx_rate_p90: 0,
+                        lan_rx_rate_p95: 0,
+                        lan_rx_rate_p99: 0,
+                        lan_tx_rate_avg: 0,
+                        lan_tx_rate_max: 0,
+                        lan_tx_rate_min: 0,
+                        lan_tx_rate_p90: 0,
+                        lan_tx_rate_p95: 0,
+                        lan_tx_rate_p99: 0,
+                        lan_rx_bytes_inc: 0,
+                        lan_tx_bytes_inc: 0,
+                        last_online_ts: 0,
+                    }
+                });
+
+                // 加上当前小时的增量
+                entry.wan_rx_bytes_inc = entry.wan_rx_bytes_inc.saturating_add(*wan_rx_inc);
+                entry.wan_tx_bytes_inc = entry.wan_tx_bytes_inc.saturating_add(*wan_tx_inc);
+                entry.lan_rx_bytes_inc = entry.lan_rx_bytes_inc.saturating_add(*lan_rx_inc);
+                entry.lan_tx_bytes_inc = entry.lan_tx_bytes_inc.saturating_add(*lan_tx_inc);
+            }
         }
 
         if device_stats.is_empty() {
@@ -929,15 +885,9 @@ impl TrafficApiHandler {
                 .or_else(|| bindings_map.get(mac).cloned())
                 .unwrap_or_default();
 
-            let ip_address = device
-                .as_ref()
-                .and_then(|d| d.current_ipv4)
-                .unwrap_or([0, 0, 0, 0]);
+            let ip_address = device.as_ref().and_then(|d| d.current_ipv4).unwrap_or([0, 0, 0, 0]);
 
-            let ip_str = format!(
-                "{}.{}.{}.{}",
-                ip_address[0], ip_address[1], ip_address[2], ip_address[3]
-            );
+            let ip_str = format!("{}.{}.{}.{}", ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
 
             rankings.push(DeviceUsageRanking {
                 mac: mac_str,
@@ -988,10 +938,7 @@ impl TrafficApiHandler {
     ///   - end_ms: 结束时间戳，毫秒（可选，默认为现在）
     ///   - aggregation: "hourly" 或 "daily"（可选，默认为 "hourly"）
     ///   - network_type: "wan" 或 "lan"（可选，默认为 "wan"）
-    async fn handle_usage_increments(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_usage_increments(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let aggregation = request
             .query_params
             .get("aggregation")
@@ -1061,17 +1008,13 @@ impl TrafficApiHandler {
         let rows_result = if let Some(mac) = query_mac {
             self.long_term_manager.query_stats(&mac, start_ms, end_ms)
         } else {
-            self.long_term_manager
-                .query_stats_aggregate_all(start_ms, end_ms)
+            self.long_term_manager.query_stats_aggregate_all(start_ms, end_ms)
         };
 
         let rows = match rows_result {
             Ok(rows) => rows,
             Err(e) => {
-                return Ok(HttpResponse::error(
-                    500,
-                    format!("Failed to query stats: {}", e),
-                ));
+                return Ok(HttpResponse::error(500, format!("Failed to query stats: {}", e)));
             }
         };
 
@@ -1153,11 +1096,7 @@ impl TrafficApiHandler {
             increments
         };
 
-        let mac_label = request
-            .query_params
-            .get("mac")
-            .cloned()
-            .unwrap_or_else(|| "all".to_string());
+        let mac_label = request.query_params.get("mac").cloned().unwrap_or_else(|| "all".to_string());
 
         let (total_rx_bytes, total_tx_bytes) = if network_type == "wan" {
             (
@@ -1171,14 +1110,8 @@ impl TrafficApiHandler {
             )
         } else {
             (
-                increments
-                    .iter()
-                    .map(|inc| inc.wan_rx_bytes_inc + inc.lan_rx_bytes_inc)
-                    .sum(),
-                increments
-                    .iter()
-                    .map(|inc| inc.wan_tx_bytes_inc + inc.lan_tx_bytes_inc)
-                    .sum(),
+                increments.iter().map(|inc| inc.wan_rx_bytes_inc + inc.lan_rx_bytes_inc).sum(),
+                increments.iter().map(|inc| inc.wan_tx_bytes_inc + inc.lan_tx_bytes_inc).sum(),
             )
         };
 
@@ -1205,11 +1138,7 @@ impl TrafficApiHandler {
 /// 将每小时增量聚合为每日总数
 /// 按日分组增量（每天的 00:00:00 UTC）
 /// 过滤掉不在请求时间范围 [start_ms, end_ms) 内的日期
-fn aggregate_to_daily(
-    hourly_increments: Vec<TimeSeriesIncrement>,
-    start_ms: u64,
-    end_ms: u64,
-) -> Vec<TimeSeriesIncrement> {
+fn aggregate_to_daily(hourly_increments: Vec<TimeSeriesIncrement>, start_ms: u64, end_ms: u64) -> Vec<TimeSeriesIncrement> {
     use std::collections::BTreeMap;
 
     #[derive(Default)]
@@ -1251,8 +1180,7 @@ fn aggregate_to_daily(
 
     for inc in hourly_increments {
         let ts_secs = (inc.start_ts_ms / 1000) as i64;
-        let dt = DateTime::<Utc>::from_timestamp(ts_secs, 0)
-            .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
+        let dt = DateTime::<Utc>::from_timestamp(ts_secs, 0).unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
 
         let day_start_dt = dt.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let day_start_utc = DateTime::<Utc>::from_naive_utc_and_offset(day_start_dt, Utc);
@@ -1269,18 +1197,14 @@ fn aggregate_to_daily(
             entry.lan_tx_rate_min = inc.lan_tx_rate_min;
         }
 
-        entry.wan_rx_rate_avg_sum = entry
-            .wan_rx_rate_avg_sum
-            .saturating_add(inc.wan_rx_rate_avg);
+        entry.wan_rx_rate_avg_sum = entry.wan_rx_rate_avg_sum.saturating_add(inc.wan_rx_rate_avg);
         entry.wan_rx_rate_max = entry.wan_rx_rate_max.max(inc.wan_rx_rate_max);
         entry.wan_rx_rate_min = entry.wan_rx_rate_min.min(inc.wan_rx_rate_min);
         entry.wan_rx_rate_p90_sum = entry.wan_rx_rate_p90_sum.saturating_add(inc.wan_rx_rate_p90);
         entry.wan_rx_rate_p95_sum = entry.wan_rx_rate_p95_sum.saturating_add(inc.wan_rx_rate_p95);
         entry.wan_rx_rate_p99_sum = entry.wan_rx_rate_p99_sum.saturating_add(inc.wan_rx_rate_p99);
 
-        entry.wan_tx_rate_avg_sum = entry
-            .wan_tx_rate_avg_sum
-            .saturating_add(inc.wan_tx_rate_avg);
+        entry.wan_tx_rate_avg_sum = entry.wan_tx_rate_avg_sum.saturating_add(inc.wan_tx_rate_avg);
         entry.wan_tx_rate_max = entry.wan_tx_rate_max.max(inc.wan_tx_rate_max);
         entry.wan_tx_rate_min = entry.wan_tx_rate_min.min(inc.wan_tx_rate_min);
         entry.wan_tx_rate_p90_sum = entry.wan_tx_rate_p90_sum.saturating_add(inc.wan_tx_rate_p90);
@@ -1290,18 +1214,14 @@ fn aggregate_to_daily(
         entry.wan_rx_bytes_inc = entry.wan_rx_bytes_inc.saturating_add(inc.wan_rx_bytes_inc);
         entry.wan_tx_bytes_inc = entry.wan_tx_bytes_inc.saturating_add(inc.wan_tx_bytes_inc);
 
-        entry.lan_rx_rate_avg_sum = entry
-            .lan_rx_rate_avg_sum
-            .saturating_add(inc.lan_rx_rate_avg);
+        entry.lan_rx_rate_avg_sum = entry.lan_rx_rate_avg_sum.saturating_add(inc.lan_rx_rate_avg);
         entry.lan_rx_rate_max = entry.lan_rx_rate_max.max(inc.lan_rx_rate_max);
         entry.lan_rx_rate_min = entry.lan_rx_rate_min.min(inc.lan_rx_rate_min);
         entry.lan_rx_rate_p90_sum = entry.lan_rx_rate_p90_sum.saturating_add(inc.lan_rx_rate_p90);
         entry.lan_rx_rate_p95_sum = entry.lan_rx_rate_p95_sum.saturating_add(inc.lan_rx_rate_p95);
         entry.lan_rx_rate_p99_sum = entry.lan_rx_rate_p99_sum.saturating_add(inc.lan_rx_rate_p99);
 
-        entry.lan_tx_rate_avg_sum = entry
-            .lan_tx_rate_avg_sum
-            .saturating_add(inc.lan_tx_rate_avg);
+        entry.lan_tx_rate_avg_sum = entry.lan_tx_rate_avg_sum.saturating_add(inc.lan_tx_rate_avg);
         entry.lan_tx_rate_max = entry.lan_tx_rate_max.max(inc.lan_tx_rate_max);
         entry.lan_tx_rate_min = entry.lan_tx_rate_min.min(inc.lan_tx_rate_min);
         entry.lan_tx_rate_p90_sum = entry.lan_tx_rate_p90_sum.saturating_add(inc.lan_tx_rate_p90);
@@ -1320,96 +1240,32 @@ fn aggregate_to_daily(
         .map(|(_, agg)| TimeSeriesIncrement {
             start_ts_ms: agg.start_ts_ms,
             end_ts_ms: agg.end_ts_ms,
-            wan_rx_rate_avg: if agg.count > 0 {
-                agg.wan_rx_rate_avg_sum / agg.count
-            } else {
-                0
-            },
+            wan_rx_rate_avg: if agg.count > 0 { agg.wan_rx_rate_avg_sum / agg.count } else { 0 },
             wan_rx_rate_max: agg.wan_rx_rate_max,
             wan_rx_rate_min: agg.wan_rx_rate_min,
-            wan_rx_rate_p90: if agg.count > 0 {
-                agg.wan_rx_rate_p90_sum / agg.count
-            } else {
-                0
-            },
-            wan_rx_rate_p95: if agg.count > 0 {
-                agg.wan_rx_rate_p95_sum / agg.count
-            } else {
-                0
-            },
-            wan_rx_rate_p99: if agg.count > 0 {
-                agg.wan_rx_rate_p99_sum / agg.count
-            } else {
-                0
-            },
-            wan_tx_rate_avg: if agg.count > 0 {
-                agg.wan_tx_rate_avg_sum / agg.count
-            } else {
-                0
-            },
+            wan_rx_rate_p90: if agg.count > 0 { agg.wan_rx_rate_p90_sum / agg.count } else { 0 },
+            wan_rx_rate_p95: if agg.count > 0 { agg.wan_rx_rate_p95_sum / agg.count } else { 0 },
+            wan_rx_rate_p99: if agg.count > 0 { agg.wan_rx_rate_p99_sum / agg.count } else { 0 },
+            wan_tx_rate_avg: if agg.count > 0 { agg.wan_tx_rate_avg_sum / agg.count } else { 0 },
             wan_tx_rate_max: agg.wan_tx_rate_max,
             wan_tx_rate_min: agg.wan_tx_rate_min,
-            wan_tx_rate_p90: if agg.count > 0 {
-                agg.wan_tx_rate_p90_sum / agg.count
-            } else {
-                0
-            },
-            wan_tx_rate_p95: if agg.count > 0 {
-                agg.wan_tx_rate_p95_sum / agg.count
-            } else {
-                0
-            },
-            wan_tx_rate_p99: if agg.count > 0 {
-                agg.wan_tx_rate_p99_sum / agg.count
-            } else {
-                0
-            },
+            wan_tx_rate_p90: if agg.count > 0 { agg.wan_tx_rate_p90_sum / agg.count } else { 0 },
+            wan_tx_rate_p95: if agg.count > 0 { agg.wan_tx_rate_p95_sum / agg.count } else { 0 },
+            wan_tx_rate_p99: if agg.count > 0 { agg.wan_tx_rate_p99_sum / agg.count } else { 0 },
             wan_rx_bytes_inc: agg.wan_rx_bytes_inc,
             wan_tx_bytes_inc: agg.wan_tx_bytes_inc,
-            lan_rx_rate_avg: if agg.count > 0 {
-                agg.lan_rx_rate_avg_sum / agg.count
-            } else {
-                0
-            },
+            lan_rx_rate_avg: if agg.count > 0 { agg.lan_rx_rate_avg_sum / agg.count } else { 0 },
             lan_rx_rate_max: agg.lan_rx_rate_max,
             lan_rx_rate_min: agg.lan_rx_rate_min,
-            lan_rx_rate_p90: if agg.count > 0 {
-                agg.lan_rx_rate_p90_sum / agg.count
-            } else {
-                0
-            },
-            lan_rx_rate_p95: if agg.count > 0 {
-                agg.lan_rx_rate_p95_sum / agg.count
-            } else {
-                0
-            },
-            lan_rx_rate_p99: if agg.count > 0 {
-                agg.lan_rx_rate_p99_sum / agg.count
-            } else {
-                0
-            },
-            lan_tx_rate_avg: if agg.count > 0 {
-                agg.lan_tx_rate_avg_sum / agg.count
-            } else {
-                0
-            },
+            lan_rx_rate_p90: if agg.count > 0 { agg.lan_rx_rate_p90_sum / agg.count } else { 0 },
+            lan_rx_rate_p95: if agg.count > 0 { agg.lan_rx_rate_p95_sum / agg.count } else { 0 },
+            lan_rx_rate_p99: if agg.count > 0 { agg.lan_rx_rate_p99_sum / agg.count } else { 0 },
+            lan_tx_rate_avg: if agg.count > 0 { agg.lan_tx_rate_avg_sum / agg.count } else { 0 },
             lan_tx_rate_max: agg.lan_tx_rate_max,
             lan_tx_rate_min: agg.lan_tx_rate_min,
-            lan_tx_rate_p90: if agg.count > 0 {
-                agg.lan_tx_rate_p90_sum / agg.count
-            } else {
-                0
-            },
-            lan_tx_rate_p95: if agg.count > 0 {
-                agg.lan_tx_rate_p95_sum / agg.count
-            } else {
-                0
-            },
-            lan_tx_rate_p99: if agg.count > 0 {
-                agg.lan_tx_rate_p99_sum / agg.count
-            } else {
-                0
-            },
+            lan_tx_rate_p90: if agg.count > 0 { agg.lan_tx_rate_p90_sum / agg.count } else { 0 },
+            lan_tx_rate_p95: if agg.count > 0 { agg.lan_tx_rate_p95_sum / agg.count } else { 0 },
+            lan_tx_rate_p99: if agg.count > 0 { agg.lan_tx_rate_p99_sum / agg.count } else { 0 },
             lan_rx_bytes_inc: agg.lan_rx_bytes_inc,
             lan_tx_bytes_inc: agg.lan_tx_bytes_inc,
         })

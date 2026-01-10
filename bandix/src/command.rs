@@ -1,9 +1,7 @@
 use crate::device::DeviceManager;
 
 use crate::ebpf::shared::load_shared;
-use crate::monitor::{
-    ConnectionModuleContext, DnsModuleContext, ModuleContext, MonitorManager, TrafficModuleContext,
-};
+use crate::monitor::{ConnectionModuleContext, DnsModuleContext, ModuleContext, MonitorManager, TrafficModuleContext};
 use crate::system::log_startup_info;
 use crate::utils::network_utils::get_interface_info;
 use crate::web;
@@ -43,11 +41,7 @@ pub struct CommonArgs {
 #[derive(Debug, Args, Clone)]
 #[clap(group = clap::ArgGroup::new("traffic").multiple(false))]
 pub struct TrafficArgs {
-    #[clap(
-        long,
-        default_value = "false",
-        help = "Enable traffic monitoring module"
-    )]
+    #[clap(long, default_value = "false", help = "Enable traffic monitoring module")]
     pub enable_traffic: bool,
 
     #[clap(
@@ -177,10 +171,7 @@ impl Options {
 fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
     // 检查网络接口是否存在
     if get_interface_info(opt.iface()).is_none() {
-        return Err(anyhow::anyhow!(
-            "Network interface '{}' does not exist",
-            opt.iface()
-        ));
+        return Err(anyhow::anyhow!("Network interface '{}' does not exist", opt.iface()));
     }
 
     // 检查端口是否有效（0-65535）
@@ -191,15 +182,11 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
     // 仅在启用流量模块时验证流量特定参数
     if opt.enable_traffic() {
         if opt.traffic_retention_seconds() == 0 {
-            return Err(anyhow::anyhow!(
-                "traffic_retention_seconds must be greater than 0"
-            ));
+            return Err(anyhow::anyhow!("traffic_retention_seconds must be greater than 0"));
         }
 
         if opt.traffic_flush_interval_seconds() == 0 {
-            return Err(anyhow::anyhow!(
-                "traffic_persist_interval_seconds must be greater than 0"
-            ));
+            return Err(anyhow::anyhow!("traffic_persist_interval_seconds must be greater than 0"));
         }
     }
 
@@ -224,9 +211,8 @@ impl SubnetInfo {
     pub fn from_interface(iface: &str) -> Result<Self, anyhow::Error> {
         let interface_info = get_interface_info(iface);
 
-        let (interface_ip, subnet_mask) = interface_info.ok_or_else(|| {
-            anyhow::anyhow!("Failed to get interface information for '{}'", iface)
-        })?;
+        let (interface_ip, subnet_mask) =
+            interface_info.ok_or_else(|| anyhow::anyhow!("Failed to get interface information for '{}'", iface))?;
 
         let interface_mac = std::fs::read_to_string(format!("/sys/class/net/{}/address", iface))
             .ok()
@@ -263,22 +249,18 @@ async fn create_module_contexts(
             log::info!("Configuring subnet info maps for traffic module...");
 
             // 配置 IPv4 子网信息映射
-            let mut ipv4_subnet_info: Array<_, [u8; 4]> =
-                Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
+            let mut ipv4_subnet_info: Array<_, [u8; 4]> = Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
             ipv4_subnet_info.set(0, &subnet_info.interface_ip, 0)?;
             ipv4_subnet_info.set(1, &subnet_info.subnet_mask, 0)?;
 
             // 配置 IPv6 子网信息映射
-            let mut ipv6_subnet_info: Array<_, [u8; 32]> =
-                Array::try_from(ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
+            let mut ipv6_subnet_info: Array<_, [u8; 32]> = Array::try_from(ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
 
             for i in 0..16 {
                 ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
             }
 
-            for (idx, (ipv6_addr, prefix_len)) in
-                subnet_info.ipv6_addresses.iter().enumerate().take(16)
-            {
+            for (idx, (ipv6_addr, prefix_len)) in subnet_info.ipv6_addresses.iter().enumerate().take(16) {
                 let mut subnet_data = [0u8; 32];
                 subnet_data[0..16].copy_from_slice(ipv6_addr);
                 subnet_data[16] = *prefix_len;
@@ -326,11 +308,10 @@ async fn create_module_contexts(
             // 在包装到 Arc 之前获取 DNS_DATA RingBuf 映射
             // 这是必要的，因为 take_map 需要独占访问
             log::info!("Acquiring DNS RingBuf map...");
-            Some(ebpf.take_map("DNS_DATA").ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly."
-                )
-            })?)
+            Some(
+                ebpf.take_map("DNS_DATA")
+                    .ok_or_else(|| anyhow::anyhow!("Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly."))?,
+            )
         } else {
             None
         };
@@ -347,12 +328,7 @@ async fn create_module_contexts(
             let egress = Arc::clone(&shared_ebpf_arc);
 
             // 创建流量模块上下文（使用共享的 device_manager）
-            let mut traffic_ctx = TrafficModuleContext::new(
-                options.clone(),
-                ingress,
-                egress,
-                Arc::clone(&device_manager),
-            );
+            let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress, Arc::clone(&device_manager));
             traffic_ctx.hostname_bindings = Arc::clone(shared_hostname_bindings);
 
             module_contexts.push(ModuleContext::Traffic(traffic_ctx));
@@ -397,9 +373,7 @@ async fn create_module_contexts(
 
 // 启动主机名刷新任务：定期从 ubus 更新主机名绑定
 fn start_hostname_refresh_task(
-    shared_hostname_bindings: std::sync::Arc<
-        std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>,
-    >,
+    shared_hostname_bindings: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 6], String>>>,
     options: Options,
     shutdown_notify: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
@@ -449,7 +423,7 @@ fn start_hostname_refresh_task(
     })
 }
 
-// 运行服务，启动 Web 服务器
+// 运行服务
 async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let shutdown_notify_clone = shutdown_notify.clone();
@@ -466,8 +440,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
 
     let subnet_info = SubnetInfo::from_interface(options.iface())?;
 
-    let hostname_bindings_vec =
-        crate::storage::hostname::load_hostname_bindings(options.data_dir()).unwrap_or_default();
+    let hostname_bindings_vec = crate::storage::hostname::load_hostname_bindings(options.data_dir()).unwrap_or_default();
     let shared_hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>> =
         Arc::new(Mutex::new(hostname_bindings_vec.into_iter().collect()));
 
@@ -477,25 +450,16 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         Arc::clone(&shared_hostname_bindings),
     ));
 
-    if let Err(e) = device_manager
-        .refresh_devices(shutdown_notify.clone())
-        .await
-    {
+    // 首次刷新邻居表，获取局域网设备
+    if let Err(e) = device_manager.refresh_devices().await {
         log::warn!("Failed to load initial devices: {}", e);
     }
 
     // 启动设备管理器的后台任务
-    let device_refresh_task = Arc::clone(&device_manager)
-        .start_background_task(Duration::from_secs(60), shutdown_notify.clone());
+    let device_refresh_task = Arc::clone(&device_manager).start_background_task(Duration::from_secs(60), shutdown_notify.clone());
 
     // 创建模块上下文：加载 eBPF 程序并配置内核映射
-    let module_contexts = create_module_contexts(
-        options,
-        &subnet_info,
-        &shared_hostname_bindings,
-        Arc::clone(&device_manager),
-    )
-    .await?;
+    let module_contexts = create_module_contexts(options, &subnet_info, &shared_hostname_bindings, Arc::clone(&device_manager)).await?;
 
     // 初始化模块
     let mut monitor_manager = MonitorManager::from_contexts(&module_contexts);
@@ -506,24 +470,17 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let options_for_web = options.clone();
     let shutdown_notify_for_web = shutdown_notify.clone();
     let web_task = tokio::spawn(async move {
-        if let Err(e) =
-            web::start_server(options_for_web, api_router, shutdown_notify_for_web).await
-        {
+        if let Err(e) = web::start_server(options_for_web, api_router, shutdown_notify_for_web).await {
             log::error!("Web server error: {}", e);
         }
     });
 
     // 启动主机名刷新任务
-    let hostname_refresh_task = start_hostname_refresh_task(
-        Arc::clone(&shared_hostname_bindings),
-        options.clone(),
-        shutdown_notify.clone(),
-    );
+    let hostname_refresh_task =
+        start_hostname_refresh_task(Arc::clone(&shared_hostname_bindings), options.clone(), shutdown_notify.clone());
 
     // 通过 MonitorManager 为所有模块启动内部循环
-    let mut tasks = monitor_manager
-        .start_modules(module_contexts, shutdown_notify.clone())
-        .await?;
+    let mut tasks = monitor_manager.start_modules(module_contexts, shutdown_notify.clone()).await?;
 
     tasks.push(web_task);
     tasks.push(hostname_refresh_task);

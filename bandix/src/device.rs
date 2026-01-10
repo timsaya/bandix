@@ -96,10 +96,7 @@ impl UnifiedDevice {
     }
 
     pub fn update_ipv4(&mut self, ip: [u8; 4]) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
         if let Some(current) = self.current_ipv4 {
             if current != ip {
@@ -116,10 +113,7 @@ impl UnifiedDevice {
     }
 
     pub fn update_ipv6(&mut self, ipv6_list: &[[u8; 16]]) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
         let new_set: HashSet<[u8; 16]> = ipv6_list.iter().copied().collect();
 
@@ -141,10 +135,7 @@ impl UnifiedDevice {
     }
 
     pub fn touch(&mut self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
         self.last_online_ts = now;
     }
 
@@ -167,11 +158,7 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
-    pub fn new(
-        iface: String,
-        subnet_info: SubnetInfo,
-        hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
-    ) -> Self {
+    pub fn new(iface: String, subnet_info: SubnetInfo, hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>) -> Self {
         Self {
             devices: Arc::new(Mutex::new(HashMap::new())),
             iface,
@@ -191,9 +178,9 @@ impl DeviceManager {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let shutdown_notify_clone = shutdown_notify.clone();
+
                         tokio::select! {
-                            result = self.refresh_devices(shutdown_notify_clone) => {
+                            result = self.refresh_devices() => {
                                 if let Err(e) = result {
                                     log::warn!("Failed to refresh devices: {}", e);
                                 }
@@ -230,10 +217,7 @@ impl DeviceManager {
 
                 // 检查邻居状态，只保留有效状态
                 let state = parts.get(parts.len() - 1).unwrap_or(&"");
-                if matches!(
-                    *state,
-                    "FAILED" | "NOARP" | "INCOMPLETE" | "INVALID"
-                ) {
+                if matches!(*state, "FAILED" | "NOARP" | "INCOMPLETE" | "INVALID") {
                     continue;
                 }
 
@@ -246,17 +230,12 @@ impl DeviceManager {
                 // 查找 MAC 地址 (lladdr)
                 if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
                     if lladdr_pos + 1 < parts.len() {
-                        if let Ok(mac) = crate::utils::network_utils::parse_mac_address(
-                            parts[lladdr_pos + 1],
-                        ) {
+                        if let Ok(mac) = crate::utils::network_utils::parse_mac_address(parts[lladdr_pos + 1]) {
                             if Self::is_special_mac_address(&mac) {
                                 continue;
                             }
 
-                            devices_map
-                                .entry(mac)
-                                .or_insert_with(|| (None, Vec::new()))
-                                .0 = Some(ipv4.octets());
+                            devices_map.entry(mac).or_insert_with(|| (None, Vec::new())).0 = Some(ipv4.octets());
                         }
                     }
                 }
@@ -277,10 +256,7 @@ impl DeviceManager {
 
                 // 检查邻居状态，只保留有效状态
                 let state = parts.get(parts.len() - 1).unwrap_or(&"");
-                if matches!(
-                    *state,
-                    "FAILED" | "NOARP" | "INCOMPLETE" | "INVALID"
-                ) {
+                if matches!(*state, "FAILED" | "NOARP" | "INCOMPLETE" | "INVALID") {
                     continue;
                 }
 
@@ -293,9 +269,7 @@ impl DeviceManager {
                 // 查找 MAC 地址 (lladdr)
                 if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
                     if lladdr_pos + 1 < parts.len() {
-                        if let Ok(mac) = crate::utils::network_utils::parse_mac_address(
-                            parts[lladdr_pos + 1],
-                        ) {
+                        if let Ok(mac) = crate::utils::network_utils::parse_mac_address(parts[lladdr_pos + 1]) {
                             if Self::is_special_mac_address(&mac) {
                                 continue;
                             }
@@ -319,21 +293,16 @@ impl DeviceManager {
             .map(|(_, ipv6)| ipv6.clone())
             .unwrap_or_default();
 
-        devices_map.insert(
-            interface_mac,
-            (Some(interface_ipv4), interface_ipv6_addresses),
-        );
+        devices_map.insert(interface_mac, (Some(interface_ipv4), interface_ipv6_addresses));
 
         // 转换为向量格式
-        let devices: Vec<([u8; 6], Option<[u8; 4]>, Vec<[u8; 16]>)> = devices_map
-            .into_iter()
-            .map(|(mac, (ipv4, ipv6))| (mac, ipv4, ipv6))
-            .collect();
+        let devices: Vec<([u8; 6], Option<[u8; 4]>, Vec<[u8; 16]>)> =
+            devices_map.into_iter().map(|(mac, (ipv4, ipv6))| (mac, ipv4, ipv6)).collect();
 
         Ok(devices)
     }
 
-    pub async fn refresh_devices(&self, _shutdown_notify: Arc<tokio::sync::Notify>) -> Result<()> {
+    pub async fn refresh_devices(&self) -> Result<()> {
         log::debug!("Starting device refresh for interface: {}", self.iface);
 
         let neighbor_devices = self.read_neighbor_table()?;
@@ -342,14 +311,13 @@ impl DeviceManager {
         let hostname_bindings = self.hostname_bindings.lock().unwrap();
 
         let mut devices = self.devices.lock().unwrap();
+
         let mut updated_count = 0;
         let mut new_count = 0;
 
         for (mac, ipv4, ipv6_list) in neighbor_devices {
             let is_new = !devices.contains_key(&mac);
-            let device = devices
-                .entry(mac)
-                .or_insert_with(|| UnifiedDevice::new(mac));
+            let device = devices.entry(mac).or_insert_with(|| UnifiedDevice::new(mac));
 
             if is_new {
                 new_count += 1;
@@ -387,11 +355,6 @@ impl DeviceManager {
         devices.get(mac).cloned()
     }
 
-    pub fn get_all_devices(&self) -> Vec<UnifiedDevice> {
-        let devices = self.devices.lock().unwrap();
-        devices.values().cloned().collect()
-    }
-
     pub fn update_device_traffic_stats<F>(&self, mac: &[u8; 6], updater: F) -> Result<()>
     where
         F: FnOnce(&mut UnifiedDevice),
@@ -405,12 +368,9 @@ impl DeviceManager {
         }
     }
 
-    pub fn get_all_devices_for_snapshot(&self) -> Vec<([u8; 6], UnifiedDevice)> {
+    pub fn get_all_devices_with_mac(&self) -> Vec<([u8; 6], UnifiedDevice)> {
         let devices = self.devices.lock().unwrap();
-        devices
-            .iter()
-            .map(|(mac, device)| (*mac, device.clone()))
-            .collect()
+        devices.iter().map(|(mac, device)| (*mac, device.clone())).collect()
     }
 
     /// 添加离线设备（从 ring 文件恢复的设备）
@@ -419,9 +379,7 @@ impl DeviceManager {
         let hostname_bindings = self.hostname_bindings.lock().unwrap();
         let mut devices = self.devices.lock().unwrap();
 
-        let device = devices
-            .entry(mac)
-            .or_insert_with(|| UnifiedDevice::new(mac));
+        let device = devices.entry(mac).or_insert_with(|| UnifiedDevice::new(mac));
 
         if let Some(hostname) = hostname_bindings.get(&mac) {
             device.update_hostname(hostname.clone());
@@ -457,17 +415,9 @@ mod tests {
 
     #[test]
     fn test_is_special_mac_address() {
-        assert!(DeviceManager::is_special_mac_address(&[
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
-        ]));
-        assert!(DeviceManager::is_special_mac_address(&[
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00
-        ]));
-        assert!(DeviceManager::is_special_mac_address(&[
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        ]));
-        assert!(!DeviceManager::is_special_mac_address(&[
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55
-        ]));
+        assert!(DeviceManager::is_special_mac_address(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]));
+        assert!(DeviceManager::is_special_mac_address(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00]));
+        assert!(DeviceManager::is_special_mac_address(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]));
+        assert!(!DeviceManager::is_special_mac_address(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
     }
 }

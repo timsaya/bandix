@@ -276,17 +276,13 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
             }
 
             // Parse UDP ports - check port first for early return
-            let src_port_bytes = match (ctx.load(udp_header_start), ctx.load(udp_header_start + 1))
-            {
+            let src_port_bytes = match (ctx.load(udp_header_start), ctx.load(udp_header_start + 1)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let src_port = u16::from_be_bytes(src_port_bytes);
 
-            let dst_port_bytes = match (
-                ctx.load(udp_header_start + 2),
-                ctx.load(udp_header_start + 3),
-            ) {
+            let dst_port_bytes = match (ctx.load(udp_header_start + 2), ctx.load(udp_header_start + 3)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
@@ -311,17 +307,13 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
             }
 
             // Parse TCP ports - check port first for early return
-            let src_port_bytes = match (ctx.load(tcp_header_start), ctx.load(tcp_header_start + 1))
-            {
+            let src_port_bytes = match (ctx.load(tcp_header_start), ctx.load(tcp_header_start + 1)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let src_port = u16::from_be_bytes(src_port_bytes);
 
-            let dst_port_bytes = match (
-                ctx.load(tcp_header_start + 2),
-                ctx.load(tcp_header_start + 3),
-            ) {
+            let dst_port_bytes = match (ctx.load(tcp_header_start + 2), ctx.load(tcp_header_start + 3)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };

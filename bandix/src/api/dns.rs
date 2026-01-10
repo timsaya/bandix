@@ -71,16 +71,16 @@ pub struct DnsStatsInfo {
     pub queries_without_response: usize, // 无响应的查询数（超时/丢失）
 
     // 性能指标
-    pub avg_response_time_ms: f64, // 平均响应时间，毫秒
-    pub min_response_time_ms: u64, // 最快响应时间
-    pub max_response_time_ms: u64, // 最慢响应时间
+    pub avg_response_time_ms: f64,            // 平均响应时间，毫秒
+    pub min_response_time_ms: u64,            // 最快响应时间
+    pub max_response_time_ms: u64,            // 最慢响应时间
     pub latest_response_time_ms: Option<u64>, // 最近响应时间（如果还没有响应则为 None）
     pub response_time_percentiles: ResponseTimePercentiles,
 
     // 成功/失败指标
-    pub success_count: usize, // 成功响应数（NoError）
-    pub failure_count: usize, // 失败响应数（任何错误）
-    pub success_rate: f64,    // 成功率（0.0 - 1.0）
+    pub success_count: usize,                   // 成功响应数（NoError）
+    pub failure_count: usize,                   // 失败响应数（任何错误）
+    pub success_rate: f64,                      // 成功率（0.0 - 1.0）
     pub response_codes: Vec<ResponseCodeStats>, // 按响应代码分类
 
     // 顶级统计
@@ -156,10 +156,7 @@ impl DnsApiHandler {
             if let Some(uptime_secs_str) = content.split_whitespace().next() {
                 if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
                     let uptime_ns = (uptime_secs * 1_000_000_000.0) as u64;
-                    let now_unix_ns = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos() as u64;
+                    let now_unix_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
                     // Boot time = current Unix time - uptime
                     let boot_time_unix_ns = now_unix_ns.saturating_sub(uptime_ns);
                     // Offset = boot time (we'll add this to monotonic timestamps)
@@ -174,10 +171,7 @@ impl DnsApiHandler {
 
         // 后备方案：使用当前时间作为近似值
         // 精度较低，但如果 /proc/uptime 不可用时可以使用
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64
     }
 
     /// 将单调时间戳（纳秒）转换为 Unix 时间戳（毫秒）
@@ -214,10 +208,7 @@ impl DnsApiHandler {
         vec!["/api/dns/queries", "/api/dns/stats", "/api/dns/config"]
     }
 
-    pub async fn handle_request(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         match request.path.as_str() {
             "/api/dns/queries" => {
                 if request.method == "GET" {
@@ -371,16 +362,8 @@ impl DnsApiHandler {
                 } else {
                     client_ip.clone()
                 },
-                source_port: if is_query {
-                    (r1 % 50000 + 1024) as u16
-                } else {
-                    53
-                },
-                destination_port: if is_query {
-                    53
-                } else {
-                    (r1 % 50000 + 1024) as u16
-                },
+                source_port: if is_query { (r1 % 50000 + 1024) as u16 } else { 53 },
+                destination_port: if is_query { 53 } else { (r1 % 50000 + 1024) as u16 },
                 transaction_id,
                 is_query,
                 response_ips,
@@ -409,14 +392,8 @@ impl DnsApiHandler {
         // 获取query parameters
         let domain_filter = request.query_params.get("domain");
         let device_filter = request.query_params.get("device").map(|s| s.to_lowercase());
-        let is_query_filter = request
-            .query_params
-            .get("is_query")
-            .and_then(|s| s.parse::<bool>().ok());
-        let query_type_filter = request
-            .query_params
-            .get("query_type")
-            .map(|s| s.to_uppercase());
+        let is_query_filter = request.query_params.get("is_query").and_then(|s| s.parse::<bool>().ok());
+        let query_type_filter = request.query_params.get("query_type").map(|s| s.to_uppercase());
         let dns_server_filter = request.query_params.get("dns_server");
 
         // Pagination parameters
@@ -438,10 +415,7 @@ impl DnsApiHandler {
         let queries_guard = if let Ok(guard) = self.dns_queries.lock() {
             guard
         } else {
-            return Ok(HttpResponse::error(
-                500,
-                "Failed to lock DNS queries".to_string(),
-            ));
+            return Ok(HttpResponse::error(500, "Failed to lock DNS queries".to_string()));
         };
         let queries = &*queries_guard;
 
@@ -533,16 +507,8 @@ impl DnsApiHandler {
 
         // 按每个组中的最新时间戳排序分组（最新的在前）
         sorted_groups.sort_by(|group_a, group_b| {
-            let max_time_a = group_a
-                .iter()
-                .map(|&idx| queries[idx].timestamp)
-                .max()
-                .unwrap_or(0);
-            let max_time_b = group_b
-                .iter()
-                .map(|&idx| queries[idx].timestamp)
-                .max()
-                .unwrap_or(0);
+            let max_time_a = group_a.iter().map(|&idx| queries[idx].timestamp).max().unwrap_or(0);
+            let max_time_b = group_b.iter().map(|&idx| queries[idx].timestamp).max().unwrap_or(0);
             max_time_b.cmp(&max_time_a)
         });
 
@@ -553,10 +519,7 @@ impl DnsApiHandler {
         }
 
         // 将分组重新展平为单个列表
-        let sorted_indices: Vec<usize> = sorted_groups
-            .into_iter()
-            .flat_map(|group| group.into_iter())
-            .collect();
+        let sorted_indices: Vec<usize> = sorted_groups.into_iter().flat_map(|group| group.into_iter()).collect();
 
         // 计算分页
         let total = sorted_indices.len();
@@ -593,13 +556,10 @@ impl DnsApiHandler {
                 let device_name = if !q.device_mac.is_empty() {
                     // 解析MAC address string to [u8; 6]
                     if let Ok(mac_bytes) = Self::parse_mac_address(&q.device_mac) {
-                        hostname_bindings
-                            .get(&mac_bytes)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                // Fallback to stored hostname if not found in bindings
-                                q.device_name.clone()
-                            })
+                        hostname_bindings.get(&mac_bytes).cloned().unwrap_or_else(|| {
+                            // Fallback to stored hostname if not found in bindings
+                            q.device_name.clone()
+                        })
                     } else {
                         // 如果MAC parsing fails, use stored hostname
                         q.device_name.clone()
@@ -647,11 +607,7 @@ impl DnsApiHandler {
         use std::collections::HashMap;
 
         // 获取所有 DNS 查询
-        let queries = if let Ok(queries) = self.dns_queries.lock() {
-            queries.clone()
-        } else {
-            vec![]
-        };
+        let queries = if let Ok(queries) = self.dns_queries.lock() { queries.clone() } else { vec![] };
 
         // 获取最新的主机名绑定以进行动态查找
         let hostname_bindings = if let Ok(bindings) = self.hostname_bindings.lock() {
@@ -700,18 +656,11 @@ impl DnsApiHandler {
         // 计算basic counts
         let total_queries = queries.iter().filter(|q| q.is_query).count();
         let total_responses = queries.iter().filter(|q| !q.is_query).count();
-        let queries_with_response = queries
-            .iter()
-            .filter(|q| q.is_query && q.response_time_ms.is_some())
-            .count();
+        let queries_with_response = queries.iter().filter(|q| q.is_query && q.response_time_ms.is_some()).count();
         let queries_without_response = total_queries - queries_with_response;
 
         // 计算response time statistics
-        let response_times: Vec<u64> = queries
-            .iter()
-            .filter_map(|q| q.response_time_ms)
-            .filter(|&t| t > 0)
-            .collect();
+        let response_times: Vec<u64> = queries.iter().filter_map(|q| q.response_time_ms).filter(|&t| t > 0).collect();
 
         // 获取latest response time (from the most recent response with response_time_ms)
         let latest_response_time_ms = queries
@@ -720,12 +669,7 @@ impl DnsApiHandler {
             .max_by_key(|q| q.timestamp)
             .and_then(|q| q.response_time_ms);
 
-        let (
-            avg_response_time_ms,
-            min_response_time_ms,
-            max_response_time_ms,
-            response_time_percentiles,
-        ) = if !response_times.is_empty() {
+        let (avg_response_time_ms, min_response_time_ms, max_response_time_ms, response_time_percentiles) = if !response_times.is_empty() {
             let sum: u64 = response_times.iter().sum();
             let avg = sum as f64 / response_times.len() as f64;
             let min = *response_times.iter().min().unwrap();
@@ -740,12 +684,7 @@ impl DnsApiHandler {
             let p95 = sorted_times[len * 95 / 100];
             let p99 = sorted_times[len * 99 / 100];
 
-            (
-                avg,
-                min,
-                max,
-                ResponseTimePercentiles { p50, p90, p95, p99 },
-            )
+            (avg, min, max, ResponseTimePercentiles { p50, p90, p95, p99 })
         } else {
             (
                 0.0,
@@ -761,10 +700,7 @@ impl DnsApiHandler {
         };
 
         // 计算success/failure metrics
-        let success_count = queries
-            .iter()
-            .filter(|q| !q.is_query && q.response_code == "Success")
-            .count();
+        let success_count = queries.iter().filter(|q| !q.is_query && q.response_code == "Success").count();
         let failure_count = queries
             .iter()
             .filter(|q| !q.is_query && !q.response_code.is_empty() && q.response_code != "Success")
@@ -777,24 +713,15 @@ impl DnsApiHandler {
 
         // 响应代码分类
         let mut response_code_map: HashMap<String, usize> = HashMap::new();
-        for query in queries
-            .iter()
-            .filter(|q| !q.is_query && !q.response_code.is_empty())
-        {
-            *response_code_map
-                .entry(query.response_code.clone())
-                .or_insert(0) += 1;
+        for query in queries.iter().filter(|q| !q.is_query && !q.response_code.is_empty()) {
+            *response_code_map.entry(query.response_code.clone()).or_insert(0) += 1;
         }
         let mut response_codes: Vec<ResponseCodeStats> = response_code_map
             .into_iter()
             .map(|(code, count)| ResponseCodeStats {
                 code,
                 count,
-                percentage: if total_responses > 0 {
-                    count as f64 / total_responses as f64
-                } else {
-                    0.0
-                },
+                percentage: if total_responses > 0 { count as f64 / total_responses as f64 } else { 0.0 },
             })
             .collect();
         // 按计数降序排序，然后按代码名称升序排序以保证稳定的顺序
@@ -808,10 +735,7 @@ impl DnsApiHandler {
         for query in queries.iter().filter(|q| q.is_query) {
             *domain_map.entry(query.domain.clone()).or_insert(0) += 1;
         }
-        let mut top_domains: Vec<TopItem> = domain_map
-            .into_iter()
-            .map(|(name, count)| TopItem { name, count })
-            .collect();
+        let mut top_domains: Vec<TopItem> = domain_map.into_iter().map(|(name, count)| TopItem { name, count }).collect();
         // 按计数降序排序，然后按名称升序排序以保证稳定的顺序
         top_domains.sort_by(|a, b| match b.count.cmp(&a.count) {
             std::cmp::Ordering::Equal => a.name.cmp(&b.name),
@@ -865,10 +789,7 @@ impl DnsApiHandler {
             };
             *device_map.entry(device_key).or_insert(0) += 1;
         }
-        let mut top_devices: Vec<TopItem> = device_map
-            .into_iter()
-            .map(|(name, count)| TopItem { name, count })
-            .collect();
+        let mut top_devices: Vec<TopItem> = device_map.into_iter().map(|(name, count)| TopItem { name, count }).collect();
         // 按计数降序排序，然后按名称升序排序以保证稳定的顺序
         top_devices.sort_by(|a, b| match b.count.cmp(&a.count) {
             std::cmp::Ordering::Equal => a.name.cmp(&b.name),
@@ -879,9 +800,7 @@ impl DnsApiHandler {
         // 顶级 DNS 服务器（查询的目的 IP）
         let mut dns_server_map: HashMap<String, usize> = HashMap::new();
         for query in queries.iter().filter(|q| q.is_query) {
-            *dns_server_map
-                .entry(query.destination_ip.clone())
-                .or_insert(0) += 1;
+            *dns_server_map.entry(query.destination_ip.clone()).or_insert(0) += 1;
         }
         let mut top_dns_servers: Vec<TopItem> = dns_server_map
             .into_iter()
@@ -960,10 +879,7 @@ impl DnsApiHandler {
     }
 
     /// 处理/api/dns/config POST endpoint
-    async fn handle_set_config(
-        &self,
-        _request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    async fn handle_set_config(&self, _request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         // TODO: 实现 DNS 配置更新
         // 这会允许更新 DNS 监控设置
 

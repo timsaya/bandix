@@ -7,18 +7,10 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 // 简单的 HTTP 服务器，仅依赖 tokio
-pub async fn start_server(
-    options: Options,
-    api_router: ApiRouter,
-    shutdown_notify: Arc<tokio::sync::Notify>,
-) -> Result<(), anyhow::Error> {
+pub async fn start_server(options: Options, api_router: ApiRouter, shutdown_notify: Arc<tokio::sync::Notify>) -> Result<(), anyhow::Error> {
     // In release mode, only listen on localhost for security
     // In debug mode, listen on all interfaces for easier development
-    let host = if cfg!(debug_assertions) {
-        "0.0.0.0"
-    } else {
-        "127.0.0.1"
-    };
+    let host = if cfg!(debug_assertions) { "0.0.0.0" } else { "127.0.0.1" };
     let addr = format!("{}:{}", host, options.port());
     let listener = TcpListener::bind(&addr).await?;
     info!("HTTP server listening on {}", addr);
@@ -50,10 +42,7 @@ pub async fn start_server(
     Ok(())
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
-    api_router: ApiRouter,
-) -> Result<(), anyhow::Error> {
+async fn handle_connection(mut stream: TcpStream, api_router: ApiRouter) -> Result<(), anyhow::Error> {
     let mut buffer = [0; 4096]; // Increase buffer size to handle larger requests
     let n = stream.read(&mut buffer).await?;
 
@@ -84,10 +73,7 @@ async fn handle_connection(
     if query.is_empty() {
         debug!("[{}] {} {}", timestamp, request.method, request.path);
     } else {
-        debug!(
-            "[{}] {} {} | params: {}",
-            timestamp, request.method, request.path, query
-        );
+        debug!("[{}] {} {} | params: {}", timestamp, request.method, request.path, query);
     }
 
     // Route request to appropriate handler

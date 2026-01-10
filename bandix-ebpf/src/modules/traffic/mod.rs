@@ -10,9 +10,7 @@ use aya_ebpf::{
 use network_types::eth::EthHdr;
 use network_types::ip::{Ipv4Hdr, Ipv6Hdr};
 
-use crate::utils::{
-    get_current_time, is_subnet_ip, is_subnet_ipv6, min, ptr_at, subnet::IPV4_SUBNET_INFO,
-};
+use crate::utils::{get_current_time, is_subnet_ip, is_subnet_ipv6, min, ptr_at, subnet::IPV4_SUBNET_INFO};
 use maps::{MAC_RATE_LIMITS, MAC_TRAFFIC, RATE_BUCKETS};
 
 // ============================================================================
@@ -221,13 +219,7 @@ fn update_traffic_stats(mac: &[u8; 6], data_len: u64, is_rx: bool, is_local: boo
 }
 
 #[inline]
-fn monitor_traffic(
-    src_mac: &[u8; 6],
-    dst_mac: &[u8; 6],
-    data_len: u64,
-    src_ip: &[u8; 4],
-    dst_ip: &[u8; 4],
-) {
+fn monitor_traffic(src_mac: &[u8; 6], dst_mac: &[u8; 6], data_len: u64, src_ip: &[u8; 4], dst_ip: &[u8; 4]) {
     // check if source ip and destination ip are in local network
     let src_is_local = is_subnet_ip(&src_ip);
     let dst_is_local = is_subnet_ip(&dst_ip);
@@ -246,13 +238,7 @@ fn monitor_traffic(
 }
 
 #[inline]
-fn monitor_traffic_v6(
-    src_mac: &[u8; 6],
-    dst_mac: &[u8; 6],
-    data_len: u64,
-    src_ip: &[u8; 16],
-    dst_ip: &[u8; 16],
-) {
+fn monitor_traffic_v6(src_mac: &[u8; 6], dst_mac: &[u8; 6], data_len: u64, src_ip: &[u8; 16], dst_ip: &[u8; 16]) {
     // check if source ip and destination ip are in local network
     let src_is_local = is_subnet_ipv6(&src_ip);
     let dst_is_local = is_subnet_ipv6(&dst_ip);

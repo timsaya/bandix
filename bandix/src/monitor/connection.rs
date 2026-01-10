@@ -39,10 +39,7 @@ impl Default for GlobalConnectionStats {
 /// 从 /proc/net/nf_conntrack 解析连接统计信息
 /// 1. 总统计：所有 TCP/UDP 连接（无过滤）
 /// 2. 设备统计：ARP 表中且与接口在同一子网中的设备的连接
-pub fn parse_connection_stats(
-    interface_ip: [u8; 4],
-    subnet_mask: [u8; 4],
-) -> Result<GlobalConnectionStats> {
+pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Result<GlobalConnectionStats> {
     let content = fs::read_to_string("/proc/net/nf_conntrack")?;
     let ip_mac_mapping = network_utils::get_ip_mac_mapping()?;
 
@@ -159,16 +156,12 @@ pub fn parse_connection_stats(
         let mut valid_device_ips = Vec::new();
 
         if let Some(ip) = src_ip {
-            if ip_mac_mapping.contains_key(&ip)
-                && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask)
-            {
+            if ip_mac_mapping.contains_key(&ip) && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
                 valid_device_ips.push(ip);
             }
         }
         if let Some(ip) = dst_ip {
-            if ip_mac_mapping.contains_key(&ip)
-                && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask)
-            {
+            if ip_mac_mapping.contains_key(&ip) && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
                 valid_device_ips.push(ip);
             }
         }
@@ -183,19 +176,17 @@ pub fn parse_connection_stats(
             let &mac = ip_mac_mapping.get(&ip).unwrap();
 
             // Update device statistics
-            let device_stat = device_stats
-                .entry(mac)
-                .or_insert_with(|| DeviceConnectionStats {
-                    mac_address: mac,
-                    ip_address: ip,
-                    tcp_connections: 0,
-                    udp_connections: 0,
-                    established_tcp: 0,
-                    time_wait_tcp: 0,
-                    close_wait_tcp: 0,
-                    total_connections: 0,
-                    last_updated: timestamp,
-                });
+            let device_stat = device_stats.entry(mac).or_insert_with(|| DeviceConnectionStats {
+                mac_address: mac,
+                ip_address: ip,
+                tcp_connections: 0,
+                udp_connections: 0,
+                established_tcp: 0,
+                time_wait_tcp: 0,
+                close_wait_tcp: 0,
+                total_connections: 0,
+                last_updated: timestamp,
+            });
 
             // 按协议和状态分类并计数
             let mut device_connection_counted = false;
@@ -291,11 +282,7 @@ impl ConnectionMonitor {
     }
 
     /// 开始连接监控（包括内部循环）
-    pub async fn start(
-        &self,
-        ctx: &mut ConnectionModuleContext,
-        shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
-    ) -> Result<()> {
+    pub async fn start(&self, ctx: &mut ConnectionModuleContext, shutdown_notify: std::sync::Arc<tokio::sync::Notify>) -> Result<()> {
         // 开始内部循环
         self.start_monitoring_loop(ctx, shutdown_notify).await
     }

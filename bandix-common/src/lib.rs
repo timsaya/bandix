@@ -52,10 +52,7 @@ pub struct DeviceTrafficStats {
 impl DeviceTrafficStats {
     /// Count the number of valid IPv6 addresses (non-zero addresses)
     pub fn ipv6_count(&self) -> u8 {
-        self.ipv6_addresses
-            .iter()
-            .filter(|addr| **addr != [0u8; 16])
-            .count() as u8
+        self.ipv6_addresses.iter().filter(|addr| **addr != [0u8; 16]).count() as u8
     }
 
     /// 计算total receive bytes (lan + wan)

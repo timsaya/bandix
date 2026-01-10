@@ -17,9 +17,9 @@ pub struct TrafficModuleContext {
     pub options: Options,
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
-    pub realtime_manager: Arc<RealtimeRingManager>, // 实时1秒采样（仅内存）
+    pub realtime_manager: Arc<RealtimeRingManager>,  // 实时1秒采样（仅内存）
     pub long_term_manager: Arc<LongTermRingManager>, // 长期采样（1小时间隔，365天保留，已持久化）
-    pub device_manager: Arc<DeviceManager>,         // 统一的设备管理器（包含设备信息和流量统计）
+    pub device_manager: Arc<DeviceManager>,          // 统一的设备管理器（包含设备信息和流量统计）
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
     pub last_ebpf_traffic: Arc<Mutex<StdHashMap<[u8; 6], [u64; 4]>>>, // 上次从 eBPF 读取的累积值
@@ -29,12 +29,7 @@ impl TrafficModuleContext {
     /// 创建流量模块上下文
     /// ingress_ebpf 和 egress_ebpf 都是对同一个 eBPF 对象的 Arc 引用
     /// 这确保两个程序共享相同的映射（MAC_TRAFFIC、MAC_RATE_LIMITS 等）
-    pub fn new(
-        options: Options,
-        ingress_ebpf: Arc<aya::Ebpf>,
-        egress_ebpf: Arc<aya::Ebpf>,
-        device_manager: Arc<DeviceManager>,
-    ) -> Self {
+    pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>, device_manager: Arc<DeviceManager>) -> Self {
         let realtime_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
@@ -159,9 +154,7 @@ impl ModuleType {
                 crate::storage::traffic::ensure_schema(traffic_ctx.options.data_dir())?;
 
                 // 加载预定的速率限制 包括迁移旧的限速格式
-                let scheduled_limits = crate::storage::traffic::load_all_scheduled_limits(
-                    traffic_ctx.options.data_dir(),
-                )?;
+                let scheduled_limits = crate::storage::traffic::load_all_scheduled_limits(traffic_ctx.options.data_dir())?;
 
                 {
                     let mut srl = traffic_ctx.scheduled_rate_limits.lock().unwrap();
@@ -207,7 +200,7 @@ impl ModuleType {
                                 stats.wan_tx_bytes = *wan_tx_bytes;
                                 stats.lan_rx_bytes = *lan_rx_bytes;
                                 stats.lan_tx_bytes = *lan_tx_bytes;
-                                
+
                                 // 使用 ring 文件中的 last_online_ts，如果没有则使用 ts_ms
                                 if *last_online_ts > 0 {
                                     stats.last_online_ts = *last_online_ts;
@@ -221,10 +214,7 @@ impl ModuleType {
                             }
                         }
 
-                        log::info!(
-                            "Restored baseline for {} devices from persistent storage",
-                            restored_count
-                        );
+                        log::info!("Restored baseline for {} devices from persistent storage", restored_count);
                     }
                 }
 
@@ -242,11 +232,7 @@ impl ModuleType {
         }
     }
 
-    async fn mount_apis(
-        &self,
-        ctx: &ModuleContext,
-        api_router: &mut ApiRouter,
-    ) -> Result<(), anyhow::Error> {
+    async fn mount_apis(&self, ctx: &ModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
         match (self, ctx) {
             (ModuleType::Traffic, ModuleContext::Traffic(traffic_ctx)) => {
                 use crate::api::{traffic::TrafficApiHandler, ApiHandler};
@@ -297,18 +283,11 @@ impl ModuleType {
         }
     }
 
-    async fn start_monitoring(
-        &self,
-        ctx: ModuleContext,
-        shutdown_notify: Arc<tokio::sync::Notify>,
-    ) -> Result<(), anyhow::Error> {
+    async fn start_monitoring(&self, ctx: ModuleContext, shutdown_notify: Arc<tokio::sync::Notify>) -> Result<(), anyhow::Error> {
         match (self, ctx) {
             (ModuleType::Traffic, ModuleContext::Traffic(mut traffic_ctx)) => {
                 let traffic_monitor = traffic::TrafficMonitor::new();
-                if let Err(e) = traffic_monitor
-                    .start(&mut traffic_ctx, shutdown_notify)
-                    .await
-                {
+                if let Err(e) = traffic_monitor.start(&mut traffic_ctx, shutdown_notify).await {
                     log::error!("Traffic monitoring module error: {}", e);
                 }
                 Ok(())
@@ -322,10 +301,7 @@ impl ModuleType {
             }
             (ModuleType::Connection, ModuleContext::Connection(mut connection_ctx)) => {
                 let connection_monitor = connection::ConnectionMonitor::new();
-                if let Err(e) = connection_monitor
-                    .start(&mut connection_ctx, shutdown_notify)
-                    .await
-                {
+                if let Err(e) = connection_monitor.start(&mut connection_ctx, shutdown_notify).await {
                     log::error!("Connection monitoring module error: {}", e);
                 }
                 Ok(())

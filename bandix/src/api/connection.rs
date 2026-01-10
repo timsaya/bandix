@@ -117,10 +117,7 @@ fn format_ip(ip: &[u8; 4]) -> String {
 fn parse_ip_to_u32(ip_str: &str) -> u32 {
     if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
         let octets = ip.octets();
-        ((octets[0] as u32) << 24)
-            | ((octets[1] as u32) << 16)
-            | ((octets[2] as u32) << 8)
-            | (octets[3] as u32)
+        ((octets[0] as u32) << 24) | ((octets[1] as u32) << 16) | ((octets[2] as u32) << 8) | (octets[3] as u32)
     } else {
         0 // Default to 0 for invalid IP addresses
     }
@@ -130,22 +127,20 @@ impl ConnectionApiHandler {
     /// 处理HTTP requests for connection statistics
     pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse> {
         match (request.method.as_str(), request.path.as_str()) {
-            ("GET", "/api/connection/devices") => {
-                match self.get_device_connection_stats_formatted() {
-                    Ok(response) => {
-                        let api_response = ApiResponse::success(response);
-                        let body = serde_json::to_string(&api_response)?;
-                        Ok(HttpResponse::ok(body))
-                    }
-                    Err(e) => {
-                        log::error!("Failed to get device connection stats: {}", e);
-                        Ok(HttpResponse::error(
-                            500,
-                            format!("Failed to get device connection stats: {}", e),
-                        ))
-                    }
+            ("GET", "/api/connection/devices") => match self.get_device_connection_stats_formatted() {
+                Ok(response) => {
+                    let api_response = ApiResponse::success(response);
+                    let body = serde_json::to_string(&api_response)?;
+                    Ok(HttpResponse::ok(body))
                 }
-            }
+                Err(e) => {
+                    log::error!("Failed to get device connection stats: {}", e);
+                    Ok(HttpResponse::error(
+                        500,
+                        format!("Failed to get device connection stats: {}", e),
+                    ))
+                }
+            },
             _ => Ok(HttpResponse::error(404, "Not Found".to_string())),
         }
     }
