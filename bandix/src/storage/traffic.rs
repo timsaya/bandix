@@ -1,6 +1,7 @@
 use anyhow::Context;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -1080,7 +1081,7 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn query_stats(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
+    pub fn query_stats_by_mac(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
         if let Some(ring) = rings.get(mac) {
             Ok(ring.query_stats(start_ms, end_ms))
@@ -1143,6 +1144,21 @@ impl LongTermRingManager {
                     accumulator.get_lan_tx_bytes_increment(),
                 ),
             );
+        }
+
+        result
+    }
+
+    /// 获取当前活跃的 accumulator 的完整统计信息（包括速率统计）
+    /// 返回 HashMap<MAC地址, DeviceStatsAccumulator>（已经 finalized）
+    pub fn get_active_accumulators_with_stats(&self) -> HashMap<[u8; 6], DeviceStatsAccumulator> {
+        let accumulators = self.accumulators.lock().unwrap();
+        let mut result = HashMap::new();
+
+        for (mac, accumulator) in accumulators.iter() {
+            let mut cloned = accumulator.clone();
+            cloned.finalize();
+            result.insert(*mac, cloned);
         }
 
         result
@@ -1299,11 +1315,10 @@ impl LongTermRingManager {
             all_rows.append(&mut rows);
         }
 
-        use std::collections::BTreeMap;
         let mut ts_to_stats: BTreeMap<u64, MetricsRowWithStats> = BTreeMap::new();
 
         for row in all_rows {
-            let entry = ts_to_stats.entry(row.end_ts_ms).or_insert(MetricsRowWithStats {
+            let entry: &mut MetricsRowWithStats = ts_to_stats.entry(row.end_ts_ms).or_insert(MetricsRowWithStats {
                 start_ts_ms: row.start_ts_ms,
                 end_ts_ms: row.end_ts_ms,
                 wan_rx_rate_avg: 0,
