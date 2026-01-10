@@ -75,10 +75,10 @@ pub struct DeviceUsageRankingResponse {
     pub start_ms: u64,
     pub end_ms: u64,
     pub network_type: String, // "wan", "lan", 或 "all"
-    pub total_bytes: u64,    // 所有设备的总字节数
-    pub total_rx_bytes: u64, // 所有设备的总接收字节数
-    pub total_tx_bytes: u64, // 所有设备的总发送字节数
-    pub device_count: usize, // 设备数量
+    pub total_bytes: u64,     // 所有设备的总字节数
+    pub total_rx_bytes: u64,  // 所有设备的总接收字节数
+    pub total_tx_bytes: u64,  // 所有设备的总发送字节数
+    pub device_count: usize,  // 设备数量
     pub rankings: Vec<DeviceUsageRanking>,
 }
 
@@ -789,8 +789,6 @@ impl TrafficApiHandler {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(now_ms);
 
-        println!("{},{}", start_ms, end_ms);
-
         // 验证时间范围
         if start_ms >= end_ms {
             return Ok(HttpResponse::error(
@@ -1139,36 +1137,52 @@ impl TrafficApiHandler {
                             inc.wan_tx_bytes_inc = inc.wan_tx_bytes_inc.saturating_add(acc.get_wan_tx_bytes_increment());
                             inc.lan_rx_bytes_inc = inc.lan_rx_bytes_inc.saturating_add(acc.get_lan_rx_bytes_increment());
                             inc.lan_tx_bytes_inc = inc.lan_tx_bytes_inc.saturating_add(acc.get_lan_tx_bytes_increment());
-                            
+
                             // 速率统计：取最大值（因为同一个时间段可能有多个来源的数据）
                             inc.wan_rx_rate_avg = inc.wan_rx_rate_avg.max(acc.wan_rx_rate.avg);
                             inc.wan_rx_rate_max = inc.wan_rx_rate_max.max(acc.wan_rx_rate.max);
-                            inc.wan_rx_rate_min = if inc.wan_rx_rate_min == 0 { acc.wan_rx_rate.min } else { inc.wan_rx_rate_min.min(acc.wan_rx_rate.min) };
+                            inc.wan_rx_rate_min = if inc.wan_rx_rate_min == 0 {
+                                acc.wan_rx_rate.min
+                            } else {
+                                inc.wan_rx_rate_min.min(acc.wan_rx_rate.min)
+                            };
                             inc.wan_rx_rate_p90 = inc.wan_rx_rate_p90.max(acc.wan_rx_rate.p90);
                             inc.wan_rx_rate_p95 = inc.wan_rx_rate_p95.max(acc.wan_rx_rate.p95);
                             inc.wan_rx_rate_p99 = inc.wan_rx_rate_p99.max(acc.wan_rx_rate.p99);
-                            
+
                             inc.wan_tx_rate_avg = inc.wan_tx_rate_avg.max(acc.wan_tx_rate.avg);
                             inc.wan_tx_rate_max = inc.wan_tx_rate_max.max(acc.wan_tx_rate.max);
-                            inc.wan_tx_rate_min = if inc.wan_tx_rate_min == 0 { acc.wan_tx_rate.min } else { inc.wan_tx_rate_min.min(acc.wan_tx_rate.min) };
+                            inc.wan_tx_rate_min = if inc.wan_tx_rate_min == 0 {
+                                acc.wan_tx_rate.min
+                            } else {
+                                inc.wan_tx_rate_min.min(acc.wan_tx_rate.min)
+                            };
                             inc.wan_tx_rate_p90 = inc.wan_tx_rate_p90.max(acc.wan_tx_rate.p90);
                             inc.wan_tx_rate_p95 = inc.wan_tx_rate_p95.max(acc.wan_tx_rate.p95);
                             inc.wan_tx_rate_p99 = inc.wan_tx_rate_p99.max(acc.wan_tx_rate.p99);
-                            
+
                             inc.lan_rx_rate_avg = inc.lan_rx_rate_avg.max(acc.lan_rx_rate.avg);
                             inc.lan_rx_rate_max = inc.lan_rx_rate_max.max(acc.lan_rx_rate.max);
-                            inc.lan_rx_rate_min = if inc.lan_rx_rate_min == 0 { acc.lan_rx_rate.min } else { inc.lan_rx_rate_min.min(acc.lan_rx_rate.min) };
+                            inc.lan_rx_rate_min = if inc.lan_rx_rate_min == 0 {
+                                acc.lan_rx_rate.min
+                            } else {
+                                inc.lan_rx_rate_min.min(acc.lan_rx_rate.min)
+                            };
                             inc.lan_rx_rate_p90 = inc.lan_rx_rate_p90.max(acc.lan_rx_rate.p90);
                             inc.lan_rx_rate_p95 = inc.lan_rx_rate_p95.max(acc.lan_rx_rate.p95);
                             inc.lan_rx_rate_p99 = inc.lan_rx_rate_p99.max(acc.lan_rx_rate.p99);
-                            
+
                             inc.lan_tx_rate_avg = inc.lan_tx_rate_avg.max(acc.lan_tx_rate.avg);
                             inc.lan_tx_rate_max = inc.lan_tx_rate_max.max(acc.lan_tx_rate.max);
-                            inc.lan_tx_rate_min = if inc.lan_tx_rate_min == 0 { acc.lan_tx_rate.min } else { inc.lan_tx_rate_min.min(acc.lan_tx_rate.min) };
+                            inc.lan_tx_rate_min = if inc.lan_tx_rate_min == 0 {
+                                acc.lan_tx_rate.min
+                            } else {
+                                inc.lan_tx_rate_min.min(acc.lan_tx_rate.min)
+                            };
                             inc.lan_tx_rate_p90 = inc.lan_tx_rate_p90.max(acc.lan_tx_rate.p90);
                             inc.lan_tx_rate_p95 = inc.lan_tx_rate_p95.max(acc.lan_tx_rate.p95);
                             inc.lan_tx_rate_p99 = inc.lan_tx_rate_p99.max(acc.lan_tx_rate.p99);
-                            
+
                             found = true;
                             break;
                         }
@@ -1185,7 +1199,7 @@ impl TrafficApiHandler {
                 let mut current_hour_wan_tx_total = 0u64;
                 let mut current_hour_lan_rx_total = 0u64;
                 let mut current_hour_lan_tx_total = 0u64;
-                
+
                 // 聚合速率统计：累加平均值，取最大值的最大，取最小值的最小
                 let mut wan_rx_rate_avg_sum = 0u64;
                 let mut wan_rx_rate_max = 0u64;
@@ -1193,28 +1207,28 @@ impl TrafficApiHandler {
                 let mut wan_rx_rate_p90_sum = 0u64;
                 let mut wan_rx_rate_p95_sum = 0u64;
                 let mut wan_rx_rate_p99_sum = 0u64;
-                
+
                 let mut wan_tx_rate_avg_sum = 0u64;
                 let mut wan_tx_rate_max = 0u64;
                 let mut wan_tx_rate_min = u64::MAX;
                 let mut wan_tx_rate_p90_sum = 0u64;
                 let mut wan_tx_rate_p95_sum = 0u64;
                 let mut wan_tx_rate_p99_sum = 0u64;
-                
+
                 let mut lan_rx_rate_avg_sum = 0u64;
                 let mut lan_rx_rate_max = 0u64;
                 let mut lan_rx_rate_min = u64::MAX;
                 let mut lan_rx_rate_p90_sum = 0u64;
                 let mut lan_rx_rate_p95_sum = 0u64;
                 let mut lan_rx_rate_p99_sum = 0u64;
-                
+
                 let mut lan_tx_rate_avg_sum = 0u64;
                 let mut lan_tx_rate_max = 0u64;
                 let mut lan_tx_rate_min = u64::MAX;
                 let mut lan_tx_rate_p90_sum = 0u64;
                 let mut lan_tx_rate_p95_sum = 0u64;
                 let mut lan_tx_rate_p99_sum = 0u64;
-                
+
                 let device_count = active_accumulators.len() as u64;
 
                 for acc in active_accumulators.values() {
@@ -1222,7 +1236,7 @@ impl TrafficApiHandler {
                     current_hour_wan_tx_total = current_hour_wan_tx_total.saturating_add(acc.get_wan_tx_bytes_increment());
                     current_hour_lan_rx_total = current_hour_lan_rx_total.saturating_add(acc.get_lan_rx_bytes_increment());
                     current_hour_lan_tx_total = current_hour_lan_tx_total.saturating_add(acc.get_lan_tx_bytes_increment());
-                    
+
                     // 聚合 WAN 速率统计
                     wan_rx_rate_avg_sum = wan_rx_rate_avg_sum.saturating_add(acc.wan_rx_rate.avg);
                     wan_rx_rate_max = wan_rx_rate_max.max(acc.wan_rx_rate.max);
@@ -1230,14 +1244,14 @@ impl TrafficApiHandler {
                     wan_rx_rate_p90_sum = wan_rx_rate_p90_sum.saturating_add(acc.wan_rx_rate.p90);
                     wan_rx_rate_p95_sum = wan_rx_rate_p95_sum.saturating_add(acc.wan_rx_rate.p95);
                     wan_rx_rate_p99_sum = wan_rx_rate_p99_sum.saturating_add(acc.wan_rx_rate.p99);
-                    
+
                     wan_tx_rate_avg_sum = wan_tx_rate_avg_sum.saturating_add(acc.wan_tx_rate.avg);
                     wan_tx_rate_max = wan_tx_rate_max.max(acc.wan_tx_rate.max);
                     wan_tx_rate_min = wan_tx_rate_min.min(acc.wan_tx_rate.min);
                     wan_tx_rate_p90_sum = wan_tx_rate_p90_sum.saturating_add(acc.wan_tx_rate.p90);
                     wan_tx_rate_p95_sum = wan_tx_rate_p95_sum.saturating_add(acc.wan_tx_rate.p95);
                     wan_tx_rate_p99_sum = wan_tx_rate_p99_sum.saturating_add(acc.wan_tx_rate.p99);
-                    
+
                     // 聚合 LAN 速率统计
                     lan_rx_rate_avg_sum = lan_rx_rate_avg_sum.saturating_add(acc.lan_rx_rate.avg);
                     lan_rx_rate_max = lan_rx_rate_max.max(acc.lan_rx_rate.max);
@@ -1245,7 +1259,7 @@ impl TrafficApiHandler {
                     lan_rx_rate_p90_sum = lan_rx_rate_p90_sum.saturating_add(acc.lan_rx_rate.p90);
                     lan_rx_rate_p95_sum = lan_rx_rate_p95_sum.saturating_add(acc.lan_rx_rate.p95);
                     lan_rx_rate_p99_sum = lan_rx_rate_p99_sum.saturating_add(acc.lan_rx_rate.p99);
-                    
+
                     lan_tx_rate_avg_sum = lan_tx_rate_avg_sum.saturating_add(acc.lan_tx_rate.avg);
                     lan_tx_rate_max = lan_tx_rate_max.max(acc.lan_tx_rate.max);
                     lan_tx_rate_min = lan_tx_rate_min.min(acc.lan_tx_rate.min);
@@ -1253,12 +1267,20 @@ impl TrafficApiHandler {
                     lan_tx_rate_p95_sum = lan_tx_rate_p95_sum.saturating_add(acc.lan_tx_rate.p95);
                     lan_tx_rate_p99_sum = lan_tx_rate_p99_sum.saturating_add(acc.lan_tx_rate.p99);
                 }
-                
+
                 // 处理最小值（如果没有数据则设为0）
-                if wan_rx_rate_min == u64::MAX { wan_rx_rate_min = 0; }
-                if wan_tx_rate_min == u64::MAX { wan_tx_rate_min = 0; }
-                if lan_rx_rate_min == u64::MAX { lan_rx_rate_min = 0; }
-                if lan_tx_rate_min == u64::MAX { lan_tx_rate_min = 0; }
+                if wan_rx_rate_min == u64::MAX {
+                    wan_rx_rate_min = 0;
+                }
+                if wan_tx_rate_min == u64::MAX {
+                    wan_tx_rate_min = 0;
+                }
+                if lan_rx_rate_min == u64::MAX {
+                    lan_rx_rate_min = 0;
+                }
+                if lan_tx_rate_min == u64::MAX {
+                    lan_tx_rate_min = 0;
+                }
 
                 if device_count > 0 {
                     let current_hour_increment = TimeSeriesIncrement {
@@ -1302,36 +1324,52 @@ impl TrafficApiHandler {
                             inc.wan_tx_bytes_inc = inc.wan_tx_bytes_inc.saturating_add(current_hour_wan_tx_total);
                             inc.lan_rx_bytes_inc = inc.lan_rx_bytes_inc.saturating_add(current_hour_lan_rx_total);
                             inc.lan_tx_bytes_inc = inc.lan_tx_bytes_inc.saturating_add(current_hour_lan_tx_total);
-                            
+
                             // 速率统计：取最大值作为聚合结果
                             inc.wan_rx_rate_avg = inc.wan_rx_rate_avg.max(current_hour_increment.wan_rx_rate_avg);
                             inc.wan_rx_rate_max = inc.wan_rx_rate_max.max(current_hour_increment.wan_rx_rate_max);
-                            inc.wan_rx_rate_min = if inc.wan_rx_rate_min == 0 { current_hour_increment.wan_rx_rate_min } else { inc.wan_rx_rate_min.min(current_hour_increment.wan_rx_rate_min) };
+                            inc.wan_rx_rate_min = if inc.wan_rx_rate_min == 0 {
+                                current_hour_increment.wan_rx_rate_min
+                            } else {
+                                inc.wan_rx_rate_min.min(current_hour_increment.wan_rx_rate_min)
+                            };
                             inc.wan_rx_rate_p90 = inc.wan_rx_rate_p90.max(current_hour_increment.wan_rx_rate_p90);
                             inc.wan_rx_rate_p95 = inc.wan_rx_rate_p95.max(current_hour_increment.wan_rx_rate_p95);
                             inc.wan_rx_rate_p99 = inc.wan_rx_rate_p99.max(current_hour_increment.wan_rx_rate_p99);
-                            
+
                             inc.wan_tx_rate_avg = inc.wan_tx_rate_avg.max(current_hour_increment.wan_tx_rate_avg);
                             inc.wan_tx_rate_max = inc.wan_tx_rate_max.max(current_hour_increment.wan_tx_rate_max);
-                            inc.wan_tx_rate_min = if inc.wan_tx_rate_min == 0 { current_hour_increment.wan_tx_rate_min } else { inc.wan_tx_rate_min.min(current_hour_increment.wan_tx_rate_min) };
+                            inc.wan_tx_rate_min = if inc.wan_tx_rate_min == 0 {
+                                current_hour_increment.wan_tx_rate_min
+                            } else {
+                                inc.wan_tx_rate_min.min(current_hour_increment.wan_tx_rate_min)
+                            };
                             inc.wan_tx_rate_p90 = inc.wan_tx_rate_p90.max(current_hour_increment.wan_tx_rate_p90);
                             inc.wan_tx_rate_p95 = inc.wan_tx_rate_p95.max(current_hour_increment.wan_tx_rate_p95);
                             inc.wan_tx_rate_p99 = inc.wan_tx_rate_p99.max(current_hour_increment.wan_tx_rate_p99);
-                            
+
                             inc.lan_rx_rate_avg = inc.lan_rx_rate_avg.max(current_hour_increment.lan_rx_rate_avg);
                             inc.lan_rx_rate_max = inc.lan_rx_rate_max.max(current_hour_increment.lan_rx_rate_max);
-                            inc.lan_rx_rate_min = if inc.lan_rx_rate_min == 0 { current_hour_increment.lan_rx_rate_min } else { inc.lan_rx_rate_min.min(current_hour_increment.lan_rx_rate_min) };
+                            inc.lan_rx_rate_min = if inc.lan_rx_rate_min == 0 {
+                                current_hour_increment.lan_rx_rate_min
+                            } else {
+                                inc.lan_rx_rate_min.min(current_hour_increment.lan_rx_rate_min)
+                            };
                             inc.lan_rx_rate_p90 = inc.lan_rx_rate_p90.max(current_hour_increment.lan_rx_rate_p90);
                             inc.lan_rx_rate_p95 = inc.lan_rx_rate_p95.max(current_hour_increment.lan_rx_rate_p95);
                             inc.lan_rx_rate_p99 = inc.lan_rx_rate_p99.max(current_hour_increment.lan_rx_rate_p99);
-                            
+
                             inc.lan_tx_rate_avg = inc.lan_tx_rate_avg.max(current_hour_increment.lan_tx_rate_avg);
                             inc.lan_tx_rate_max = inc.lan_tx_rate_max.max(current_hour_increment.lan_tx_rate_max);
-                            inc.lan_tx_rate_min = if inc.lan_tx_rate_min == 0 { current_hour_increment.lan_tx_rate_min } else { inc.lan_tx_rate_min.min(current_hour_increment.lan_tx_rate_min) };
+                            inc.lan_tx_rate_min = if inc.lan_tx_rate_min == 0 {
+                                current_hour_increment.lan_tx_rate_min
+                            } else {
+                                inc.lan_tx_rate_min.min(current_hour_increment.lan_tx_rate_min)
+                            };
                             inc.lan_tx_rate_p90 = inc.lan_tx_rate_p90.max(current_hour_increment.lan_tx_rate_p90);
                             inc.lan_tx_rate_p95 = inc.lan_tx_rate_p95.max(current_hour_increment.lan_tx_rate_p95);
                             inc.lan_tx_rate_p99 = inc.lan_tx_rate_p99.max(current_hour_increment.lan_tx_rate_p99);
-                            
+
                             found = true;
                             break;
                         }
