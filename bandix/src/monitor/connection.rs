@@ -130,12 +130,12 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
                         }
                         _ => {
                             // 其他 TCP 状态：跳过计数
-                            log::debug!("未知 TCP 状态 '{}' 在全局统计中跳过", state);
+                            log::debug!("Unknown TCP state '{}' skipped in global statistics", state);
                         }
                     }
                 } else {
                     // 没有状态的 TCP 连接：跳过计数
-                    log::debug!("没有状态的 TCP 连接在全局统计中跳过");
+                    log::debug!("TCP connection without state skipped in global statistics");
                 }
             }
             &"udp" => {
@@ -217,12 +217,12 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
                             }
                             _ => {
                                 // 其他 TCP 状态：跳过计数
-                                log::debug!("未知 TCP 状态 '{}' 为设备跳过", state);
+                                log::debug!("Unknown TCP state '{}' skipped for device", state);
                             }
                         }
                     } else {
                         // 没有状态的 TCP 连接：跳过计数
-                        log::debug!("没有状态的 TCP 连接为设备跳过");
+                        log::debug!("TCP connection without state skipped for device");
                     }
                 }
                 &"udp" => {

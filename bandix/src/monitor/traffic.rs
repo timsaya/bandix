@@ -2,9 +2,12 @@ use crate::monitor::TrafficModuleContext;
 use anyhow::Result;
 use aya::maps::HashMap;
 use aya::maps::MapData;
+use serde::Serialize;
 use std::collections::HashMap as StdHashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex as TokioMutex;
 
 struct RawTrafficData {
     pub lan_tx_bytes: u64, // lan 发送字节数
@@ -14,15 +17,39 @@ struct RawTrafficData {
 }
 
 /// 流量监控模块的具体实现
-pub struct TrafficMonitor;
+pub struct TrafficMonitor {
+    http: reqwest::Client,
+    export_in_flight: Arc<AtomicBool>,
+    export_latest: Arc<TokioMutex<Option<TrafficExportPayload>>>,
+}
 
 impl TrafficMonitor {
     pub fn new() -> Self {
-        TrafficMonitor
+        let http = reqwest::Client::builder().timeout(Duration::from_millis(800)).build().unwrap();
+        TrafficMonitor {
+            http,
+            export_in_flight: Arc::new(AtomicBool::new(false)),
+            export_latest: Arc::new(TokioMutex::new(None)),
+        }
     }
 
     pub async fn start(&self, ctx: &mut TrafficModuleContext, shutdown_notify: std::sync::Arc<tokio::sync::Notify>) -> Result<()> {
         self.start_monitoring_loop(ctx, shutdown_notify).await
+    }
+
+    fn sync_last_ebpf_traffic(&self, ctx: &mut TrafficModuleContext, ebpf: Arc<aya::Ebpf>) {
+        match self.collect_traffic_data(&ebpf) {
+            Ok(traffic_data) => {
+                let mut last_ebpf = ctx.last_ebpf_traffic.lock().unwrap();
+                last_ebpf.clear();
+                for (mac, value) in traffic_data {
+                    last_ebpf.insert(mac, value);
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to sync last eBPF traffic snapshot: {}", e);
+            }
+        }
     }
 
     async fn start_monitoring_loop(
@@ -33,6 +60,11 @@ impl TrafficMonitor {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
         let persist_enabled = ctx.options.traffic_persist_history();
+
+        let ebpf_snapshot = ctx.ingress_ebpf.clone();
+        if let Some(ebpf) = ebpf_snapshot {
+            self.sync_last_ebpf_traffic(ctx, ebpf);
+        }
 
         loop {
             tokio::select! {
@@ -87,7 +119,39 @@ impl TrafficMonitor {
         if let Err(e) = ctx.long_term_manager.insert_metrics_batch(ts_ms, &traffic_snapshot) {
             log::error!("Failed to persist metrics to long-term ring: {}", e);
         }
+
+        let export_url = ctx.options.traffic_export_url().trim();
+        if !export_url.is_empty() {
+            self.export_devices_snapshot(ctx, export_url.to_string(), ts_ms, &traffic_snapshot)
+                .await;
+        }
     }
+}
+
+#[derive(Serialize, Clone)]
+struct TrafficExportDevice {
+    mac: String,
+    ip: String,
+    hostname: String,
+    total_rx_bytes: u64,
+    total_tx_bytes: u64,
+    total_rx_rate: u64,
+    total_tx_rate: u64,
+    lan_rx_bytes: u64,
+    lan_tx_bytes: u64,
+    lan_rx_rate: u64,
+    lan_tx_rate: u64,
+    wan_rx_bytes: u64,
+    wan_tx_bytes: u64,
+    wan_rx_rate: u64,
+    wan_tx_rate: u64,
+    last_online_ts: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct TrafficExportPayload {
+    ts_ms: u64,
+    devices: Vec<TrafficExportDevice>,
 }
 
 impl TrafficMonitor {
@@ -308,10 +372,10 @@ impl TrafficMonitor {
             stats.lan_rx_rate = 0;
             stats.lan_tx_rate = 0;
 
-            // 如果 last_online_ts 为0，设置一个初始值
-            if stats.last_online_ts == 0 {
-                stats.last_online_ts = now;
-            }
+            stats.lan_last_rx_bytes = stats.lan_rx_bytes;
+            stats.lan_last_tx_bytes = stats.lan_tx_bytes;
+            stats.wan_last_rx_bytes = stats.wan_rx_bytes;
+            stats.wan_last_tx_bytes = stats.wan_tx_bytes;
 
             // 更新最后采样时间
             stats.last_sample_ts = now;
@@ -324,10 +388,7 @@ impl TrafficMonitor {
 
     /// 更新设备的速率和活动时间
     fn update_device_rates_and_activity(&self, stats: &mut crate::device::UnifiedDevice, now: u64) {
-        // 如果是第一次采样则设置最后活动时间
-        if stats.last_sample_ts == 0 {
-            stats.last_online_ts = now;
-        } else {
+        if stats.last_sample_ts != 0 {
             let time_diff = now.saturating_sub(stats.last_sample_ts);
             if time_diff > 0 {
                 // 计算各项速率
@@ -340,12 +401,12 @@ impl TrafficMonitor {
                 stats.lan_tx_rate = (lan_tx_diff * 1000) / time_diff;
                 stats.wan_rx_rate = (wan_rx_diff * 1000) / time_diff;
                 stats.wan_tx_rate = (wan_tx_diff * 1000) / time_diff;
-
-                // 仅当任何发送流量增加时更新最后活动时间
-                if lan_tx_diff + wan_tx_diff > 0 {
-                    stats.last_online_ts = now;
-                }
             }
+        } else {
+            stats.lan_rx_rate = 0;
+            stats.lan_tx_rate = 0;
+            stats.wan_rx_rate = 0;
+            stats.wan_tx_rate = 0;
         }
     }
 
@@ -353,17 +414,37 @@ impl TrafficMonitor {
         // 从预定规则计算当前有效速率限制
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
 
-        // 从预定限制收集所有唯一的 MAC 地址
-        use std::collections::HashSet;
-        let macs: HashSet<[u8; 6]> = scheduled_limits.iter().map(|r| r.mac).collect();
+        let policy_enabled = ctx.rate_limit_whitelist_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        let whitelist = ctx.rate_limit_whitelist.lock().unwrap().clone();
+        let default_limits = *ctx.default_wan_rate_limits.lock().unwrap();
 
-        // 为每个 MAC 计算当前有效限制
-        let mut effective_limits: std::collections::HashMap<[u8; 6], [u64; 2]> = std::collections::HashMap::new();
-        for mac in macs {
+        let device_macs: std::collections::HashSet<[u8; 6]> = ctx
+            .device_manager
+            .get_all_devices_with_mac()
+            .into_iter()
+            .map(|(mac, _)| mac)
+            .collect();
+
+        let mut desired_limits: std::collections::HashMap<[u8; 6], [u64; 2]> = std::collections::HashMap::new();
+
+        for mac in device_macs {
             if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac) {
-                effective_limits.insert(mac, limits);
+                desired_limits.insert(mac, limits);
+                continue;
+            }
+
+            if !policy_enabled {
+                desired_limits.insert(mac, [0, 0]);
+                continue;
+            }
+
+            if whitelist.contains(&mac) {
+                desired_limits.insert(mac, [0, 0]);
+            } else {
+                desired_limits.insert(mac, default_limits);
             }
         }
+
         drop(scheduled_limits);
 
         // 获取入口 eBPF 引用（入口和出口共享同一个 eBPF 对象和映射）
@@ -394,7 +475,7 @@ impl TrafficMonitor {
         }
 
         // 将有效限制应用到 eBPF 映射（更新或添加）
-        for (mac, lim) in effective_limits.iter() {
+        for (mac, lim) in desired_limits.iter() {
             mac_rate_limits.insert(mac, &[lim[0], lim[1]], 0).unwrap();
             existing_macs_in_ebpf.remove(mac);
         }
@@ -407,4 +488,70 @@ impl TrafficMonitor {
 
         Ok(())
     }
+
+    async fn export_devices_snapshot(
+        &self,
+        ctx: &TrafficModuleContext,
+        url: String,
+        ts_ms: u64,
+        snapshot: &Vec<([u8; 6], crate::device::UnifiedDevice)>,
+    ) {
+        let bindings = ctx.hostname_bindings.lock().unwrap().clone();
+        let mut devices = Vec::with_capacity(snapshot.len());
+        for (mac, dev) in snapshot.iter() {
+            let ipv4 = dev.get_current_ipv4();
+            let ip = format!("{}.{}.{}.{}", ipv4[0], ipv4[1], ipv4[2], ipv4[3]);
+            let hostname = if !dev.hostname.is_empty() {
+                dev.hostname.clone()
+            } else {
+                bindings.get(mac).cloned().unwrap_or_default()
+            };
+            devices.push(TrafficExportDevice {
+                mac: crate::utils::format_utils::format_mac(mac),
+                ip,
+                hostname,
+                total_rx_bytes: dev.total_rx_bytes(),
+                total_tx_bytes: dev.total_tx_bytes(),
+                total_rx_rate: dev.total_rx_rate(),
+                total_tx_rate: dev.total_tx_rate(),
+                lan_rx_bytes: dev.lan_rx_bytes,
+                lan_tx_bytes: dev.lan_tx_bytes,
+                lan_rx_rate: dev.lan_rx_rate,
+                lan_tx_rate: dev.lan_tx_rate,
+                wan_rx_bytes: dev.wan_rx_bytes,
+                wan_tx_bytes: dev.wan_tx_bytes,
+                wan_rx_rate: dev.wan_rx_rate,
+                wan_tx_rate: dev.wan_tx_rate,
+                last_online_ts: dev.last_online_ts,
+            });
+        }
+
+        let payload = TrafficExportPayload { ts_ms, devices };
+
+        {
+            let mut guard = self.export_latest.lock().await;
+            *guard = Some(payload);
+        }
+
+        if self
+            .export_in_flight
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let client = self.http.clone();
+        let export_latest = Arc::clone(&self.export_latest);
+        let export_in_flight = Arc::clone(&self.export_in_flight);
+        tokio::spawn(async move {
+            let payload = { export_latest.lock().await.clone() };
+            if let Some(payload) = payload {
+                let _ = client.post(url).json(&payload).send().await;
+            }
+            export_in_flight.store(false, Ordering::Relaxed);
+        });
+    }
+
+    // events are emitted by DeviceManager background refresh task (neighbor-table based)
 }

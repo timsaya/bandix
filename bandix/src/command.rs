@@ -64,6 +64,20 @@ pub struct TrafficArgs {
         help = "Enable traffic history data persistence to disk (disabled by default, data only stored in memory)"
     )]
     pub traffic_persist_history: bool,
+
+    #[clap(
+        long,
+        default_value = "",
+        help = "Export traffic device list to a remote HTTP endpoint (POST JSON once per second). Empty = disabled."
+    )]
+    pub traffic_export_url: String,
+
+    #[clap(
+        long,
+        default_value = "",
+        help = "Export device online/offline events to a remote HTTP endpoint (POST JSON on state change). Empty = disabled."
+    )]
+    pub traffic_event_url: String,
 }
 
 /// DNS 模块参数
@@ -150,6 +164,15 @@ impl Options {
     pub fn traffic_persist_history(&self) -> bool {
         self.traffic.traffic_persist_history
     }
+
+    pub fn traffic_export_url(&self) -> &str {
+        &self.traffic.traffic_export_url
+    }
+
+    pub fn traffic_event_url(&self) -> &str {
+        &self.traffic.traffic_event_url
+    }
+
 
     /// 从 DNS 参数获取启用 DNS
     pub fn enable_dns(&self) -> bool {
@@ -456,7 +479,10 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     }
 
     // 启动设备管理器的后台任务
-    let device_refresh_task = Arc::clone(&device_manager).start_background_task(Duration::from_secs(60), shutdown_notify.clone());
+    let event_url = options.traffic_event_url().trim();
+    let event_url = if event_url.is_empty() { None } else { Some(event_url.to_string()) };
+    let device_refresh_task =
+        Arc::clone(&device_manager).start_background_task(Duration::from_secs(30), shutdown_notify.clone(), event_url);
 
     // 创建模块上下文：加载 eBPF 程序并配置内核映射
     let module_contexts = create_module_contexts(options, &subnet_info, &shared_hostname_bindings, Arc::clone(&device_manager)).await?;

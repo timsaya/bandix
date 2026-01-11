@@ -3,6 +3,7 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1271,41 +1272,6 @@ impl LongTermRingManager {
         Ok(device_stats)
     }
 
-    pub fn query_time_series_increments(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
-        let rings = self.rings.lock().unwrap();
-        if let Some(ring) = rings.get(mac) {
-            let rows = ring.query_stats(start_ms, end_ms);
-            let increments: Vec<(u64, u64, u64)> = rows
-                .into_iter()
-                .map(|row| (row.end_ts_ms, row.wan_rx_bytes_inc, row.wan_tx_bytes_inc))
-                .collect();
-            Ok(increments)
-        } else {
-            Ok(Vec::new())
-        }
-    }
-
-    pub fn query_time_series_increments_aggregate(&self, start_ms: u64, end_ms: u64) -> Result<Vec<(u64, u64, u64)>, anyhow::Error> {
-        let rings = self.rings.lock().unwrap();
-        let mut all_rows_by_ts: std::collections::BTreeMap<u64, (u64, u64)> = std::collections::BTreeMap::new();
-
-        for (_mac, ring) in rings.iter() {
-            let rows = ring.query_stats(start_ms, end_ms);
-            for row in rows {
-                let entry = all_rows_by_ts.entry(row.end_ts_ms).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(row.wan_rx_bytes_inc);
-                entry.1 = entry.1.saturating_add(row.wan_tx_bytes_inc);
-            }
-        }
-
-        let increments: Vec<(u64, u64, u64)> = all_rows_by_ts
-            .into_iter()
-            .map(|(ts_ms, (rx_bytes, tx_bytes))| (ts_ms, rx_bytes, tx_bytes))
-            .collect();
-
-        Ok(increments)
-    }
-
     pub fn query_stats_aggregate_all(&self, start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRowWithStats>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
         let mut all_rows = Vec::new();
@@ -1412,6 +1378,48 @@ fn ring_dir(base: &str) -> PathBuf {
 }
 fn legacy_limits_path(base: &str) -> PathBuf {
     Path::new(base).join("rate_limits.txt")
+}
+fn rate_limit_whitelist_path(base: &str) -> PathBuf {
+    Path::new(base).join("rate_limit_whitelist.txt")
+}
+fn rate_limit_whitelist_enabled_path(base: &str) -> PathBuf {
+    Path::new(base).join("rate_limit_whitelist_enabled.txt")
+}
+#[allow(dead_code)]
+fn default_wan_rate_limit_path(base: &str) -> PathBuf {
+    Path::new(base).join("default_wan_rate_limit.txt")
+}
+fn rate_limit_policy_path(base: &str) -> PathBuf {
+    Path::new(base).join("rate_limit_policy.txt")
+}
+
+#[derive(Debug, Clone)]
+pub struct RateLimitPolicy {
+    pub enabled: bool,
+    pub default_wan_limits: [u64; 2],
+    pub whitelist: HashSet<[u8; 6]>,
+}
+
+fn parse_bool_line(line: &str) -> Option<bool> {
+    let s = line.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    Some(matches!(s.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+fn parse_two_u64_line(line: &str) -> Option<[u64; 2]> {
+    let s = line.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let rx = parts[0].parse::<u64>().ok()?;
+    let tx = parts[1].parse::<u64>().ok()?;
+    Some([rx, tx])
 }
 // bindings_path 已移动到 storage::hostname 模块
 fn ring_file_path_v3(base: &str, mac: &[u8; 6]) -> PathBuf {
@@ -1539,6 +1547,17 @@ pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
     if !bindings.exists() {
         File::create(&bindings)?;
     }
+
+    let policy_path = rate_limit_policy_path(base_dir);
+    if !policy_path.exists() {
+        let policy = RateLimitPolicy {
+            enabled: false,
+            default_wan_limits: [0, 0],
+            whitelist: HashSet::new(),
+        };
+        save_rate_limit_policy(base_dir, &policy)?;
+    }
+
     Ok(())
 }
 
@@ -1796,6 +1815,164 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
     }
 
     Ok(out)
+}
+
+pub fn parse_rate_limit_whitelist(input: &str) -> HashSet<[u8; 6]> {
+    let mut out = HashSet::new();
+    for part in input.split(',') {
+        let s = part.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let mac = if s.contains(':') {
+            parse_mac_text(s).ok()
+        } else if s.len() == 12 {
+            let mut mac = [0u8; 6];
+            let mut ok = true;
+            for i in 0..6 {
+                if let Ok(v) = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16) {
+                    mac[i] = v;
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                Some(mac)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(mac) = mac {
+            out.insert(mac);
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+pub fn load_rate_limit_whitelist(base_dir: &str) -> Result<HashSet<[u8; 6]>, anyhow::Error> {
+    let path = rate_limit_whitelist_path(base_dir);
+    let mut out = HashSet::new();
+    if !path.exists() {
+        return Ok(out);
+    }
+    let content = fs::read_to_string(&path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        out.extend(parse_rate_limit_whitelist(line));
+    }
+    Ok(out)
+}
+
+#[allow(dead_code)]
+pub fn save_rate_limit_whitelist(base_dir: &str, whitelist: &HashSet<[u8; 6]>) -> Result<(), anyhow::Error> {
+    let path = rate_limit_whitelist_path(base_dir);
+    ensure_parent_dir(&path)?;
+    let mut macs: Vec<String> = whitelist.iter().map(|m| mac_to_filename(m)).collect();
+    macs.sort();
+    let mut buf = String::new();
+    buf.push_str("# comma-separated macs (12 hex or aa:bb:cc:dd:ee:ff)\n");
+    buf.push_str(&macs.join(","));
+    buf.push('\n');
+    fs::write(&path, buf)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn load_rate_limit_whitelist_enabled(base_dir: &str) -> Result<Option<bool>, anyhow::Error> {
+    let path = rate_limit_whitelist_enabled_path(base_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let v = matches!(line.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        return Ok(Some(v));
+    }
+    Ok(None)
+}
+
+#[allow(dead_code)]
+pub fn save_rate_limit_whitelist_enabled(base_dir: &str, enabled: bool) -> Result<(), anyhow::Error> {
+    let path = rate_limit_whitelist_enabled_path(base_dir);
+    ensure_parent_dir(&path)?;
+    let mut buf = String::new();
+    buf.push_str("# enable whitelist policy: true/false\n");
+    buf.push_str(if enabled { "true\n" } else { "false\n" });
+    fs::write(&path, buf)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn load_default_wan_rate_limit(base_dir: &str) -> Result<[u64; 2], anyhow::Error> {
+    let path = default_wan_rate_limit_path(base_dir);
+    if !path.exists() {
+        return Ok([0, 0]);
+    }
+    let content = fs::read_to_string(&path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let rx: u64 = parts[0].parse().unwrap_or(0);
+        let tx: u64 = parts[1].parse().unwrap_or(0);
+        return Ok([rx, tx]);
+    }
+    Ok([0, 0])
+}
+
+pub fn load_rate_limit_policy(base_dir: &str) -> Result<RateLimitPolicy, anyhow::Error> {
+    let path = rate_limit_policy_path(base_dir);
+    if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        let mut lines = content.lines();
+        let enabled = lines.next().and_then(parse_bool_line).unwrap_or(false);
+        let default_wan_limits = lines.next().and_then(parse_two_u64_line).unwrap_or([0, 0]);
+        let whitelist_line = lines.next().unwrap_or("");
+        let whitelist = parse_rate_limit_whitelist(whitelist_line);
+        return Ok(RateLimitPolicy {
+            enabled,
+            default_wan_limits,
+            whitelist,
+        });
+    }
+
+    let policy = RateLimitPolicy {
+        enabled: false,
+        default_wan_limits: [0, 0],
+        whitelist: HashSet::new(),
+    };
+    save_rate_limit_policy(base_dir, &policy)?;
+    Ok(policy)
+}
+
+pub fn save_rate_limit_policy(base_dir: &str, policy: &RateLimitPolicy) -> Result<(), anyhow::Error> {
+    let path = rate_limit_policy_path(base_dir);
+    ensure_parent_dir(&path)?;
+    let mut macs: Vec<String> = policy.whitelist.iter().map(|m| mac_to_filename(m)).collect();
+    macs.sort();
+    let mut buf = String::new();
+    buf.push_str(if policy.enabled { "true\n" } else { "false\n" });
+    buf.push_str(&format!("{} {}\n", policy.default_wan_limits[0], policy.default_wan_limits[1]));
+    buf.push_str(&macs.join(","));
+    buf.push('\n');
+    fs::write(&path, buf)?;
+    Ok(())
 }
 
 /// 将预定速率限制保存到文件

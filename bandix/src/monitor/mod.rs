@@ -7,7 +7,9 @@ use crate::command::Options;
 use crate::device::DeviceManager;
 use crate::storage::traffic::{LongTermRingManager, RealtimeRingManager, ScheduledRateLimit};
 use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 
 // 从连接模块重新导出 ConnectionModuleContext
 pub use connection::ConnectionModuleContext;
@@ -17,6 +19,9 @@ pub struct TrafficModuleContext {
     pub options: Options,
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
+    pub rate_limit_whitelist: Arc<Mutex<HashSet<[u8; 6]>>>,
+    pub rate_limit_whitelist_enabled: Arc<AtomicBool>,
+    pub default_wan_rate_limits: Arc<Mutex<[u64; 2]>>,
     pub realtime_manager: Arc<RealtimeRingManager>,  // 实时1秒采样（仅内存）
     pub long_term_manager: Arc<LongTermRingManager>, // 长期采样（1小时间隔，365天保留，已持久化）
     pub device_manager: Arc<DeviceManager>,          // 统一的设备管理器（包含设备信息和流量统计）
@@ -38,11 +43,17 @@ impl TrafficModuleContext {
         let long_term_manager = Arc::new(LongTermRingManager::new(options.data_dir().to_string()));
 
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
+        let rate_limit_whitelist = Arc::new(Mutex::new(HashSet::new()));
+        let rate_limit_whitelist_enabled = Arc::new(AtomicBool::new(false));
+        let default_wan_rate_limits = Arc::new(Mutex::new([0u64; 2]));
 
         Self {
             options,
             scheduled_rate_limits: Arc::new(Mutex::new(Vec::new())),
             hostname_bindings,
+            rate_limit_whitelist,
+            rate_limit_whitelist_enabled,
+            default_wan_rate_limits,
             realtime_manager,
             long_term_manager,
             device_manager,
@@ -118,6 +129,9 @@ impl Clone for ModuleContext {
                 options: ctx.options.clone(),
                 scheduled_rate_limits: Arc::clone(&ctx.scheduled_rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
+                rate_limit_whitelist: Arc::clone(&ctx.rate_limit_whitelist),
+                rate_limit_whitelist_enabled: Arc::clone(&ctx.rate_limit_whitelist_enabled),
+                default_wan_rate_limits: Arc::clone(&ctx.default_wan_rate_limits),
                 realtime_manager: Arc::clone(&ctx.realtime_manager),
                 long_term_manager: Arc::clone(&ctx.long_term_manager),
                 device_manager: Arc::clone(&ctx.device_manager),
@@ -161,6 +175,20 @@ impl ModuleType {
                     *srl = scheduled_limits;
                 }
 
+                if let Ok(policy) = crate::storage::traffic::load_rate_limit_policy(traffic_ctx.options.data_dir()) {
+                    {
+                        let mut guard = traffic_ctx.rate_limit_whitelist.lock().unwrap();
+                        *guard = policy.whitelist;
+                    }
+                    traffic_ctx
+                        .rate_limit_whitelist_enabled
+                        .store(policy.enabled, std::sync::atomic::Ordering::Relaxed);
+                    {
+                        let mut guard = traffic_ctx.default_wan_rate_limits.lock().unwrap();
+                        *guard = policy.default_wan_limits;
+                    }
+                }
+
                 // 如果开启了持久化，那么从历史数据，加载基线流量
                 if traffic_ctx.options.traffic_persist_history() {
                     // 加载 ring 文件中的设备
@@ -201,10 +229,15 @@ impl ModuleType {
                                 stats.lan_rx_bytes = *lan_rx_bytes;
                                 stats.lan_tx_bytes = *lan_tx_bytes;
 
-                                // 使用 ring 文件中的 last_online_ts，如果没有则使用 ts_ms
-                                if *last_online_ts > 0 {
+                                stats.lan_last_rx_bytes = *lan_rx_bytes;
+                                stats.lan_last_tx_bytes = *lan_tx_bytes;
+                                stats.wan_last_rx_bytes = *wan_rx_bytes;
+                                stats.wan_last_tx_bytes = *wan_tx_bytes;
+                                stats.last_sample_ts = *ts_ms;
+
+                                if *last_online_ts > stats.last_online_ts {
                                     stats.last_online_ts = *last_online_ts;
-                                } else if stats.last_online_ts == 0 || *ts_ms > stats.last_online_ts {
+                                } else if stats.last_online_ts == 0 && *ts_ms > 0 {
                                     stats.last_online_ts = *ts_ms;
                                 }
                             }) {
@@ -238,9 +271,12 @@ impl ModuleType {
                 use crate::api::{traffic::TrafficApiHandler, ApiHandler};
 
                 // 创建流量 API 处理程序
-                let handler = ApiHandler::Traffic(TrafficApiHandler::new(
+                let handler = ApiHandler::Traffic(TrafficApiHandler::new_with_rate_limit_whitelist(
                     Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
+                    Arc::clone(&traffic_ctx.rate_limit_whitelist),
+                    Arc::clone(&traffic_ctx.rate_limit_whitelist_enabled),
+                    Arc::clone(&traffic_ctx.default_wan_rate_limits),
                     Arc::clone(&traffic_ctx.realtime_manager),
                     Arc::clone(&traffic_ctx.long_term_manager),
                     Arc::clone(&traffic_ctx.device_manager),

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 设备信息，用于 API 响应
@@ -16,6 +17,7 @@ pub struct DeviceInfo {
     pub ipv6_addresses: Vec<String>,
     pub mac: String,
     pub hostname: String,
+    pub connection_type: String,
 
     pub total_rx_bytes: u64,
     pub total_tx_bytes: u64,
@@ -234,6 +236,9 @@ pub struct DeleteScheduledLimitRequest {
 pub struct TrafficApiHandler {
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
+    rate_limit_whitelist: Arc<Mutex<HashSet<[u8; 6]>>>,
+    rate_limit_whitelist_enabled: Arc<AtomicBool>,
+    default_wan_rate_limits: Arc<Mutex<[u64; 2]>>,
     realtime_manager: Arc<RealtimeRingManager>,
     long_term_manager: Arc<LongTermRingManager>,
     device_manager: Arc<crate::device::DeviceManager>,
@@ -241,9 +246,12 @@ pub struct TrafficApiHandler {
 }
 
 impl TrafficApiHandler {
-    pub fn new(
+    pub fn new_with_rate_limit_whitelist(
         scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
+        rate_limit_whitelist: Arc<Mutex<HashSet<[u8; 6]>>>,
+        rate_limit_whitelist_enabled: Arc<AtomicBool>,
+        default_wan_rate_limits: Arc<Mutex<[u64; 2]>>,
         realtime_manager: Arc<RealtimeRingManager>,
         long_term_manager: Arc<LongTermRingManager>,
         device_manager: Arc<crate::device::DeviceManager>,
@@ -252,6 +260,9 @@ impl TrafficApiHandler {
         Self {
             scheduled_rate_limits,
             hostname_bindings,
+            rate_limit_whitelist,
+            rate_limit_whitelist_enabled,
+            default_wan_rate_limits,
             realtime_manager,
             long_term_manager,
             device_manager,
@@ -269,6 +280,9 @@ impl TrafficApiHandler {
             "/api/traffic/bindings",
             "/api/traffic/usage/ranking",
             "/api/traffic/usage/increments",
+            "/api/traffic/rate_limit/whitelist",
+            "/api/traffic/rate_limit/whitelist/enabled",
+            "/api/traffic/rate_limit/default",
         ]
     }
 
@@ -313,14 +327,150 @@ impl TrafficApiHandler {
                 "DELETE" => self.handle_delete_scheduled_limit(request).await,
                 _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
             },
+            "/api/traffic/rate_limit/whitelist" => match request.method.as_str() {
+                "GET" => self.handle_rate_limit_whitelist_get().await,
+                "POST" => self.handle_rate_limit_whitelist_add(request).await,
+                "DELETE" => self.handle_rate_limit_whitelist_delete(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
+            "/api/traffic/rate_limit/whitelist/enabled" => match request.method.as_str() {
+                "GET" => self.handle_rate_limit_whitelist_get().await,
+                "POST" => self.handle_rate_limit_whitelist_set_enabled(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
+            "/api/traffic/rate_limit/default" => match request.method.as_str() {
+                "POST" => self.handle_rate_limit_set_default_limits(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
             _ => Ok(HttpResponse::not_found()),
         }
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct RateLimitWhitelistStateResponse {
+    pub enabled: bool,
+    pub default_wan_rx_rate_limit: u64,
+    pub default_wan_tx_rate_limit: u64,
+    pub macs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SetRateLimitWhitelistEnabledRequest {
+    pub enabled: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct WhitelistMacRequest {
+    pub mac: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SetDefaultWanRateLimitRequest {
+    pub wan_rx_rate_limit: u64,
+    pub wan_tx_rate_limit: u64,
+}
+
+impl TrafficApiHandler {
+    async fn handle_rate_limit_whitelist_get(&self) -> Result<HttpResponse, anyhow::Error> {
+        let enabled = self.rate_limit_whitelist_enabled.load(Ordering::Relaxed);
+        let default_limits = *self.default_wan_rate_limits.lock().unwrap();
+        let wl = self.rate_limit_whitelist.lock().unwrap();
+        let mut macs: Vec<String> = wl.iter().map(|m| format_mac(m)).collect();
+        macs.sort();
+        let response = RateLimitWhitelistStateResponse {
+            enabled,
+            default_wan_rx_rate_limit: default_limits[0],
+            default_wan_tx_rate_limit: default_limits[1],
+            macs,
+        };
+        let api_response = ApiResponse::success(response);
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    async fn handle_rate_limit_whitelist_set_enabled(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+        let req: SetRateLimitWhitelistEnabledRequest = serde_json::from_str(body)?;
+        self.rate_limit_whitelist_enabled.store(req.enabled, Ordering::Relaxed);
+        let wl = self.rate_limit_whitelist.lock().unwrap().clone();
+        let default_limits = *self.default_wan_rate_limits.lock().unwrap();
+        let policy = crate::storage::traffic::RateLimitPolicy {
+            enabled: req.enabled,
+            default_wan_limits: default_limits,
+            whitelist: wl,
+        };
+        crate::storage::traffic::save_rate_limit_policy(self.options.data_dir(), &policy)?;
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    async fn handle_rate_limit_whitelist_add(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+        let req: WhitelistMacRequest = serde_json::from_str(body)?;
+        let mac = crate::utils::network_utils::parse_mac_address(&req.mac)?;
+        let mut wl = self.rate_limit_whitelist.lock().unwrap();
+        wl.insert(mac);
+        let enabled = self.rate_limit_whitelist_enabled.load(Ordering::Relaxed);
+        let default_limits = *self.default_wan_rate_limits.lock().unwrap();
+        let policy = crate::storage::traffic::RateLimitPolicy {
+            enabled,
+            default_wan_limits: default_limits,
+            whitelist: wl.clone(),
+        };
+        crate::storage::traffic::save_rate_limit_policy(self.options.data_dir(), &policy)?;
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    async fn handle_rate_limit_whitelist_delete(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+        let req: WhitelistMacRequest = serde_json::from_str(body)?;
+        let mac = crate::utils::network_utils::parse_mac_address(&req.mac)?;
+        let mut wl = self.rate_limit_whitelist.lock().unwrap();
+        wl.remove(&mac);
+        let enabled = self.rate_limit_whitelist_enabled.load(Ordering::Relaxed);
+        let default_limits = *self.default_wan_rate_limits.lock().unwrap();
+        let policy = crate::storage::traffic::RateLimitPolicy {
+            enabled,
+            default_wan_limits: default_limits,
+            whitelist: wl.clone(),
+        };
+        crate::storage::traffic::save_rate_limit_policy(self.options.data_dir(), &policy)?;
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    async fn handle_rate_limit_set_default_limits(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+        let req: SetDefaultWanRateLimitRequest = serde_json::from_str(body)?;
+
+        {
+            let mut guard = self.default_wan_rate_limits.lock().unwrap();
+            *guard = [req.wan_rx_rate_limit, req.wan_tx_rate_limit];
+        }
+
+        let enabled = self.rate_limit_whitelist_enabled.load(Ordering::Relaxed);
+        let wl = self.rate_limit_whitelist.lock().unwrap().clone();
+        let policy = crate::storage::traffic::RateLimitPolicy {
+            enabled,
+            default_wan_limits: [req.wan_rx_rate_limit, req.wan_tx_rate_limit],
+            whitelist: wl,
+        };
+        crate::storage::traffic::save_rate_limit_policy(self.options.data_dir(), &policy)?;
+
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+}
+
 impl TrafficApiHandler {
     /// 计算时间范围的开始和结束时间戳（毫秒）
-    /// period: "today" | "week" | "month" | "all"
+    /// period: "today" | "week" | "month" | "year" | "all"
     fn calculate_time_range(period: &str) -> Option<(u64, u64)> {
         let now = Local::now();
         let now_ms = now.timestamp_millis() as u64;
@@ -347,6 +497,11 @@ impl TrafficApiHandler {
                 let month_start_local = Local.from_local_datetime(&month_start).unwrap();
                 month_start_local.timestamp_millis() as u64
             }
+            "year" => {
+                let year_start = now.date_naive().with_ordinal(1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+                let year_start_local = Local.from_local_datetime(&year_start).unwrap();
+                year_start_local.timestamp_millis() as u64
+            }
             "all" => return None,
             _ => return None,
         };
@@ -365,6 +520,7 @@ impl TrafficApiHandler {
 
         let time_range = Self::calculate_time_range(&period);
         let bindings_map = self.hostname_bindings.lock().unwrap();
+        let wifi_set = self.device_manager.get_wifi_macs_snapshot();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
         let all_devices = self.device_manager.get_all_devices_with_mac();
@@ -397,6 +553,12 @@ impl TrafficApiHandler {
                     device.hostname.clone()
                 } else {
                     bindings_map.get(&mac).cloned().unwrap_or_default()
+                };
+
+                let connection_type = if wifi_set.contains(&mac) {
+                    "wifi".to_string()
+                } else {
+                    "wired".to_string()
                 };
 
                 // 计算指定时间段的流量
@@ -458,6 +620,7 @@ impl TrafficApiHandler {
                     ipv6_addresses,
                     mac: mac_str,
                     hostname,
+                    connection_type,
                     total_rx_bytes: final_total_rx_bytes,
                     total_tx_bytes: final_total_tx_bytes,
                     total_rx_rate: device.total_rx_rate(),
