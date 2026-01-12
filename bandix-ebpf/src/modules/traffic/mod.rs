@@ -101,18 +101,16 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
 
 #[inline(always)]
 fn is_subnet_configured() -> bool {
-    let network_addr = match IPV4_SUBNET_INFO.get(0) {
-        Some(addr) => addr,
-        None => return false,
-    };
-
-    let subnet_mask = match IPV4_SUBNET_INFO.get(1) {
-        Some(mask) => mask,
-        None => return false,
-    };
-
-    // 检查是否subnet info is configured
-    !(*network_addr == [0, 0, 0, 0] && *subnet_mask == [0, 0, 0, 0])
+    // Check if at least one subnet is configured
+    for i in 0..16 {
+        if let Some(subnet_data) = IPV4_SUBNET_INFO.get(i as u32) {
+            let enabled = subnet_data[8];
+            if enabled != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ============================================================================

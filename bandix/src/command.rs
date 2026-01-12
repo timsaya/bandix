@@ -78,6 +78,13 @@ pub struct TrafficArgs {
         help = "Export device online/offline events to a remote HTTP endpoint (POST JSON on state change). Empty = disabled."
     )]
     pub traffic_event_url: String,
+
+    #[clap(
+        long,
+        default_value = "",
+        help = "Additional local subnets (comma-separated CIDR notation, e.g. '192.168.2.0/24,10.0.0.0/8'). Empty = only interface subnet."
+    )]
+    pub traffic_additional_subnets: String,
 }
 
 /// DNS 模块参数
@@ -173,6 +180,10 @@ impl Options {
         &self.traffic.traffic_event_url
     }
 
+    pub fn traffic_additional_subnets(&self) -> &str {
+        &self.traffic.traffic_additional_subnets
+    }
+
     /// 从 DNS 参数获取启用 DNS
     pub fn enable_dns(&self) -> bool {
         self.dns.enable_dns
@@ -187,6 +198,58 @@ impl Options {
     pub fn enable_connection(&self) -> bool {
         self.connection.enable_connection
     }
+}
+
+// 解析 CIDR 格式的子网（例如 "192.168.2.0/24"）
+fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!("Invalid CIDR format, expected IP/prefix (e.g., 192.168.2.0/24)"));
+    }
+
+    // 解析 IP 地址
+    let ip_parts: Vec<&str> = parts[0].split('.').collect();
+    if ip_parts.len() != 4 {
+        return Err(anyhow::anyhow!("Invalid IP address format"));
+    }
+
+    let mut ip = [0u8; 4];
+    for (i, part) in ip_parts.iter().enumerate() {
+        ip[i] = part.parse::<u8>()
+            .map_err(|_| anyhow::anyhow!("Invalid IP address octet: {}", part))?;
+    }
+
+    // 解析前缀长度
+    let prefix_len = parts[1].parse::<u8>()
+        .map_err(|_| anyhow::anyhow!("Invalid prefix length: {}", parts[1]))?;
+
+    if prefix_len > 32 {
+        return Err(anyhow::anyhow!("Prefix length must be between 0 and 32"));
+    }
+
+    // 计算子网掩码
+    let mask_bits = if prefix_len == 0 {
+        0u32
+    } else {
+        !0u32 << (32 - prefix_len)
+    };
+
+    let subnet_mask = [
+        ((mask_bits >> 24) & 0xFF) as u8,
+        ((mask_bits >> 16) & 0xFF) as u8,
+        ((mask_bits >> 8) & 0xFF) as u8,
+        (mask_bits & 0xFF) as u8,
+    ];
+
+    // 计算网络地址（IP & 掩码）
+    let network_addr = [
+        ip[0] & subnet_mask[0],
+        ip[1] & subnet_mask[1],
+        ip[2] & subnet_mask[2],
+        ip[3] & subnet_mask[3],
+    ];
+
+    Ok((network_addr, subnet_mask))
 }
 
 // 验证参数
@@ -209,6 +272,21 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
 
         if opt.traffic_flush_interval_seconds() == 0 {
             return Err(anyhow::anyhow!("traffic_persist_interval_seconds must be greater than 0"));
+        }
+
+        // 验证额外子网的 CIDR 格式
+        let additional_subnets = opt.traffic_additional_subnets().trim();
+        if !additional_subnets.is_empty() {
+            for subnet_cidr in additional_subnets.split(',') {
+                let subnet_cidr = subnet_cidr.trim();
+                if subnet_cidr.is_empty() {
+                    continue;
+                }
+                // 尝试解析以验证格式
+                parse_cidr(subnet_cidr).map_err(|e| {
+                    anyhow::anyhow!("Invalid subnet CIDR '{}': {}", subnet_cidr, e)
+                })?;
+            }
         }
     }
 
@@ -270,10 +348,66 @@ async fn create_module_contexts(
         if options.enable_traffic() {
             log::info!("Configuring subnet info maps for traffic module...");
 
-            // 配置 IPv4 子网信息映射
-            let mut ipv4_subnet_info: Array<_, [u8; 4]> = Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
-            ipv4_subnet_info.set(0, &subnet_info.interface_ip, 0)?;
-            ipv4_subnet_info.set(1, &subnet_info.subnet_mask, 0)?;
+            // 配置 IPv4 子网信息映射 (支持多个子网)
+            let mut ipv4_subnet_info: Array<_, [u8; 16]> = Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;
+
+            // 初始化所有槽位为空
+            for i in 0..16 {
+                ipv4_subnet_info.set(i, &[0u8; 16], 0)?;
+            }
+
+            let mut subnet_count = 0;
+
+            // 配置接口子网作为第一个子网
+            let mut subnet_data = [0u8; 16];
+            subnet_data[0..4].copy_from_slice(&subnet_info.interface_ip);
+            subnet_data[4..8].copy_from_slice(&subnet_info.subnet_mask);
+            subnet_data[8] = 1; // enabled
+            ipv4_subnet_info.set(subnet_count, &subnet_data, 0)?;
+            log::info!(
+                "Configured IPv4 subnet {}: {}/{} (interface subnet)",
+                subnet_count,
+                format!("{}.{}.{}.{}", subnet_info.interface_ip[0], subnet_info.interface_ip[1], subnet_info.interface_ip[2], subnet_info.interface_ip[3]),
+                format!("{}.{}.{}.{}", subnet_info.subnet_mask[0], subnet_info.subnet_mask[1], subnet_info.subnet_mask[2], subnet_info.subnet_mask[3])
+            );
+            subnet_count += 1;
+
+            // 配置额外的子网（从命令行参数）
+            let additional_subnets = options.traffic_additional_subnets().trim();
+            if !additional_subnets.is_empty() {
+                for subnet_cidr in additional_subnets.split(',') {
+                    let subnet_cidr = subnet_cidr.trim();
+                    if subnet_cidr.is_empty() {
+                        continue;
+                    }
+
+                    // 解析 CIDR 格式 (例如 "192.168.2.0/24")
+                    match parse_cidr(subnet_cidr) {
+                        Ok((network_addr, subnet_mask)) => {
+                            if subnet_count >= 16 {
+                                log::warn!("Maximum 16 IPv4 subnets supported, ignoring: {}", subnet_cidr);
+                                break;
+                            }
+
+                            let mut subnet_data = [0u8; 16];
+                            subnet_data[0..4].copy_from_slice(&network_addr);
+                            subnet_data[4..8].copy_from_slice(&subnet_mask);
+                            subnet_data[8] = 1; // enabled
+                            ipv4_subnet_info.set(subnet_count as u32, &subnet_data, 0)?;
+                            log::info!(
+                                "Configured IPv4 subnet {}: {}/{} (additional)",
+                                subnet_count,
+                                format!("{}.{}.{}.{}", network_addr[0], network_addr[1], network_addr[2], network_addr[3]),
+                                format!("{}.{}.{}.{}", subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3])
+                            );
+                            subnet_count += 1;
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to parse subnet CIDR '{}': {}", subnet_cidr, e);
+                        }
+                    }
+                }
+            }
 
             // 配置 IPv6 子网信息映射
             let mut ipv6_subnet_info: Array<_, [u8; 32]> = Array::try_from(ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
