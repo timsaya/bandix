@@ -42,7 +42,7 @@ impl TrafficModuleContext {
 
         let long_term_manager = Arc::new(LongTermRingManager::new(
             options.data_dir().to_string(),
-            options.traffic_flush_interval_seconds(),
+            options.traffic_persist_interval_seconds(),
         ));
 
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));

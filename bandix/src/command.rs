@@ -163,7 +163,7 @@ impl Options {
     }
 
     /// 从流量参数获取流量持久化间隔秒数
-    pub fn traffic_flush_interval_seconds(&self) -> u32 {
+    pub fn traffic_persist_interval_seconds(&self) -> u32 {
         self.traffic.traffic_persist_interval_seconds
     }
 
@@ -270,7 +270,7 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
             return Err(anyhow::anyhow!("traffic_retention_seconds must be greater than 0"));
         }
 
-        if opt.traffic_flush_interval_seconds() == 0 {
+        if opt.traffic_persist_interval_seconds() == 0 {
             return Err(anyhow::anyhow!("traffic_persist_interval_seconds must be greater than 0"));
         }
 
