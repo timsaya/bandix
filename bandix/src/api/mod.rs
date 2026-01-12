@@ -1,12 +1,12 @@
+pub mod connection;
 pub mod dns;
 pub mod traffic;
-pub mod connection;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
 
-/// API response structures
+/// API 响应结构
 #[derive(Serialize, Deserialize)]
 pub struct ApiResponse<T> {
     pub status: String,
@@ -32,7 +32,7 @@ impl<T> ApiResponse<T> {
     }
 }
 
-/// HTTP request information
+/// HTTP 请求信息
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
     pub method: String,
@@ -41,7 +41,7 @@ pub struct HttpRequest {
     pub body: Option<String>,
 }
 
-/// HTTP response
+/// HTTP 响应
 #[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
@@ -60,9 +60,8 @@ impl HttpResponse {
 
     pub fn error(status: u16, message: String) -> Self {
         let error_response = ApiResponse::<()>::error(message);
-        let body = serde_json::to_string(&error_response).unwrap_or_else(|_| {
-            r#"{"status":"error","message":"JSON serialization failed"}"#.to_string()
-        });
+        let body = serde_json::to_string(&error_response)
+            .unwrap_or_else(|_| r#"{"status":"error","message":"JSON serialization failed"}"#.to_string());
         Self {
             status,
             content_type: "application/json".to_string(),
@@ -79,7 +78,7 @@ impl HttpResponse {
     }
 }
 
-/// API handler enum for different modules
+/// 不同模块的 API 处理程序枚举
 #[derive(Clone)]
 pub enum ApiHandler {
     Traffic(crate::api::traffic::TrafficApiHandler),
@@ -104,10 +103,7 @@ impl ApiHandler {
         }
     }
 
-    pub async fn handle_request(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         match self {
             ApiHandler::Traffic(handler) => handler.handle_request(request).await,
             ApiHandler::Dns(handler) => handler.handle_request(request).await,
@@ -116,7 +112,7 @@ impl ApiHandler {
     }
 }
 
-/// API router for managing module API handlers
+/// API 路由器，用于管理模块 API 处理程序
 #[derive(Clone)]
 pub struct ApiRouter {
     handlers: HashMap<String, ApiHandler>,
@@ -124,22 +120,16 @@ pub struct ApiRouter {
 
 impl ApiRouter {
     pub fn new() -> Self {
-        Self {
-            handlers: HashMap::new(),
-        }
+        Self { handlers: HashMap::new() }
     }
 
     /// Register an API handler for a module
     pub fn register_handler(&mut self, handler: ApiHandler) {
-        self.handlers
-            .insert(handler.module_name().to_string(), handler);
+        self.handlers.insert(handler.module_name().to_string(), handler);
     }
 
     /// Route a request to the appropriate handler
-    pub async fn route_request(
-        &self,
-        request: &HttpRequest,
-    ) -> Result<HttpResponse, anyhow::Error> {
+    pub async fn route_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         // Try to find a handler that supports this route
         for handler in self.handlers.values() {
             for route in handler.supported_routes() {
@@ -154,7 +144,7 @@ impl ApiRouter {
     }
 }
 
-/// Parse HTTP request from raw bytes
+/// 从原始字节解析 HTTP 请求
 pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::Error> {
     let request_str = String::from_utf8_lossy(request_bytes);
     let lines: Vec<&str> = request_str.lines().collect();
@@ -163,7 +153,7 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
         return Err(anyhow::anyhow!("Empty request"));
     }
 
-    // Parse request line
+    // 解析request line
     let parts: Vec<&str> = lines[0].split_whitespace().collect();
     if parts.len() < 2 {
         return Err(anyhow::anyhow!("Invalid request line"));
@@ -172,17 +162,14 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
     let method = parts[0].to_string();
     let path_with_query = parts[1];
 
-    // Split path and query parameters
+    // 分割path and query parameters
     let (path, query_str) = if let Some(pos) = path_with_query.find('?') {
-        (
-            path_with_query[..pos].to_string(),
-            Some(&path_with_query[pos + 1..]),
-        )
+        (path_with_query[..pos].to_string(), Some(&path_with_query[pos + 1..]))
     } else {
         (path_with_query.to_string(), None)
     };
 
-    // Parse query parameters
+    // 解析query parameters
     let mut query_params = HashMap::new();
     if let Some(query) = query_str {
         for param in query.split('&') {
@@ -194,7 +181,7 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
         }
     }
 
-    // Parse body (if present)
+    // 解析body (if present)
     let body = if let Some(body_start) = request_str.find("\r\n\r\n") {
         Some(request_str[body_start + 4..].to_string())
     } else {
@@ -209,11 +196,8 @@ pub fn parse_http_request(request_bytes: &[u8]) -> Result<HttpRequest, anyhow::E
     })
 }
 
-/// Send HTTP response to client
-pub async fn send_http_response(
-    stream: &mut TcpStream,
-    response: &HttpResponse,
-) -> Result<(), anyhow::Error> {
+/// 向客户端发送 HTTP 响应
+pub async fn send_http_response(stream: &mut TcpStream, response: &HttpResponse) -> Result<(), anyhow::Error> {
     use tokio::io::AsyncWriteExt;
 
     let status_text = match response.status {

@@ -1,5 +1,5 @@
-// DNS monitoring module
-// This module handles DNS query monitoring and analysis
+// DNS 监控 module
+// 这module handles DNS query monitoring and analysis
 
 pub mod maps;
 
@@ -71,19 +71,19 @@ pub fn handle_dns_egress(ctx: &TcContext) -> Result<i32, ()> {
 }
 
 fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
-    // Get packet length
+    // 获取packet length
     let len = ctx.len();
     if len == 0 {
         return Ok(TC_ACT_PIPE);
     }
 
-    // Filter DNS packets in kernel space, only process DNS traffic
+    // 过滤DNS packets in kernel space, only process DNS traffic
     if !is_dns_packet(&ctx, len as usize) {
         // Not a DNS packet, pass through without processing
         return Ok(TC_ACT_PIPE);
     }
 
-    // Calculate data length to copy (not exceeding MAX_PAYLOAD)
+    // 计算data length to copy (not exceeding MAX_PAYLOAD)
     let copy_len = cmp::min(len as usize, MAX_PAYLOAD);
 
     // Reserve space in ringbuf
@@ -95,7 +95,7 @@ fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
         }
     };
 
-    // Get write pointer for entry
+    // 获取write pointer for entry
     let entry_ptr = entry.as_mut_ptr() as *mut u8;
 
     // Write PacketHeader
@@ -118,7 +118,7 @@ fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
                 *entry_ptr.add(data_offset + i) = byte;
             },
             Err(_) => {
-                // If read fails, update actual copied length
+                // 如果read fails, update actual copied length
                 unsafe {
                     let header_ptr = entry_ptr as *mut PacketHeader;
                     (*header_ptr).captured_len = i as u32;
@@ -134,11 +134,11 @@ fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
     Ok(TC_ACT_PIPE)
 }
 
-/// Validate DNS header format
-/// Check if the payload at given offset looks like a valid DNS packet
+/// 验证DNS header format
+/// 检查是否the payload at given offset looks like a valid DNS packet
 #[inline(always)]
 fn validate_dns_header(ctx: &TcContext, dns_offset: usize, len: usize, is_tcp: bool) -> bool {
-    // For TCP DNS, there's a 2-byte length prefix before DNS data
+    // 对于TCP DNS, there's a 2-byte length prefix before DNS data
     let dns_data_offset = if is_tcp {
         if len < dns_offset + 2 + DNS_HEADER_MIN_LEN {
             return false;
@@ -152,10 +152,7 @@ fn validate_dns_header(ctx: &TcContext, dns_offset: usize, len: usize, is_tcp: b
     };
 
     // Read DNS header flags (bytes 2-3 of DNS header)
-    let flags_bytes = match (
-        ctx.load(dns_data_offset + 2),
-        ctx.load(dns_data_offset + 3),
-    ) {
+    let flags_bytes = match (ctx.load(dns_data_offset + 2), ctx.load(dns_data_offset + 3)) {
         (Ok(b1), Ok(b2)) => [b1, b2],
         _ => return false,
     };
@@ -163,7 +160,7 @@ fn validate_dns_header(ctx: &TcContext, dns_offset: usize, len: usize, is_tcp: b
 
     // Check DNS header flags for basic validity
     // Bits: QR(1) | Opcode(4) | AA(1) | TC(1) | RD(1) | RA(1) | Z(3) | RCODE(4)
-    
+
     // Extract Opcode (bits 1-4): should be 0 (standard query) or 1 (inverse query) or 2 (status)
     // Most DNS packets use opcode 0
     let opcode = (flags >> 11) & 0x0F;
@@ -180,20 +177,14 @@ fn validate_dns_header(ctx: &TcContext, dns_offset: usize, len: usize, is_tcp: b
     }
 
     // Read question count (bytes 4-5)
-    let qdcount_bytes = match (
-        ctx.load(dns_data_offset + 4),
-        ctx.load(dns_data_offset + 5),
-    ) {
+    let qdcount_bytes = match (ctx.load(dns_data_offset + 4), ctx.load(dns_data_offset + 5)) {
         (Ok(b1), Ok(b2)) => [b1, b2],
         _ => return false,
     };
     let qdcount = u16::from_be_bytes(qdcount_bytes);
 
     // Read answer count (bytes 6-7)
-    let ancount_bytes = match (
-        ctx.load(dns_data_offset + 6),
-        ctx.load(dns_data_offset + 7),
-    ) {
+    let ancount_bytes = match (ctx.load(dns_data_offset + 6), ctx.load(dns_data_offset + 7)) {
         (Ok(b1), Ok(b2)) => [b1, b2],
         _ => return false,
     };
@@ -214,7 +205,7 @@ fn validate_dns_header(ctx: &TcContext, dns_offset: usize, len: usize, is_tcp: b
     true
 }
 
-/// Check if packet is DNS packet in kernel space
+/// 检查是否packet is DNS packet in kernel space
 /// Check Ethernet type, IP protocol and UDP port
 /// Supports IPv4 and IPv6
 fn is_dns_packet(ctx: &TcContext, len: usize) -> bool {
@@ -230,7 +221,7 @@ fn is_dns_packet(ctx: &TcContext, len: usize) -> bool {
     };
     let eth_type = u16::from_be_bytes(eth_type_bytes);
 
-    // Handle IPv4 or IPv6
+    // 处理IPv4 or IPv6
     match eth_type {
         ETH_TYPE_IPV4 => is_dns_ipv4(ctx, len),
         ETH_TYPE_IPV6 => is_dns_ipv6(ctx, len),
@@ -272,39 +263,36 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
         Ok(b) => b,
         Err(_) => return false,
     };
-    
+
     // Support both UDP and TCP
     match protocol {
         PROTO_UDP => {
             // UDP DNS
             let udp_header_start = ip_header_start + ip_header_len;
-            
+
             // Check UDP header length
             if len < udp_header_start + UDP_HEADER_LEN {
                 return false;
             }
-            
+
             // Parse UDP ports - check port first for early return
             let src_port_bytes = match (ctx.load(udp_header_start), ctx.load(udp_header_start + 1)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let src_port = u16::from_be_bytes(src_port_bytes);
-            
-            let dst_port_bytes = match (
-                ctx.load(udp_header_start + 2),
-                ctx.load(udp_header_start + 3),
-            ) {
+
+            let dst_port_bytes = match (ctx.load(udp_header_start + 2), ctx.load(udp_header_start + 3)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let dst_port = u16::from_be_bytes(dst_port_bytes);
-            
-            // Check if either port is DNS port
+
+            // 检查是否either port is DNS port
             if src_port != DNS_PORT && dst_port != DNS_PORT {
                 return false;
             }
-            
+
             // Port matches, now validate DNS header format
             let dns_offset = udp_header_start + UDP_HEADER_LEN;
             validate_dns_header(ctx, dns_offset, len, false)
@@ -312,33 +300,30 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
         PROTO_TCP => {
             // TCP DNS
             let tcp_header_start = ip_header_start + ip_header_len;
-            
+
             // Check TCP header minimum length
             if len < tcp_header_start + TCP_HEADER_MIN_LEN {
                 return false;
             }
-            
+
             // Parse TCP ports - check port first for early return
             let src_port_bytes = match (ctx.load(tcp_header_start), ctx.load(tcp_header_start + 1)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let src_port = u16::from_be_bytes(src_port_bytes);
-            
-            let dst_port_bytes = match (
-                ctx.load(tcp_header_start + 2),
-                ctx.load(tcp_header_start + 3),
-            ) {
+
+            let dst_port_bytes = match (ctx.load(tcp_header_start + 2), ctx.load(tcp_header_start + 3)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let dst_port = u16::from_be_bytes(dst_port_bytes);
-            
-            // Check if either port is DNS port
+
+            // 检查是否either port is DNS port
             if src_port != DNS_PORT && dst_port != DNS_PORT {
                 return false;
             }
-            
+
             // Port matches, now validate DNS header format
             // TCP header data offset is in bits 12-15 of byte 12, unit is 4 bytes
             let data_offset_byte: u8 = match ctx.load(tcp_header_start + 12) {
@@ -349,7 +334,7 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
             if tcp_header_len < TCP_HEADER_MIN_LEN {
                 return false;
             }
-            
+
             let dns_offset = tcp_header_start + tcp_header_len;
             validate_dns_header(ctx, dns_offset, len, true)
         }
@@ -360,12 +345,17 @@ fn is_dns_ipv4(ctx: &TcContext, len: usize) -> bool {
     }
 }
 
-/// Check if protocol is a known IPv6 extension header
+/// 检查是否protocol is a known IPv6 extension header
 #[inline(always)]
 fn is_ipv6_extension_header(next_header: u8) -> bool {
     match next_header {
-        IPV6_EXT_HOP_BY_HOP | IPV6_EXT_ROUTING | IPV6_EXT_FRAGMENT | 
-        IPV6_EXT_ESP | IPV6_EXT_AH | IPV6_EXT_DEST_OPTIONS | IPV6_EXT_MOBILITY => true,
+        IPV6_EXT_HOP_BY_HOP
+        | IPV6_EXT_ROUTING
+        | IPV6_EXT_FRAGMENT
+        | IPV6_EXT_ESP
+        | IPV6_EXT_AH
+        | IPV6_EXT_DEST_OPTIONS
+        | IPV6_EXT_MOBILITY => true,
         _ => false,
     }
 }
@@ -394,9 +384,9 @@ fn is_dns_ipv6(ctx: &TcContext, len: usize) -> bool {
     // Most DNS packets have 0-1 extension headers, 3 is sufficient to cover most cases
 
     // First extension header (if any)
-    // Check if it's UDP or TCP - if so, stop processing extension headers
+    // 检查是否it's UDP or TCP - if so, stop processing extension headers
     if next_header != PROTO_UDP && next_header != PROTO_TCP {
-        // If it's not an extension header, it's not a valid DNS packet
+        // 如果it's not an extension header, it's not a valid DNS packet
         if !is_ipv6_extension_header(next_header) {
             return false;
         }
@@ -481,25 +471,25 @@ fn is_dns_ipv6(ctx: &TcContext, len: usize) -> bool {
             if len < offset + UDP_HEADER_LEN {
                 return false;
             }
-            
+
             // Parse UDP ports - check port first for early return
             let src_port_bytes = match (ctx.load(offset), ctx.load(offset + 1)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let src_port = u16::from_be_bytes(src_port_bytes);
-            
+
             let dst_port_bytes = match (ctx.load(offset + 2), ctx.load(offset + 3)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let dst_port = u16::from_be_bytes(dst_port_bytes);
-            
-            // Check if either port is DNS port
+
+            // 检查是否either port is DNS port
             if src_port != DNS_PORT && dst_port != DNS_PORT {
                 return false;
             }
-            
+
             // Port matches, now validate DNS header format
             let dns_offset = offset + UDP_HEADER_LEN;
             validate_dns_header(ctx, dns_offset, len, false)
@@ -510,25 +500,25 @@ fn is_dns_ipv6(ctx: &TcContext, len: usize) -> bool {
             if len < offset + TCP_HEADER_MIN_LEN {
                 return false;
             }
-            
+
             // Parse TCP ports - check port first for early return
             let src_port_bytes = match (ctx.load(offset), ctx.load(offset + 1)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let src_port = u16::from_be_bytes(src_port_bytes);
-            
+
             let dst_port_bytes = match (ctx.load(offset + 2), ctx.load(offset + 3)) {
                 (Ok(b1), Ok(b2)) => [b1, b2],
                 _ => return false,
             };
             let dst_port = u16::from_be_bytes(dst_port_bytes);
-            
-            // Check if either port is DNS port
+
+            // 检查是否either port is DNS port
             if src_port != DNS_PORT && dst_port != DNS_PORT {
                 return false;
             }
-            
+
             // Port matches, now validate DNS header format
             // TCP header data offset is in bits 12-15 of byte 12, unit is 4 bytes
             let data_offset_byte: u8 = match ctx.load(offset + 12) {
@@ -539,7 +529,7 @@ fn is_dns_ipv6(ctx: &TcContext, len: usize) -> bool {
             if tcp_header_len < TCP_HEADER_MIN_LEN {
                 return false;
             }
-            
+
             let dns_offset = offset + tcp_header_len;
             validate_dns_header(ctx, dns_offset, len, true)
         }

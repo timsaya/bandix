@@ -8,7 +8,7 @@ use trust_dns_proto::{
     serialize::binary::BinDecodable,
 };
 
-/// Specific implementation of DNS monitoring module
+/// DNS 监控模块的具体实现
 pub struct DnsMonitor;
 
 impl DnsMonitor {
@@ -16,25 +16,21 @@ impl DnsMonitor {
         DnsMonitor
     }
 
-    /// Start DNS monitoring (includes internal loop)
-    pub async fn start(
-        &self,
-        ctx: &mut DnsModuleContext,
-        shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
-    ) -> Result<()> {
-        // Get RingBuf from eBPF
-        // If dns_map is already pre-acquired (when sharing eBPF with other modules), use it
-        // Otherwise, try to acquire it from eBPF object (legacy path for standalone DNS module)
+    /// 启动 DNS 监控（包括内部循环）
+    pub async fn start(&self, ctx: &mut DnsModuleContext, shutdown_notify: std::sync::Arc<tokio::sync::Notify>) -> Result<()> {
+        // 从 eBPF 获取 RingBuf
+        // 如果 dns_map 已预获取（与其他模块共享 eBPF 时），则使用它
+        // 否则，尝试从 eBPF 对象获取它（独立 DNS 模块的遗留路径）
         let mut ringbuf = if let Some(map) = ctx.dns_map.take() {
-            // Use pre-acquired map (when sharing eBPF with traffic module)
+            // 使用预获取的映射（与其他模块共享 eBPF 时）
             log::debug!("Using pre-acquired DNS RingBuf map");
             RingBuf::<MapData>::try_from(map)?
         } else {
-            // Legacy path: acquire map from eBPF object
-            // Note: DNS_DATA is a shared map used by both ingress and egress programs,
-            // so we can read from either one to get all DNS packets
-            // Since both ingress_ebpf and egress_ebpf are Arc references to the same eBPF object,
-            // we need to temporarily drop all references to get exclusive access
+            // 遗留路径：从 eBPF 对象获取映射
+            // 注意：DNS_DATA 是由入口和出口程序共享的映射，
+            // 因此我们可以从任何一个读取以获取所有 DNS 数据包
+            // 由于 ingress_ebpf 和 egress_ebpf 都是对同一 eBPF 对象的 Arc 引用，
+            // 我们需要临时丢弃所有引用以获得独占访问
             let egress_backup = ctx.egress_ebpf.take();
             let ingress_ebpf = ctx
                 .ingress_ebpf
@@ -50,7 +46,7 @@ impl DnsMonitor {
             let mut ebpf = match std::sync::Arc::try_unwrap(ingress_ebpf) {
                 Ok(ebpf) => ebpf,
                 Err(arc) => {
-                    // If unwrap fails, put back the Arc and return error
+                    // 如果unwrap fails, put back the Arc and return error
                     // This can happen if ModuleContext was cloned, creating additional Arc references
                     ctx.ingress_ebpf = Some(arc);
                     // Recreate egress reference from ingress (they point to the same object)
@@ -65,11 +61,9 @@ impl DnsMonitor {
             };
 
             // Get DNS_DATA RingBuf map (take ownership)
-            let map = ebpf.take_map("DNS_DATA").ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly."
-                )
-            })?;
+            let map = ebpf
+                .take_map("DNS_DATA")
+                .ok_or_else(|| anyhow::anyhow!("Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly."))?;
 
             // Put back the Arc references (both point to the same underlying eBPF object)
             // Note: The map has been taken out, but the eBPF object is still needed to keep programs attached
@@ -85,11 +79,10 @@ impl DnsMonitor {
         log::debug!("DNS monitoring started, waiting for DNS packets...");
 
         // Start monitoring loop
-        self.start_monitoring_loop(&mut ringbuf, ctx, shutdown_notify)
-            .await
+        self.start_monitoring_loop(&mut ringbuf, ctx, shutdown_notify).await
     }
 
-    /// DNS monitoring internal loop
+    /// DNS 监控 internal loop
     async fn start_monitoring_loop(
         &self,
         ringbuf: &mut RingBuf<MapData>,
@@ -97,7 +90,7 @@ impl DnsMonitor {
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
-        
+
         loop {
             tokio::select! {
                 _ = shutdown_notify.notified() => {
@@ -114,7 +107,7 @@ impl DnsMonitor {
         Ok(())
     }
 
-    /// Process events from RingBuf
+    /// 处理events from RingBuf
     async fn process_ringbuf_events(&self, ringbuf: &mut RingBuf<MapData>, ctx: &DnsModuleContext) {
         let mut packet_count = 0;
         while let Some(item) = ringbuf.next() {
@@ -133,8 +126,7 @@ impl DnsMonitor {
             }
 
             // Parse PacketHeader
-            let header: PacketHeader =
-                unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const PacketHeader) };
+            let header: PacketHeader = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const PacketHeader) };
 
             // Extract payload from Record structure
             let payload_all = &bytes[header_size..];
@@ -146,11 +138,7 @@ impl DnsMonitor {
             // Parse DNS packet
             match self.parse_dns_packet_from_ethernet(payload, header.timestamp, ctx) {
                 Some(dns_info) => {
-                    let direction_str = if header.direction == 0 {
-                        "Ingress"
-                    } else {
-                        "Egress"
-                    };
+                    let direction_str = if header.direction == 0 { "Ingress" } else { "Egress" };
                     log::debug!(
                         "DNS [{}] [Timestamp:{}ns] [Interface:{}] [Length:{}/{}] => {}",
                         direction_str,
@@ -165,21 +153,18 @@ impl DnsMonitor {
                     // Not a DNS packet - this shouldn't happen if eBPF filtering works correctly
                     if cap_len >= 14 {
                         let eth_type = u16::from_be_bytes([payload[12], payload[13]]);
-                        let direction_str = if header.direction == 0 {
-                            "Ingress"
-                        } else {
-                            "Egress"
-                        };
+                        let direction_str = if header.direction == 0 { "Ingress" } else { "Egress" };
 
                         // Simple warning for normal operations
                         log::warn!(
                             "Received non-DNS packet [{}] [EthType:0x{:04X}] - eBPF filtering may have issues",
-                            direction_str, eth_type
+                            direction_str,
+                            eth_type
                         );
 
                         // Detailed debug information (only shown when debug logging is enabled)
                         if log::max_level() >= log::Level::Debug {
-                            // Parse more details for better debugging
+                            // 解析more details for better debugging
                             let mut detail_info = String::new();
 
                             // Try to parse IP layer information
@@ -212,31 +197,17 @@ impl DnsMonitor {
                                             _ => "Unknown",
                                         };
 
-                                        detail_info.push_str(&format!(
-                                            " Protocol:{} {}->{}",
-                                            protocol_name, src_ip, dst_ip
-                                        ));
+                                        detail_info.push_str(&format!(" Protocol:{} {}->{}", protocol_name, src_ip, dst_ip));
 
                                         // Try to parse port information for TCP/UDP
                                         let ihl = (payload[ip_start] & 0x0F) as usize;
                                         let ip_header_len = ihl * 4;
                                         let transport_start = ip_start + ip_header_len;
 
-                                        if (protocol == 6 || protocol == 17)
-                                            && cap_len >= transport_start + 4
-                                        {
-                                            let src_port = u16::from_be_bytes([
-                                                payload[transport_start],
-                                                payload[transport_start + 1],
-                                            ]);
-                                            let dst_port = u16::from_be_bytes([
-                                                payload[transport_start + 2],
-                                                payload[transport_start + 3],
-                                            ]);
-                                            detail_info.push_str(&format!(
-                                                " Port:{}->{}",
-                                                src_port, dst_port
-                                            ));
+                                        if (protocol == 6 || protocol == 17) && cap_len >= transport_start + 4 {
+                                            let src_port = u16::from_be_bytes([payload[transport_start], payload[transport_start + 1]]);
+                                            let dst_port = u16::from_be_bytes([payload[transport_start + 2], payload[transport_start + 3]]);
+                                            detail_info.push_str(&format!(" Port:{}->{}", src_port, dst_port));
                                         }
                                     }
                                 }
@@ -246,10 +217,8 @@ impl DnsMonitor {
                                     if cap_len >= 14 + 40 {
                                         let ip_start = 14;
                                         let next_header = payload[ip_start + 6];
-                                        let src_ip =
-                                            self.format_ipv6(&payload[ip_start + 8..ip_start + 24]);
-                                        let dst_ip = self
-                                            .format_ipv6(&payload[ip_start + 24..ip_start + 40]);
+                                        let src_ip = self.format_ipv6(&payload[ip_start + 8..ip_start + 24]);
+                                        let dst_ip = self.format_ipv6(&payload[ip_start + 24..ip_start + 40]);
 
                                         let protocol_name = match next_header {
                                             1 => "ICMPv6",
@@ -259,28 +228,14 @@ impl DnsMonitor {
                                             _ => "Unknown",
                                         };
 
-                                        detail_info.push_str(&format!(
-                                            " Protocol:{} {}->{}",
-                                            protocol_name, src_ip, dst_ip
-                                        ));
+                                        detail_info.push_str(&format!(" Protocol:{} {}->{}", protocol_name, src_ip, dst_ip));
 
                                         // Try to parse port information for TCP/UDP
                                         let transport_start = ip_start + 40;
-                                        if (next_header == 6 || next_header == 17)
-                                            && cap_len >= transport_start + 4
-                                        {
-                                            let src_port = u16::from_be_bytes([
-                                                payload[transport_start],
-                                                payload[transport_start + 1],
-                                            ]);
-                                            let dst_port = u16::from_be_bytes([
-                                                payload[transport_start + 2],
-                                                payload[transport_start + 3],
-                                            ]);
-                                            detail_info.push_str(&format!(
-                                                " Port:{}->{}",
-                                                src_port, dst_port
-                                            ));
+                                        if (next_header == 6 || next_header == 17) && cap_len >= transport_start + 4 {
+                                            let src_port = u16::from_be_bytes([payload[transport_start], payload[transport_start + 1]]);
+                                            let dst_port = u16::from_be_bytes([payload[transport_start + 2], payload[transport_start + 3]]);
+                                            detail_info.push_str(&format!(" Port:{}->{}", src_port, dst_port));
                                         }
                                     }
                                 }
@@ -288,7 +243,7 @@ impl DnsMonitor {
                                 _ => detail_info.push_str(&format!("Unknown(0x{:04X})", eth_type)),
                             }
 
-                            // Add packet hex dump (first 64 bytes or less)
+                            // 添加packet hex dump (first 64 bytes or less)
                             let dump_len = std::cmp::min(cap_len, 64);
                             let hex_dump: String = payload[..dump_len]
                                 .iter()
@@ -319,10 +274,7 @@ impl DnsMonitor {
                                 dump_len,
                                 hex_dump,
                                 if dump_len < cap_len {
-                                    format!(
-                                        "\n                        ... ({} more bytes)",
-                                        cap_len - dump_len
-                                    )
+                                    format!("\n                        ... ({} more bytes)", cap_len - dump_len)
                                 } else {
                                     String::new()
                                 }
@@ -357,12 +309,7 @@ impl DnsMonitor {
     /// Parse DNS packet from Ethernet frame
     /// Returns Some(String) if DNS packet, None otherwise
     /// Supports both IPv4 and IPv6
-    fn parse_dns_packet_from_ethernet(
-        &self,
-        data: &[u8],
-        timestamp: u64,
-        ctx: &DnsModuleContext,
-    ) -> Option<String> {
+    fn parse_dns_packet_from_ethernet(&self, data: &[u8], timestamp: u64, ctx: &DnsModuleContext) -> Option<String> {
         // At least need Ethernet header (14 bytes)
         if data.len() < 14 {
             return None;
@@ -380,12 +327,7 @@ impl DnsMonitor {
     }
 
     /// Parse IPv4 DNS packet (supports both UDP and TCP)
-    fn parse_dns_ipv4(
-        &self,
-        data: &[u8],
-        timestamp: u64,
-        ctx: &DnsModuleContext,
-    ) -> Option<String> {
+    fn parse_dns_ipv4(&self, data: &[u8], timestamp: u64, ctx: &DnsModuleContext) -> Option<String> {
         // IPv4 header start position (after Ethernet header)
         let ip_header_start = 14;
 
@@ -439,19 +381,14 @@ impl DnsMonitor {
                 }
 
                 // Parse UDP ports
-                let src_port =
-                    u16::from_be_bytes([data[udp_header_start], data[udp_header_start + 1]]);
-                let dst_port =
-                    u16::from_be_bytes([data[udp_header_start + 2], data[udp_header_start + 3]]);
+                let src_port = u16::from_be_bytes([data[udp_header_start], data[udp_header_start + 1]]);
+                let dst_port = u16::from_be_bytes([data[udp_header_start + 2], data[udp_header_start + 3]]);
 
                 // Check if DNS packet (port 53)
                 if src_port == 53 || dst_port == 53 {
                     // DNS data start position (after UDP header, offset 8 bytes)
                     let dns_offset = udp_header_start + 8;
-                    Some(self.parse_dns_packet(
-                        data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx,
-                        "UDP",
-                    ))
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "UDP"))
                 } else {
                     None
                 }
@@ -466,10 +403,8 @@ impl DnsMonitor {
                 }
 
                 // Parse TCP ports
-                let src_port =
-                    u16::from_be_bytes([data[tcp_header_start], data[tcp_header_start + 1]]);
-                let dst_port =
-                    u16::from_be_bytes([data[tcp_header_start + 2], data[tcp_header_start + 3]]);
+                let src_port = u16::from_be_bytes([data[tcp_header_start], data[tcp_header_start + 1]]);
+                let dst_port = u16::from_be_bytes([data[tcp_header_start + 2], data[tcp_header_start + 3]]);
 
                 // Check if DNS packet (port 53)
                 if src_port == 53 || dst_port == 53 {
@@ -498,10 +433,7 @@ impl DnsMonitor {
                         return None;
                     }
 
-                    Some(self.parse_dns_packet(
-                        data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx,
-                        "TCP",
-                    ))
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "TCP"))
                 } else {
                     None
                 }
@@ -514,12 +446,7 @@ impl DnsMonitor {
     }
 
     /// Parse IPv6 DNS packet (supports both UDP and TCP)
-    fn parse_dns_ipv6(
-        &self,
-        data: &[u8],
-        timestamp: u64,
-        ctx: &DnsModuleContext,
-    ) -> Option<String> {
+    fn parse_dns_ipv6(&self, data: &[u8], timestamp: u64, ctx: &DnsModuleContext) -> Option<String> {
         const IPV6_HEADER_START: usize = 14;
         const IPV6_HEADER_LEN: usize = 40;
 
@@ -545,11 +472,7 @@ impl DnsMonitor {
         // Process extension headers (simplified, handle common cases)
         // Most DNS packets have 0-1 extension headers
         let mut max_ext_headers = 3;
-        while next_header != 17
-            && next_header != 6
-            && max_ext_headers > 0
-            && offset + 8 <= data.len()
-        {
+        while next_header != 17 && next_header != 6 && max_ext_headers > 0 && offset + 8 <= data.len() {
             if next_header >= 60 {
                 return None; // Invalid next header
             }
@@ -583,10 +506,7 @@ impl DnsMonitor {
                 if src_port == 53 || dst_port == 53 {
                     // DNS data start position (after UDP header, offset 8 bytes)
                     let dns_offset = offset + 8;
-                    Some(self.parse_dns_packet(
-                        data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx,
-                        "UDP",
-                    ))
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "UDP"))
                 } else {
                     None
                 }
@@ -629,10 +549,7 @@ impl DnsMonitor {
                         return None;
                     }
 
-                    Some(self.parse_dns_packet(
-                        data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx,
-                        "TCP",
-                    ))
+                    Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "TCP"))
                 } else {
                     None
                 }
@@ -644,7 +561,7 @@ impl DnsMonitor {
         }
     }
 
-    /// Format IPv6 address from bytes
+    /// 格式化IPv6 address from bytes
     fn format_ipv6(&self, bytes: &[u8]) -> String {
         if bytes.len() < 16 {
             return "::".to_string();
@@ -685,10 +602,7 @@ impl DnsMonitor {
 
             // Get hostname from bindings
             let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
-                bindings
-                    .get(&mac)
-                    .cloned()
-                    .unwrap_or_else(|| "".to_string())
+                bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
             } else {
                 "".to_string()
             };
@@ -728,10 +642,7 @@ impl DnsMonitor {
 
             // Get hostname from bindings
             let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
-                bindings
-                    .get(&mac)
-                    .cloned()
-                    .unwrap_or_else(|| "".to_string())
+                bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
             } else {
                 "".to_string()
             };
@@ -773,16 +684,21 @@ impl DnsMonitor {
         let dns_data = &data[dns_offset..];
 
         // Parse DNS message using trust-dns-proto
-        let message =
-            match Message::from_bytes(dns_data) {
-                Ok(msg) => msg,
-                Err(e) => {
-                    return format!(
+        let message = match Message::from_bytes(dns_data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                return format!(
                     "DNS {}:{} -> {}:{} [Parse failed: {}] [DNS data length: {}] [DNS offset: {}]",
-                    src_ip, src_port, dst_ip, dst_port, e, dns_data.len(), dns_offset
+                    src_ip,
+                    src_port,
+                    dst_ip,
+                    dst_port,
+                    e,
+                    dns_data.len(),
+                    dns_offset
                 );
-                }
-            };
+            }
+        };
 
         let direction = if dst_port == 53 { "Query" } else { "Response" };
         let transaction_id = message.id();
@@ -831,11 +747,7 @@ impl DnsMonitor {
                             response_records.push(format!("CNAME:{}", cname));
                         }
                         RData::MX(mx) => {
-                            response_records.push(format!(
-                                "MX:{} (Priority:{})",
-                                mx.exchange(),
-                                mx.preference()
-                            ));
+                            response_records.push(format!("MX:{} (Priority:{})", mx.exchange(), mx.preference()));
                         }
                         RData::TXT(txt) => {
                             let txt_str: String = txt
@@ -855,7 +767,7 @@ impl DnsMonitor {
                             response_records.push(format!("SOA:{}", soa.mname()));
                         }
                         _ => {
-                            // Handle other record types (including HTTPS, SVCB, and unknown ones)
+                            // 处理other record types (including HTTPS, SVCB, and unknown ones)
                             // Format: RecordType:<hex data> for better visibility
                             let rdata_str = format!("{:?}", rdata);
                             // Limit output to avoid very long strings
@@ -906,11 +818,7 @@ impl DnsMonitor {
                             response_records.push(format!("Authority-NS:{}", ns));
                         }
                         _ => {
-                            response_records.push(format!(
-                                "Authority-{:?}:{:?}",
-                                authority.record_type(),
-                                rdata
-                            ));
+                            response_records.push(format!("Authority-{:?}:{:?}", authority.record_type(), rdata));
                         }
                     }
                 }
@@ -961,11 +869,11 @@ impl DnsMonitor {
             // Try to match with existing records and calculate response time
             if let Ok(mut queries) = ctx.dns_queries.lock() {
                 if is_query {
-                    // This is a query, try to find matching response (response might come after)
+                    // 这is a query, try to find matching response (response might come after)
                     // We'll match it when the response arrives
                     record.response_time_ms = None;
                 } else {
-                    // This is a response, try to find matching query
+                    // 这is a response, try to find matching query
                     if let Some(matching_query_idx) = queries.iter().position(|q| {
                         // Match criteria:
                         // 1. Transaction ID matches
@@ -986,13 +894,13 @@ impl DnsMonitor {
                         // 7. Response timestamp is after query timestamp
                         timestamp > q.timestamp
                     }) {
-                        // Calculate response time in milliseconds
+                        // 计算response time in milliseconds
                         let query_timestamp = queries[matching_query_idx].timestamp;
-                        // Calculate response time: convert nanoseconds to milliseconds
+                        // 计算response time: convert nanoseconds to milliseconds
                         // Use floating point division then round to avoid precision loss
                         let diff_ns = timestamp - query_timestamp;
                         let response_time_ms = if diff_ns < 1_000_000 {
-                            // If difference is less than 1ms, round up to 1ms for visibility
+                            // 如果difference is less than 1ms, round up to 1ms for visibility
                             // (0ms would indicate no response matched)
                             1
                         } else {
@@ -1000,7 +908,7 @@ impl DnsMonitor {
                         };
 
                         // Don't update the query record's response_time_ms - queries should never have response time
-                        // Only set response time for this response record
+                        // 仅set response time for this response record
                         record.response_time_ms = Some(response_time_ms);
 
                         log::debug!(
@@ -1010,7 +918,12 @@ impl DnsMonitor {
                     } else {
                         log::debug!(
                             "DNS response not matched: domain={}, transaction_id={}, src={}:{}, dst={}:{}",
-                            domain_name, transaction_id, src_ip, src_port, dst_ip, dst_port
+                            domain_name,
+                            transaction_id,
+                            src_ip,
+                            src_port,
+                            dst_ip,
+                            dst_port
                         );
                     }
                 }
@@ -1075,11 +988,7 @@ impl DnsMonitor {
                 if !non_ip_records.is_empty() {
                     result.push_str(&format!(
                         " Other:{}",
-                        non_ip_records
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        non_ip_records.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ")
                     ));
                 }
             } else if !response_records.is_empty() {

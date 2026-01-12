@@ -1,5 +1,6 @@
 mod api;
 mod command;
+mod device;
 mod ebpf;
 mod monitor;
 mod storage;
@@ -11,10 +12,10 @@ use command::{run, Options};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Parse command line arguments
+    // 解析命令行参数
     let options = Options::parse();
 
-    // Run main program
+    // 运行主程序
     run(options).await?;
 
     Ok(())

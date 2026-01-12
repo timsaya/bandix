@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Connection statistics API handler
+/// 连接 statistics API handler
 #[derive(Clone)]
 pub struct ConnectionApiHandler {
     device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
@@ -24,25 +24,25 @@ impl ConnectionApiHandler {
         }
     }
 
-    /// Get device-level connection statistics
+    /// 获取device-level connection statistics
     fn get_device_connection_stats(&self) -> Result<GlobalConnectionStats> {
         let stats = self.device_connection_stats.lock().unwrap();
         Ok(stats.clone())
     }
 
-    /// Get device connection statistics with formatted output
+    /// 获取device connection statistics with formatted output
     fn get_device_connection_stats_formatted(&self) -> Result<DeviceConnectionStatsResponse> {
         let stats = self.get_device_connection_stats()?;
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
-        // Format device statistics for API response and sort by IP address
+        // 格式化device statistics for API response and sort by IP address
         let mut devices: Vec<DeviceConnectionInfo> = stats
             .device_stats
             .iter()
             .map(|(mac, device_stats)| {
                 // Get hostname from bindings, fallback to empty string if not found
                 let hostname = bindings_map.get(mac).cloned().unwrap_or_default();
-                
+
                 DeviceConnectionInfo {
                     mac_address: format_mac(mac),
                     ip_address: format_ip(&device_stats.ip_address),
@@ -58,7 +58,7 @@ impl ConnectionApiHandler {
             })
             .collect();
 
-        // Sort devices by IP address (ascending order)
+        // 排序devices by IP address (ascending order)
         devices.sort_by(|a, b| {
             // Parse IP addresses for comparison
             let ip_a = parse_ip_to_u32(&a.ip_address);
@@ -76,7 +76,7 @@ impl ConnectionApiHandler {
     }
 }
 
-/// Device connection information for API response
+/// 设备连接信息，用于 API 响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConnectionInfo {
     pub mac_address: String,
@@ -91,7 +91,7 @@ pub struct DeviceConnectionInfo {
     pub last_updated: u64,
 }
 
-/// Device connection statistics response
+/// 设备连接统计响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConnectionStatsResponse {
     pub global_stats: ConnectionStats,
@@ -100,7 +100,7 @@ pub struct DeviceConnectionStatsResponse {
     pub last_updated: u64,
 }
 
-/// Format MAC address for display
+/// 格式化 MAC 地址用于显示
 fn format_mac(mac: &[u8; 6]) -> String {
     format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -108,49 +108,44 @@ fn format_mac(mac: &[u8; 6]) -> String {
     )
 }
 
-/// Format IP address for display
+/// 格式化IP address for display
 fn format_ip(ip: &[u8; 4]) -> String {
     format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
 }
 
-/// Parse IP address string to u32 for sorting
+/// 将 IP 地址字符串解析为 u32 用于排序
 fn parse_ip_to_u32(ip_str: &str) -> u32 {
     if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
         let octets = ip.octets();
-        ((octets[0] as u32) << 24)
-            | ((octets[1] as u32) << 16)
-            | ((octets[2] as u32) << 8)
-            | (octets[3] as u32)
+        ((octets[0] as u32) << 24) | ((octets[1] as u32) << 16) | ((octets[2] as u32) << 8) | (octets[3] as u32)
     } else {
         0 // Default to 0 for invalid IP addresses
     }
 }
 
 impl ConnectionApiHandler {
-    /// Handle HTTP requests for connection statistics
+    /// 处理HTTP requests for connection statistics
     pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse> {
         match (request.method.as_str(), request.path.as_str()) {
-            ("GET", "/api/connection/devices") => {
-                match self.get_device_connection_stats_formatted() {
-                    Ok(response) => {
-                        let api_response = ApiResponse::success(response);
-                        let body = serde_json::to_string(&api_response)?;
-                        Ok(HttpResponse::ok(body))
-                    }
-                    Err(e) => {
-                        log::error!("Failed to get device connection stats: {}", e);
-                        Ok(HttpResponse::error(
-                            500,
-                            format!("Failed to get device connection stats: {}", e),
-                        ))
-                    }
+            ("GET", "/api/connection/devices") => match self.get_device_connection_stats_formatted() {
+                Ok(response) => {
+                    let api_response = ApiResponse::success(response);
+                    let body = serde_json::to_string(&api_response)?;
+                    Ok(HttpResponse::ok(body))
                 }
-            }
+                Err(e) => {
+                    log::error!("Failed to get device connection stats: {}", e);
+                    Ok(HttpResponse::error(
+                        500,
+                        format!("Failed to get device connection stats: {}", e),
+                    ))
+                }
+            },
             _ => Ok(HttpResponse::error(404, "Not Found".to_string())),
         }
     }
 
-    /// Get supported routes for this handler
+    /// 获取supported routes for this handler
     pub fn supported_routes(&self) -> Vec<&'static str> {
         vec!["/api/connection/devices"]
     }

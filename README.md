@@ -97,16 +97,16 @@ Get real-time traffic statistics for all devices.
         "total_tx_bytes": 2048,
         "total_rx_rate": 100,
         "total_tx_rate": 200,
-        "local_rx_bytes": 512,
-        "local_tx_bytes": 1024,
-        "local_rx_rate": 50,
-        "local_tx_rate": 100,
-        "wide_rx_bytes": 512,
-        "wide_tx_bytes": 1024,
-        "wide_rx_rate": 50,
-        "wide_tx_rate": 100,
-        "wide_rx_rate_limit": 0,
-        "wide_tx_rate_limit": 0,
+        "lan_rx_bytes": 512,
+        "lan_tx_bytes": 1024,
+        "lan_rx_rate": 50,
+        "lan_tx_rate": 100,
+        "wan_rx_bytes": 512,
+        "wan_tx_bytes": 1024,
+        "wan_rx_rate": 50,
+        "wan_tx_rate": 100,
+        "wan_rx_rate_limit": 0,
+        "wan_tx_rate_limit": 0,
         "last_online_ts": 1640995200000
       }
     ]
@@ -130,8 +130,8 @@ Get all scheduled rate limits for devices.
           "end": "18:00",
           "days": [1, 2, 3, 4, 5]
         },
-        "wide_rx_rate_limit": 1048576,
-        "wide_tx_rate_limit": 1048576
+        "wan_rx_rate_limit": 1048576,
+        "wan_tx_rate_limit": 1048576
       }
     ]
   }
@@ -150,8 +150,8 @@ Set scheduled rate limits for devices.
     "end": "18:00",
     "days": [1, 2, 3, 4, 5]
   },
-  "wide_rx_rate_limit": 1048576,
-  "wide_tx_rate_limit": 1048576
+  "wan_rx_rate_limit": 1048576,
+  "wan_tx_rate_limit": 1048576
 }
 ```
 
@@ -196,7 +196,7 @@ Get real-time historical traffic metrics (1-second sampling).
 ```
 
 **Metrics Array Format (13 values per entry):**
-Each array contains: `[ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes, wide_rx_bytes, wide_tx_bytes]`
+Each array contains: `[ts_ms, total_rx_rate, total_tx_rate, lan_rx_rate, lan_tx_rate, wan_rx_rate, wan_tx_rate, total_rx_bytes, total_tx_bytes, lan_rx_bytes, lan_tx_bytes, wan_rx_bytes, wan_tx_bytes]`
 
 #### GET /api/traffic/metrics/day?mac=<mac_address>
 Get day-level traffic metrics with statistics (30-second sampling interval, 1-day retention).
@@ -219,7 +219,7 @@ Get day-level traffic metrics with statistics (30-second sampling interval, 1-da
 ```
 
 **Metrics Array Format (15 values per entry):**
-Each array contains: `[ts_ms, wide_rx_rate_avg, wide_rx_rate_max, wide_rx_rate_min, wide_rx_rate_p90, wide_rx_rate_p95, wide_rx_rate_p99, wide_tx_rate_avg, wide_tx_rate_max, wide_tx_rate_min, wide_tx_rate_p90, wide_tx_rate_p95, wide_tx_rate_p99, wide_rx_bytes, wide_tx_bytes]`
+Each array contains: `[ts_ms, wan_rx_rate_avg, wan_rx_rate_max, wan_rx_rate_min, wan_rx_rate_p90, wan_rx_rate_p95, wan_rx_rate_p99, wan_tx_rate_avg, wan_tx_rate_max, wan_tx_rate_min, wan_tx_rate_p90, wan_tx_rate_p95, wan_tx_rate_p99, wan_rx_bytes, wan_tx_bytes]`
 
 #### GET /api/traffic/metrics/week?mac=<mac_address>
 Get week-level traffic metrics with statistics (3-minute sampling interval, 1-week retention).
@@ -540,16 +540,16 @@ Update DNS monitoring configuration (Not Yet Implemented).
 - `total_tx_bytes`: Total bytes sent by the device
 - `total_rx_rate`: Current total receiving rate of the device (bytes/second)
 - `total_tx_rate`: Current total sending rate of the device (bytes/second)
-- `local_rx_bytes`: Local network receiving bytes
-- `local_tx_bytes`: Local network sending bytes
-- `local_rx_rate`: Local network receiving rate (bytes/second)
-- `local_tx_rate`: Local network sending rate (bytes/second)
-- `wide_rx_bytes`: Wide network receiving bytes
-- `wide_tx_bytes`: Wide network sending bytes
-- `wide_rx_rate`: Wide network receiving rate (bytes/second)
-- `wide_tx_rate`: Wide network sending rate (bytes/second)
-- `wide_rx_rate_limit`: Wide network download limit (bytes/second)
-- `wide_tx_rate_limit`: Wide network upload limit (bytes/second)
+- `lan_rx_bytes`: Local network receiving bytes
+- `lan_tx_bytes`: Local network sending bytes
+- `lan_rx_rate`: Local network receiving rate (bytes/second)
+- `lan_tx_rate`: Local network sending rate (bytes/second)
+- `wan_rx_bytes`: Wide network receiving bytes
+- `wan_tx_bytes`: Wide network sending bytes
+- `wan_rx_rate`: Wide network receiving rate (bytes/second)
+- `wan_tx_rate`: Wide network sending rate (bytes/second)
+- `wan_rx_rate_limit`: Wide network download limit (bytes/second)
+- `wan_tx_rate_limit`: Wide network upload limit (bytes/second)
 - `last_online_ts`: Last online timestamp (milliseconds since epoch)
 
 ### Connection Statistics

@@ -1,9 +1,9 @@
 pub mod shared;
 use log::debug;
 
-// Remove memory limits
+// 移除memory limits
 fn remove_rlimit_memlock() {
-    // Remove memory lock limit
+    // 移除memory lock limit
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,

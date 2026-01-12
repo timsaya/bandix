@@ -97,16 +97,16 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
         "total_tx_bytes": 2048,
         "total_rx_rate": 100,
         "total_tx_rate": 200,
-        "local_rx_bytes": 512,
-        "local_tx_bytes": 1024,
-        "local_rx_rate": 50,
-        "local_tx_rate": 100,
-        "wide_rx_bytes": 512,
-        "wide_tx_bytes": 1024,
-        "wide_rx_rate": 50,
-        "wide_tx_rate": 100,
-        "wide_rx_rate_limit": 0,
-        "wide_tx_rate_limit": 0,
+        "lan_rx_bytes": 512,
+        "lan_tx_bytes": 1024,
+        "lan_rx_rate": 50,
+        "lan_tx_rate": 100,
+        "wan_rx_bytes": 512,
+        "wan_tx_bytes": 1024,
+        "wan_rx_rate": 50,
+        "wan_tx_rate": 100,
+        "wan_rx_rate_limit": 0,
+        "wan_tx_rate_limit": 0,
         "last_online_ts": 1640995200000
       }
     ]
@@ -130,8 +130,8 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
           "end": "18:00",
           "days": [1, 2, 3, 4, 5]
         },
-        "wide_rx_rate_limit": 1048576,
-        "wide_tx_rate_limit": 1048576
+        "wan_rx_rate_limit": 1048576,
+        "wan_tx_rate_limit": 1048576
       }
     ]
   }
@@ -150,8 +150,8 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
     "end": "18:00",
     "days": [1, 2, 3, 4, 5]
   },
-  "wide_rx_rate_limit": 1048576,
-  "wide_tx_rate_limit": 1048576
+  "wan_rx_rate_limit": 1048576,
+  "wan_tx_rate_limit": 1048576
 }
 ```
 
@@ -196,7 +196,7 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
 ```
 
 **指标数组格式（每项13个值）：**
-每个数组包含：`[ts_ms, total_rx_rate, total_tx_rate, local_rx_rate, local_tx_rate, wide_rx_rate, wide_tx_rate, total_rx_bytes, total_tx_bytes, local_rx_bytes, local_tx_bytes, wide_rx_bytes, wide_tx_bytes]`
+每个数组包含：`[ts_ms, total_rx_rate, total_tx_rate, lan_rx_rate, lan_tx_rate, wan_rx_rate, wan_tx_rate, total_rx_bytes, total_tx_bytes, lan_rx_bytes, lan_tx_bytes, wan_rx_bytes, wan_tx_bytes]`
 
 #### GET /api/traffic/metrics/day?mac=<mac地址>
 获取天级别流量指标（包含统计信息，30秒采样间隔，保留1天）。
@@ -219,7 +219,7 @@ sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-tra
 ```
 
 **指标数组格式（每项15个值）：**
-每个数组包含：`[ts_ms, wide_rx_rate_avg, wide_rx_rate_max, wide_rx_rate_min, wide_rx_rate_p90, wide_rx_rate_p95, wide_rx_rate_p99, wide_tx_rate_avg, wide_tx_rate_max, wide_tx_rate_min, wide_tx_rate_p90, wide_tx_rate_p95, wide_tx_rate_p99, wide_rx_bytes, wide_tx_bytes]`
+每个数组包含：`[ts_ms, wan_rx_rate_avg, wan_rx_rate_max, wan_rx_rate_min, wan_rx_rate_p90, wan_rx_rate_p95, wan_rx_rate_p99, wan_tx_rate_avg, wan_tx_rate_max, wan_tx_rate_min, wan_tx_rate_p90, wan_tx_rate_p95, wan_tx_rate_p99, wan_rx_bytes, wan_tx_bytes]`
 
 #### GET /api/traffic/metrics/week?mac=<mac地址>
 获取周级别流量指标（包含统计信息，3分钟采样间隔，保留1周）。
@@ -540,16 +540,16 @@ GET /api/dns/queries?domain=google&device=iPhone&page=1&page_size=100
 - `total_tx_bytes`: 设备发送的总字节数
 - `total_rx_rate`: 设备当前总接收速率（字节/秒）
 - `total_tx_rate`: 设备当前总发送速率（字节/秒）
-- `local_rx_bytes`: 局域网接收字节数
-- `local_tx_bytes`: 局域网发送字节数
-- `local_rx_rate`: 局域网接收速率（字节/秒）
-- `local_tx_rate`: 局域网发送速率（字节/秒）
-- `wide_rx_bytes`: 广域网接收字节数
-- `wide_tx_bytes`: 广域网发送字节数
-- `wide_rx_rate`: 广域网接收速率（字节/秒）
-- `wide_tx_rate`: 广域网发送速率（字节/秒）
-- `wide_rx_rate_limit`: 广域网下载限制（字节/秒）
-- `wide_tx_rate_limit`: 广域网上传限制（字节/秒）
+- `lan_rx_bytes`: 局域网接收字节数
+- `lan_tx_bytes`: 局域网发送字节数
+- `lan_rx_rate`: 局域网接收速率（字节/秒）
+- `lan_tx_rate`: 局域网发送速率（字节/秒）
+- `wan_rx_bytes`: 广域网接收字节数
+- `wan_tx_bytes`: 广域网发送字节数
+- `wan_rx_rate`: 广域网接收速率（字节/秒）
+- `wan_tx_rate`: 广域网发送速率（字节/秒）
+- `wan_rx_rate_limit`: 广域网下载限制（字节/秒）
+- `wan_tx_rate_limit`: 广域网上传限制（字节/秒）
 - `last_online_ts`: 最后在线时间戳（自纪元以来的毫秒数）
 
 ### 连接统计

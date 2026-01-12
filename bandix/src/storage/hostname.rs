@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
-/// Get the path to the hostname bindings file
+/// 获取主机名绑定文件的路径
 pub fn bindings_path(base_dir: &str) -> PathBuf {
     Path::new(base_dir).join("hostname_bindings.txt")
 }
 
-/// Load hostname bindings from file
-/// File format: one line per entry - "mac12 hostname"
+/// 从文件加载主机名绑定
+/// 文件格式：每行一个条目 - "mac12 hostname"
 pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, anyhow::Error> {
     let path = bindings_path(base_dir);
     let mut out = Vec::new();
@@ -46,20 +46,15 @@ pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, 
     Ok(out)
 }
 
-/// Load hostname bindings from ubus (luci-rpc getHostHints)
-/// Execute: ubus call luci-rpc getHostHints
-/// Returns JSON with MAC to hostname mappings
-/// Silently returns empty vec if command fails (e.g., ubus not installed)
+/// 从 ubus 加载主机名绑定（luci-rpc getHostHints）
+/// 执行：ubus call luci-rpc getHostHints
+/// 返回包含 MAC 到主机名映射的 JSON
+/// 如果命令失败则静默返回空向量（例如，未安装 ubus）
 pub fn load_hostname_from_ubus() -> Result<Vec<([u8; 6], String)>, anyhow::Error> {
     use std::process::Command;
 
     // Try to execute ubus command, silently return empty vec if it fails
-    let output = match Command::new("ubus")
-        .arg("call")
-        .arg("luci-rpc")
-        .arg("getHostHints")
-        .output()
-    {
+    let output = match Command::new("ubus").arg("call").arg("luci-rpc").arg("getHostHints").output() {
         Ok(output) => output,
         Err(_) => {
             // Command failed (e.g., ubus not found), return empty vec silently
@@ -67,7 +62,7 @@ pub fn load_hostname_from_ubus() -> Result<Vec<([u8; 6], String)>, anyhow::Error
         }
     };
 
-    // If command didn't succeed, return empty vec silently
+    // 如果command didn't succeed, return empty vec silently
     if !output.status.success() {
         return Ok(Vec::new());
     }
@@ -82,58 +77,42 @@ pub fn load_hostname_from_ubus() -> Result<Vec<([u8; 6], String)>, anyhow::Error
 
     let mut out = Vec::new();
 
-    // Parse the JSON structure
+    // 解析the JSON structure
     // Expected format: { "MAC_ADDRESS": { "name": "hostname", "ipaddrs": [...], "ip6addrs": [...] }, ... }
     // Example: { "06:C9:9D:D2:62:38": { "name": "MacBookAir", ... }, ... }
     if let Some(obj) = json.as_object() {
         for (mac_str, value) in obj {
-            // Get hostname from "name" field (some devices may not have this field)
+            // Parse MAC (for both hostname mapping and Wi-Fi cache)
+            let parsed_mac = crate::utils::network_utils::parse_mac_address(mac_str).ok().or_else(|| {
+                // Try parsing without colons (format: 06C99DD26238)
+                if mac_str.len() == 12 {
+                    let mut mac = [0u8; 6];
+                    let mut ok = true;
+                    for i in 0..6 {
+                        if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
+                            mac[i] = v;
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok { Some(mac) } else { None }
+                } else {
+                    None
+                }
+            });
+
+            let Some(mac) = parsed_mac else { continue };
+            // 获取hostname from "name" field (some devices may not have this field)
             if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
                 if name.is_empty() {
                     continue;
                 }
 
-                // Parse MAC address from format like "06:C9:9D:D2:62:38" (uppercase with colons)
-                let mac_parts: Vec<&str> = mac_str.split(':').collect();
-                if mac_parts.len() != 6 {
-                    // Try parsing without colons (format: 06C99DD26238)
-                    if mac_str.len() == 12 {
-                        let mut mac = [0u8; 6];
-                        let mut ok = true;
-                        for i in 0..6 {
-                            if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
-                                mac[i] = v;
-                            } else {
-                                ok = false;
-                                break;
-                            }
-                        }
-                        if ok {
-                            out.push((mac, name.to_string()));
-                        }
-                    }
-                    continue;
-                }
-
-                // Parse MAC address with colons (supports both uppercase and lowercase)
-                let mut mac = [0u8; 6];
-                let mut ok = true;
-                for i in 0..6 {
-                    if let Ok(v) = u8::from_str_radix(mac_parts[i], 16) {
-                        mac[i] = v;
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                if ok {
-                    out.push((mac, name.to_string()));
-                }
+                out.push((mac, name.to_string()));
             }
         }
     }
 
     Ok(out)
 }
-

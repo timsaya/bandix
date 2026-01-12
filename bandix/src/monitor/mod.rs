@@ -4,71 +4,70 @@ pub mod traffic;
 
 use crate::api::ApiRouter;
 use crate::command::Options;
-use crate::storage::traffic::{
-    BaselineTotals, MultiLevelRingManager, RealtimeRingManager, ScheduledRateLimit,
-};
-use bandix_common::MacTrafficStats;
+use crate::device::DeviceManager;
+use crate::storage::traffic::{LongTermRingManager, RealtimeRingManager, ScheduledRateLimit};
 use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 
-// Re-export ConnectionModuleContext from connection module
+// 从连接模块重新导出 ConnectionModuleContext
 pub use connection::ConnectionModuleContext;
 
-/// Traffic module context
+/// 流量模块上下文
 pub struct TrafficModuleContext {
     pub options: Options,
-    pub mac_stats: Arc<Mutex<StdHashMap<[u8; 6], MacTrafficStats>>>,
-    pub baselines: Arc<Mutex<StdHashMap<[u8; 6], BaselineTotals>>>,
     pub scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
     pub hostname_bindings: Arc<Mutex<StdHashMap<[u8; 6], String>>>,
-    pub realtime_ring_manager: Arc<RealtimeRingManager>, // Real-time 1-second sampling
-    pub multi_level_ring_manager: Arc<MultiLevelRingManager>, // Multi-level sampling (day/week/month/year)
+    pub rate_limit_whitelist: Arc<Mutex<HashSet<[u8; 6]>>>,
+    pub rate_limit_whitelist_enabled: Arc<AtomicBool>,
+    pub default_wan_rate_limits: Arc<Mutex<[u64; 2]>>,
+    pub realtime_manager: Arc<RealtimeRingManager>,  // 实时1秒采样（仅内存）
+    pub long_term_manager: Arc<LongTermRingManager>, // 长期采样（1小时间隔，365天保留，已持久化）
+    pub device_manager: Arc<DeviceManager>,          // 统一的设备管理器（包含设备信息和流量统计）
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
+    pub last_ebpf_traffic: Arc<Mutex<StdHashMap<[u8; 6], [u64; 4]>>>, // 上次从 eBPF 读取的累积值
 }
 
 impl TrafficModuleContext {
-    /// Create traffic module context
-    /// Both ingress_ebpf and egress_ebpf are Arc references to the same eBPF object
-    /// This ensures both programs share the same maps (MAC_TRAFFIC, MAC_RATE_LIMITS, etc.)
-    pub fn new(
-        options: Options,
-        ingress_ebpf: Arc<aya::Ebpf>,
-        egress_ebpf: Arc<aya::Ebpf>,
-    ) -> Self {
-        // Real-time 1-second sampling ring manager
-        let realtime_ring_manager = Arc::new(RealtimeRingManager::new(
+    /// 创建流量模块上下文
+    /// ingress_ebpf 和 egress_ebpf 都是对同一个 eBPF 对象的 Arc 引用
+    /// 这确保两个程序共享相同的映射（MAC_TRAFFIC、MAC_RATE_LIMITS 等）
+    pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>, device_manager: Arc<DeviceManager>) -> Self {
+        let realtime_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
         ));
 
-        // Multi-level sampling ring manager (day/week/month/year)
-        let multi_level_ring_manager =
-            Arc::new(MultiLevelRingManager::new(options.data_dir().to_string()));
+        let long_term_manager = Arc::new(LongTermRingManager::new(
+            options.data_dir().to_string(),
+            options.traffic_flush_interval_seconds(),
+        ));
 
-        // realtime_ring_manager.generate_test_data(options.traffic_retention_seconds()).unwrap();
-
-        // Note: Loading ring files from disk is done in init_data() after checking for capacity mismatches
-        // This ensures that mismatched files are deleted before loading
-
-        // Create shared hostname bindings - this will be used by both traffic and connection modules
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
+        let rate_limit_whitelist = Arc::new(Mutex::new(HashSet::new()));
+        let rate_limit_whitelist_enabled = Arc::new(AtomicBool::new(false));
+        let default_wan_rate_limits = Arc::new(Mutex::new([0u64; 2]));
 
         Self {
             options,
-            mac_stats: Arc::new(Mutex::new(StdHashMap::new())),
-            baselines: Arc::new(Mutex::new(StdHashMap::new())),
             scheduled_rate_limits: Arc::new(Mutex::new(Vec::new())),
             hostname_bindings,
-            realtime_ring_manager,
-            multi_level_ring_manager,
+            rate_limit_whitelist,
+            rate_limit_whitelist_enabled,
+            default_wan_rate_limits,
+            realtime_manager,
+            long_term_manager,
+            device_manager,
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
+            last_ebpf_traffic: Arc::new(Mutex::new(StdHashMap::new())),
         }
     }
 }
 
-/// DNS query record
+/// DNS 查询记录
 #[derive(Debug, Clone)]
 pub struct DnsQueryRecord {
     pub timestamp: u64,
@@ -82,13 +81,13 @@ pub struct DnsQueryRecord {
     pub transaction_id: u16,
     pub is_query: bool,
     pub response_ips: Vec<String>,
-    pub response_records: Vec<String>, // All response records (A, AAAA, CNAME, HTTPS, etc.)
-    pub response_time_ms: Option<u64>, // Response time in milliseconds, None if no response matched
-    pub device_mac: String,            // Device MAC address (from source IP)
-    pub device_name: String,           // Device hostname (from hostname bindings)
+    pub response_records: Vec<String>, // 所有响应记录（A、AAAA、CNAME、HTTPS 等）
+    pub response_time_ms: Option<u64>, // 响应时间（毫秒），如果没有匹配的响应则为 None
+    pub device_mac: String,            // 设备 MAC 地址（来自源 IP）
+    pub device_name: String,           // 设备主机名（来自主机名绑定）
 }
 
-/// DNS module context
+/// DNS 模块上下文
 pub struct DnsModuleContext {
     pub options: Options,
     pub ingress_ebpf: Option<std::sync::Arc<aya::Ebpf>>,
@@ -99,8 +98,8 @@ pub struct DnsModuleContext {
 }
 
 impl DnsModuleContext {
-    /// Create DNS module context with pre-acquired RingBuf map
-    /// This is used when DNS module shares eBPF object with other modules (e.g., traffic)
+    /// 使用预获取的 RingBuf 映射创建 DNS 模块上下文
+    /// 当 DNS 模块与其他模块共享 eBPF 对象时使用（例如，流量模块）
     pub fn new_with_map(
         options: Options,
         ingress_ebpf: std::sync::Arc<aya::Ebpf>,
@@ -119,7 +118,7 @@ impl DnsModuleContext {
     }
 }
 
-/// Generic module context (for module manager)
+/// 通用模块上下文（用于模块管理器）
 pub enum ModuleContext {
     Traffic(TrafficModuleContext),
     Dns(DnsModuleContext),
@@ -131,14 +130,17 @@ impl Clone for ModuleContext {
         match self {
             ModuleContext::Traffic(ctx) => ModuleContext::Traffic(TrafficModuleContext {
                 options: ctx.options.clone(),
-                mac_stats: Arc::clone(&ctx.mac_stats),
-                baselines: Arc::clone(&ctx.baselines),
                 scheduled_rate_limits: Arc::clone(&ctx.scheduled_rate_limits),
                 hostname_bindings: Arc::clone(&ctx.hostname_bindings),
-                realtime_ring_manager: Arc::clone(&ctx.realtime_ring_manager),
-                multi_level_ring_manager: Arc::clone(&ctx.multi_level_ring_manager),
+                rate_limit_whitelist: Arc::clone(&ctx.rate_limit_whitelist),
+                rate_limit_whitelist_enabled: Arc::clone(&ctx.rate_limit_whitelist_enabled),
+                default_wan_rate_limits: Arc::clone(&ctx.default_wan_rate_limits),
+                realtime_manager: Arc::clone(&ctx.realtime_manager),
+                long_term_manager: Arc::clone(&ctx.long_term_manager),
+                device_manager: Arc::clone(&ctx.device_manager),
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
+                last_ebpf_traffic: Arc::clone(&ctx.last_ebpf_traffic),
             }),
             ModuleContext::Dns(ctx) => ModuleContext::Dns(DnsModuleContext {
                 options: ctx.options.clone(),
@@ -153,7 +155,7 @@ impl Clone for ModuleContext {
     }
 }
 
-/// Module type enumeration
+/// 模块类型枚举
 #[derive(Clone)]
 pub enum ModuleType {
     Traffic,
@@ -165,95 +167,126 @@ impl ModuleType {
     async fn init_data(&self, ctx: &ModuleContext) -> Result<(), anyhow::Error> {
         match (self, ctx) {
             (ModuleType::Traffic, ModuleContext::Traffic(traffic_ctx)) => {
-                // Traffic module data initialization logic
+                // 流量模块数据初始化逻辑，初始化需要的文件和目录
                 crate::storage::traffic::ensure_schema(traffic_ctx.options.data_dir())?;
 
-                // Load scheduled rate limits (includes legacy limits converted to scheduled format)
-                let scheduled_limits = crate::storage::traffic::load_all_scheduled_limits(
-                    traffic_ctx.options.data_dir(),
-                )?;
+                // 加载预定的速率限制 包括迁移旧的限速格式
+                let scheduled_limits = crate::storage::traffic::load_all_scheduled_limits(traffic_ctx.options.data_dir())?;
+
                 {
                     let mut srl = traffic_ctx.scheduled_rate_limits.lock().unwrap();
                     *srl = scheduled_limits;
                 }
 
-                // Note: hostname bindings are now loaded and shared in command.rs,
-                // so we don't need to load them here again
-
-                // Rebuild ring files and load baseline data (only if persistence is enabled)
-                if traffic_ctx.options.traffic_persist_history() {
-                    // Step 1: Check and delete mismatched ring files (must be done before loading)
-                    let rebuilt = crate::storage::traffic::rebuild_all_ring_files_if_mismatch(
-                        traffic_ctx.options.data_dir(),
-                        traffic_ctx.options.traffic_retention_seconds(),
-                    )?;
-
-                    // Step 2: Load ring files from disk into memory (after mismatch check)
-                    // Load real-time ring files
-                    if let Err(e) = traffic_ctx.realtime_ring_manager.load_from_files() {
-                        log::error!("Failed to load real-time ring files into memory: {}", e);
-                    } else {
-                        log::debug!("Successfully loaded real-time ring files into memory");
-                    }
-
-                    // Load multi-level ring files
-                    if let Err(e) = traffic_ctx.multi_level_ring_manager.load_from_files() {
-                        log::warn!("Failed to load multi-level ring files: {}", e);
-                    } else {
-                        log::debug!("Successfully loaded multi-level ring files");
-                    }
-
-                    // Step 3: Load baseline data
-                    let preloaded_baselines = if rebuilt {
-                        Vec::new()
-                    } else {
-                        crate::storage::traffic::load_latest_totals(traffic_ctx.options.data_dir())?
-                    };
-
-                    // Apply preloaded baseline data
+                if let Ok(policy) = crate::storage::traffic::load_rate_limit_policy(traffic_ctx.options.data_dir()) {
                     {
-                        let mut b = traffic_ctx.baselines.lock().unwrap();
-                        for (mac, base) in preloaded_baselines {
-                            b.insert(mac, base);
+                        let mut guard = traffic_ctx.rate_limit_whitelist.lock().unwrap();
+                        *guard = policy.whitelist;
+                    }
+                    traffic_ctx
+                        .rate_limit_whitelist_enabled
+                        .store(policy.enabled, std::sync::atomic::Ordering::Relaxed);
+                    {
+                        let mut guard = traffic_ctx.default_wan_rate_limits.lock().unwrap();
+                        *guard = policy.default_wan_limits;
+                    }
+                }
+
+                // 如果开启了持久化，那么从历史数据，加载基线流量
+                if traffic_ctx.options.traffic_persist_history() {
+                    // 加载 ring 文件中的设备
+                    match traffic_ctx.long_term_manager.load_from_files() {
+                        Ok(device_info) => {
+                            let device_count = device_info.len();
+                            // 将 ring 文件中的设备添加到设备管理器
+                            for (mac, ipv4) in device_info.into_iter() {
+                                traffic_ctx.device_manager.add_offline_device(mac, ipv4);
+                            }
+                            log::debug!("Successfully loaded long-term ring files");
+                            if device_count > 0 {
+                                log::info!("Restored {} offline devices from ring files", device_count);
+                            }
                         }
+                        Err(e) => {
+                            log::warn!("Failed to load long-term ring files: {}", e);
+                        }
+                    }
+
+                    // 加载 accumulator 文件（未完成的小时数据）
+                    if let Err(e) = traffic_ctx.long_term_manager.load_accumulators() {
+                        log::warn!("Failed to load accumulator file: {}", e);
+                    }
+
+                    // 从持久化数据恢复基线到设备管理器
+                    let baselines_with_ts = traffic_ctx.long_term_manager.get_all_baselines_with_ts();
+                    if !baselines_with_ts.is_empty() {
+                        let mut restored_count = 0;
+
+                        for (mac, (ts_ms, wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes, last_online_ts)) in
+                            baselines_with_ts.iter()
+                        {
+                            if let Err(e) = traffic_ctx.device_manager.update_device_traffic_stats(mac, |stats| {
+                                // 恢复WAN和LAN流量字节数作为基线
+                                stats.wan_rx_bytes = *wan_rx_bytes;
+                                stats.wan_tx_bytes = *wan_tx_bytes;
+                                stats.lan_rx_bytes = *lan_rx_bytes;
+                                stats.lan_tx_bytes = *lan_tx_bytes;
+
+                                stats.lan_last_rx_bytes = *lan_rx_bytes;
+                                stats.lan_last_tx_bytes = *lan_tx_bytes;
+                                stats.wan_last_rx_bytes = *wan_rx_bytes;
+                                stats.wan_last_tx_bytes = *wan_tx_bytes;
+                                stats.last_sample_ts = *ts_ms;
+
+                                if *last_online_ts > stats.last_online_ts {
+                                    stats.last_online_ts = *last_online_ts;
+                                } else if stats.last_online_ts == 0 && *ts_ms > 0 {
+                                    stats.last_online_ts = *ts_ms;
+                                }
+                            }) {
+                                log::warn!("Failed to restore baseline for device {:?}: {}", mac, e);
+                            } else {
+                                restored_count += 1;
+                            }
+                        }
+
+                        log::info!("Restored baseline for {} devices from persistent storage", restored_count);
                     }
                 }
 
                 Ok(())
             }
             (ModuleType::Dns, ModuleContext::Dns(_dns_ctx)) => {
-                // DNS module data initialization logic
+                // DNS 模块数据初始化逻辑
                 Ok(())
             }
             (ModuleType::Connection, ModuleContext::Connection(_connection_ctx)) => {
-                // Connection module data initialization logic
+                // 连接模块数据初始化逻辑
                 Ok(())
             }
             _ => Err(anyhow::anyhow!("Module context type mismatch")),
         }
     }
 
-    async fn mount_apis(
-        &self,
-        ctx: &ModuleContext,
-        api_router: &mut ApiRouter,
-    ) -> Result<(), anyhow::Error> {
+    async fn mount_apis(&self, ctx: &ModuleContext, api_router: &mut ApiRouter) -> Result<(), anyhow::Error> {
         match (self, ctx) {
             (ModuleType::Traffic, ModuleContext::Traffic(traffic_ctx)) => {
                 use crate::api::{traffic::TrafficApiHandler, ApiHandler};
 
-                // Create traffic API handler
-                let handler = ApiHandler::Traffic(TrafficApiHandler::new(
-                    Arc::clone(&traffic_ctx.mac_stats),
-                    Arc::clone(&traffic_ctx.baselines),
+                // 创建流量 API 处理程序
+                let handler = ApiHandler::Traffic(TrafficApiHandler::new_with_rate_limit_whitelist(
                     Arc::clone(&traffic_ctx.scheduled_rate_limits),
                     Arc::clone(&traffic_ctx.hostname_bindings),
-                    Arc::clone(&traffic_ctx.realtime_ring_manager),
-                    Arc::clone(&traffic_ctx.multi_level_ring_manager),
+                    Arc::clone(&traffic_ctx.rate_limit_whitelist),
+                    Arc::clone(&traffic_ctx.rate_limit_whitelist_enabled),
+                    Arc::clone(&traffic_ctx.default_wan_rate_limits),
+                    Arc::clone(&traffic_ctx.realtime_manager),
+                    Arc::clone(&traffic_ctx.long_term_manager),
+                    Arc::clone(&traffic_ctx.device_manager),
                     traffic_ctx.options.clone(),
                 ));
 
-                // Register with API router
+                // 注册到 API 路由器
                 api_router.register_handler(handler);
 
                 Ok(())
@@ -261,27 +294,27 @@ impl ModuleType {
             (ModuleType::Dns, ModuleContext::Dns(dns_ctx)) => {
                 use crate::api::{dns::DnsApiHandler, ApiHandler};
 
-                // Create DNS API handler
+                // 创建 DNS API 处理程序
                 let handler = ApiHandler::Dns(DnsApiHandler::new(
                     dns_ctx.options.clone(),
                     Arc::clone(&dns_ctx.dns_queries),
                     Arc::clone(&dns_ctx.hostname_bindings),
                 ));
 
-                // Register with API router
+                // 注册到 API 路由器
                 api_router.register_handler(handler);
                 Ok(())
             }
             (ModuleType::Connection, ModuleContext::Connection(connection_ctx)) => {
                 use crate::api::{connection::ConnectionApiHandler, ApiHandler};
 
-                // Create connection API handler
+                // 创建连接 API 处理程序
                 let handler = ApiHandler::Connection(ConnectionApiHandler::new(
                     Arc::clone(&connection_ctx.device_connection_stats),
                     Arc::clone(&connection_ctx.hostname_bindings),
                 ));
 
-                // Register with API router
+                // 注册到 API 路由器
                 api_router.register_handler(handler);
                 Ok(())
             }
@@ -289,18 +322,11 @@ impl ModuleType {
         }
     }
 
-    async fn start_monitoring(
-        &self,
-        ctx: ModuleContext,
-        shutdown_notify: Arc<tokio::sync::Notify>,
-    ) -> Result<(), anyhow::Error> {
+    async fn start_monitoring(&self, ctx: ModuleContext, shutdown_notify: Arc<tokio::sync::Notify>) -> Result<(), anyhow::Error> {
         match (self, ctx) {
             (ModuleType::Traffic, ModuleContext::Traffic(mut traffic_ctx)) => {
                 let traffic_monitor = traffic::TrafficMonitor::new();
-                if let Err(e) = traffic_monitor
-                    .start(&mut traffic_ctx, shutdown_notify)
-                    .await
-                {
+                if let Err(e) = traffic_monitor.start(&mut traffic_ctx, shutdown_notify).await {
                     log::error!("Traffic monitoring module error: {}", e);
                 }
                 Ok(())
@@ -314,10 +340,7 @@ impl ModuleType {
             }
             (ModuleType::Connection, ModuleContext::Connection(mut connection_ctx)) => {
                 let connection_monitor = connection::ConnectionMonitor::new();
-                if let Err(e) = connection_monitor
-                    .start(&mut connection_ctx, shutdown_notify)
-                    .await
-                {
+                if let Err(e) = connection_monitor.start(&mut connection_ctx, shutdown_notify).await {
                     log::error!("Connection monitoring module error: {}", e);
                 }
                 Ok(())
@@ -327,14 +350,13 @@ impl ModuleType {
     }
 }
 
-/// Monitor manager
+/// 监控管理器
 pub struct MonitorManager {
     modules: Vec<ModuleType>,
     api_router: ApiRouter,
 }
 
 impl MonitorManager {
-    /// Create a new MonitorManager from module contexts (modules are inferred from contexts)
     pub fn from_contexts(contexts: &[ModuleContext]) -> Self {
         let modules: Vec<ModuleType> = contexts
             .iter()
@@ -351,7 +373,7 @@ impl MonitorManager {
         }
     }
 
-    /// Initialize all enabled modules
+    /// 初始化所有启用的模块
     pub async fn init_modules(&mut self, contexts: &[ModuleContext]) -> Result<(), anyhow::Error> {
         for (module, ctx) in self.modules.iter().zip(contexts.iter()) {
             module.init_data(ctx).await?;
@@ -360,12 +382,12 @@ impl MonitorManager {
         Ok(())
     }
 
-    /// Get the API router
+    /// 获取 API 路由器
     pub fn get_api_router(&self) -> &ApiRouter {
         &self.api_router
     }
 
-    /// Start all enabled modules
+    /// 启动所有启用的模块
     pub async fn start_modules(
         &self,
         contexts: Vec<ModuleContext>,
@@ -373,7 +395,6 @@ impl MonitorManager {
     ) -> Result<Vec<tokio::task::JoinHandle<()>>, anyhow::Error> {
         let mut tasks = Vec::new();
 
-        // Create a vector of module types to avoid borrowing self in async tasks
         let module_types: Vec<ModuleType> = self.modules.clone();
 
         for (module, ctx) in module_types.into_iter().zip(contexts.into_iter()) {
