@@ -173,7 +173,6 @@ impl Options {
         &self.traffic.traffic_event_url
     }
 
-
     /// 从 DNS 参数获取启用 DNS
     pub fn enable_dns(&self) -> bool {
         self.dns.enable_dns

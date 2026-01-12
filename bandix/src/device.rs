@@ -540,7 +540,7 @@ impl DeviceManager {
     }
 
     /// 添加离线设备（从 ring 文件恢复的设备）
-    /// 如果设备已存在，则只更新主机名；如果不存在，则创建新设备
+    /// 如果设备已存在，则只更新主机名和 IP；如果不存在，则创建新设备
     pub fn add_offline_device(&self, mac: [u8; 6], ipv4: Option<[u8; 4]>) {
         let hostname_bindings = self.hostname_bindings.lock().unwrap();
         let mut devices = self.devices.lock().unwrap();
@@ -552,7 +552,10 @@ impl DeviceManager {
         }
 
         if let Some(ip) = ipv4 {
-            if device.current_ipv4.is_none() && !device.historical_ipv4.contains(&ip) {
+            if device.current_ipv4.is_none() {
+                device.current_ipv4 = Some(ip);
+            }
+            if !device.historical_ipv4.contains(&ip) {
                 device.historical_ipv4.push(ip);
             }
         }

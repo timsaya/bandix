@@ -2,7 +2,7 @@ use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::storage::traffic::{self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot};
 use crate::utils::format_utils::{format_bytes, format_mac};
-use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -469,56 +469,42 @@ impl TrafficApiHandler {
 }
 
 impl TrafficApiHandler {
-    /// 计算时间范围的开始和结束时间戳（毫秒）
-    /// period: "today" | "week" | "month" | "year" | "all"
-    fn calculate_time_range(period: &str) -> Option<(u64, u64)> {
-        let now = Local::now();
-        let now_ms = now.timestamp_millis() as u64;
+    /// 处理/api/devices endpoint
+    /// 查询参数：
+    ///   - start_ms: 开始时间戳，毫秒（可选）
+    ///   - end_ms: 结束时间戳，毫秒（可选）
+    ///   如果都为空，则默认返回所有设备的累积流量（period=all）
+    async fn handle_devices(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let start_ms_param = request.query_params.get("start_ms").and_then(|s| s.parse::<u64>().ok());
+        let end_ms_param = request.query_params.get("end_ms").and_then(|s| s.parse::<u64>().ok());
 
-        let start_ms = match period {
-            "today" => {
-                let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
-                let today_start_local = Local.from_local_datetime(&today_start).unwrap();
-                today_start_local.timestamp_millis() as u64
+        let time_range = match (start_ms_param, end_ms_param) {
+            (Some(start_ms), Some(end_ms)) => {
+                if start_ms >= end_ms {
+                    return Ok(HttpResponse::error(
+                        400,
+                        "Invalid time range: start_ms must be less than end_ms".to_string(),
+                    ));
+                }
+                Some((start_ms, end_ms))
             }
-            "week" => {
-                let days_from_monday = now.weekday().num_days_from_monday();
-                let week_start = now
-                    .date_naive()
-                    .checked_sub_signed(chrono::Duration::days(days_from_monday as i64))
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap();
-                let week_start_local = Local.from_local_datetime(&week_start).unwrap();
-                week_start_local.timestamp_millis() as u64
+            (None, None) => None,
+            _ => {
+                return Ok(HttpResponse::error(
+                    400,
+                    "Invalid query: start_ms and end_ms must be provided together".to_string(),
+                ));
             }
-            "month" => {
-                let month_start = now.date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap();
-                let month_start_local = Local.from_local_datetime(&month_start).unwrap();
-                month_start_local.timestamp_millis() as u64
-            }
-            "year" => {
-                let year_start = now.date_naive().with_ordinal(1).unwrap().and_hms_opt(0, 0, 0).unwrap();
-                let year_start_local = Local.from_local_datetime(&year_start).unwrap();
-                year_start_local.timestamp_millis() as u64
-            }
-            "all" => return None,
-            _ => return None,
         };
 
-        Some((start_ms, now_ms))
-    }
 
-    /// 处理/api/devices endpoint
-    ///   - period: "today" | "week" | "month" | "all" (可选，默认为 "all")
-    async fn handle_devices(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        let period = request
-            .query_params
-            .get("period")
-            .map(|s| s.to_lowercase())
-            .unwrap_or_else(|| "all".to_string());
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
+        let current_hour_start = (now_ms / (3600 * 1000)) * (3600 * 1000);
+        let current_hour_end = current_hour_start + (3600 * 1000);
 
-        let time_range = Self::calculate_time_range(&period);
         let bindings_map = self.hostname_bindings.lock().unwrap();
         let wifi_set = self.device_manager.get_wifi_macs_snapshot();
 
@@ -558,7 +544,7 @@ impl TrafficApiHandler {
                 let connection_type = if wifi_set.contains(&mac) {
                     "wifi".to_string()
                 } else {
-                    "wired".to_string()
+                    "".to_string()
                 };
 
                 // 计算指定时间段的流量
@@ -577,23 +563,69 @@ impl TrafficApiHandler {
                     let mut period_lan_tx = 0u64;
 
                     // 从ring文件获取start_ms到end_ms之间已保存的增量
-                    if let Ok(stats_rows) = self.long_term_manager.query_stats_by_mac(&mac, start_ms, end_ms) {
-                        for row in &stats_rows {
-                            period_wan_rx = period_wan_rx.saturating_add(row.wan_rx_bytes_inc);
-                            period_wan_tx = period_wan_tx.saturating_add(row.wan_tx_bytes_inc);
-                            period_lan_rx = period_lan_rx.saturating_add(row.lan_rx_bytes_inc);
-                            period_lan_tx = period_lan_tx.saturating_add(row.lan_tx_bytes_inc);
+                    let ring_rows = match self.long_term_manager.query_stats_by_mac(&mac, start_ms, end_ms) {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            log::warn!("Failed to query ring stats for MAC {}: {}", format_mac(&mac), e);
+                            Vec::new()
                         }
+                    };
+
+                    log::debug!(
+                        "MAC {}: ring query returned {} rows in time range",
+                        format_mac(&mac),
+                        ring_rows.len()
+                    );
+
+                    for row in &ring_rows {
+                        period_wan_rx = period_wan_rx.saturating_add(row.wan_rx_bytes_inc);
+                        period_wan_tx = period_wan_tx.saturating_add(row.wan_tx_bytes_inc);
+                        period_lan_rx = period_lan_rx.saturating_add(row.lan_rx_bytes_inc);
+                        period_lan_tx = period_lan_tx.saturating_add(row.lan_tx_bytes_inc);
                     }
 
-                    // 加上当前小时的增量（accumulator中是最新数据，ring文件1小时才保存一次）
-                    let active_increments = self.long_term_manager.get_active_increments();
-                    if let Some(&(wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) = active_increments.get(&mac) {
-                        period_wan_rx = period_wan_rx.saturating_add(wan_rx_inc);
-                        period_wan_tx = period_wan_tx.saturating_add(wan_tx_inc);
-                        period_lan_rx = period_lan_rx.saturating_add(lan_rx_inc);
-                        period_lan_tx = period_lan_tx.saturating_add(lan_tx_inc);
+                    log::debug!(
+                        "MAC {}: ring data - WAN: {}/{} bytes, LAN: {}/{} bytes",
+                        format_mac(&mac),
+                        format_bytes(period_wan_rx),
+                        format_bytes(period_wan_tx),
+                        format_bytes(period_lan_rx),
+                        format_bytes(period_lan_tx)
+                    );
+
+                    // 口径与 /api/traffic/usage/ranking 一致：只有当查询范围覆盖当前小时，才加上当前小时增量
+                    let query_overlaps_current_hour = start_ms < current_hour_end && end_ms > current_hour_start;
+                    if query_overlaps_current_hour {
+                        let active_increments = self.long_term_manager.get_active_increments();
+                        if let Some(&(wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc)) = active_increments.get(&mac) {
+                            period_wan_rx = period_wan_rx.saturating_add(wan_rx_inc);
+                            period_wan_tx = period_wan_tx.saturating_add(wan_tx_inc);
+                            period_lan_rx = period_lan_rx.saturating_add(lan_rx_inc);
+                            period_lan_tx = period_lan_tx.saturating_add(lan_tx_inc);
+
+                            log::debug!(
+                                "MAC {}: included current-hour increments - WAN: {}/{} bytes, LAN: {}/{} bytes",
+                                format_mac(&mac),
+                                format_bytes(wan_rx_inc),
+                                format_bytes(wan_tx_inc),
+                                format_bytes(lan_rx_inc),
+                                format_bytes(lan_tx_inc)
+                            );
+                        } else {
+                            log::debug!("MAC {}: no active current-hour increments found", format_mac(&mac));
+                        }
+                    } else {
+                        log::debug!("MAC {}: query does not overlap current hour, skip accumulator", format_mac(&mac));
                     }
+
+                    log::debug!(
+                        "MAC {}: final period data - WAN: {}/{} bytes, LAN: {}/{} bytes",
+                        format_mac(&mac),
+                        format_bytes(period_wan_rx),
+                        format_bytes(period_wan_tx),
+                        format_bytes(period_lan_rx),
+                        format_bytes(period_lan_tx)
+                    );
 
                     (
                         period_wan_rx + period_lan_rx,
@@ -615,7 +647,9 @@ impl TrafficApiHandler {
                     )
                 };
 
-                DeviceInfo {
+                
+
+                let device_info = DeviceInfo {
                     ip: ip_str,
                     ipv6_addresses,
                     mac: mac_str,
@@ -636,12 +670,26 @@ impl TrafficApiHandler {
                     wan_rx_rate: device.wan_rx_rate,
                     wan_tx_rate: device.wan_tx_rate,
                     last_online_ts: device.last_online_ts,
-                }
+                };
+
+                log::debug!(
+                    "MAC {}: final device stats - Total: {}/{} bytes, WAN: {}/{} bytes, LAN: {}/{} bytes",
+                    format_mac(&mac),
+                    format_bytes(final_total_rx_bytes),
+                    format_bytes(final_total_tx_bytes),
+                    format_bytes(final_wan_rx_bytes),
+                    format_bytes(final_wan_tx_bytes),
+                    format_bytes(final_lan_rx_bytes),
+                    format_bytes(final_lan_tx_bytes)
+                );
+
+                device_info
             })
             .collect();
 
         let mut devices = devices;
         devices.retain(|device| device.ip != "0.0.0.0");
+
         devices.sort_by(|a, b| {
             let a_ip: std::net::Ipv4Addr = a.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
             let b_ip: std::net::Ipv4Addr = b.ip.parse().unwrap_or(std::net::Ipv4Addr::new(0, 0, 0, 0));
@@ -1042,9 +1090,6 @@ impl TrafficApiHandler {
         let bindings_map = self.hostname_bindings.lock().unwrap();
 
         let mut rankings: Vec<DeviceUsageRanking> = Vec::new();
-        let mut total_bytes = 0u64;
-        let mut total_rx_bytes = 0u64;
-        let mut total_tx_bytes = 0u64;
 
         for (mac, stats) in device_stats.iter() {
             // 根据 network_type 选择相应的流量数据
@@ -1059,9 +1104,6 @@ impl TrafficApiHandler {
             };
 
             let total_device_bytes = device_rx_bytes + device_tx_bytes;
-            total_bytes = total_bytes.saturating_add(total_device_bytes);
-            total_rx_bytes = total_rx_bytes.saturating_add(device_rx_bytes);
-            total_tx_bytes = total_tx_bytes.saturating_add(device_tx_bytes);
 
             let mac_str = format_mac(mac);
 
@@ -1090,8 +1132,10 @@ impl TrafficApiHandler {
             });
         }
 
-        // 过滤掉 IP 为 0.0.0.0 的设备
-        rankings.retain(|r| r.ip != "0.0.0.0");
+        // totals 统计所有设备（包括离线设备）
+        let total_bytes: u64 = rankings.iter().map(|r| r.total_bytes).sum();
+        let total_rx_bytes: u64 = rankings.iter().map(|r| r.rx_bytes).sum();
+        let total_tx_bytes: u64 = rankings.iter().map(|r| r.tx_bytes).sum();
 
         // 排序by total_bytes descending
         rankings.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
