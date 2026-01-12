@@ -40,7 +40,10 @@ impl TrafficModuleContext {
             options.traffic_retention_seconds(),
         ));
 
-        let long_term_manager = Arc::new(LongTermRingManager::new(options.data_dir().to_string()));
+        let long_term_manager = Arc::new(LongTermRingManager::new(
+            options.data_dir().to_string(),
+            options.traffic_flush_interval_seconds(),
+        ));
 
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
         let rate_limit_whitelist = Arc::new(Mutex::new(HashSet::new()));

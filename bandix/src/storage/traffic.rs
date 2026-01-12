@@ -782,10 +782,11 @@ pub struct LongTermRingManager {
     pub base_dir: String,
     pub capacity: u32,
     pub accumulators: Arc<Mutex<HashMap<[u8; 6], DeviceStatsAccumulator>>>,
+    pub persist_interval_seconds: u32,
 }
 
 impl LongTermRingManager {
-    pub fn new(base_dir: String) -> Self {
+    pub fn new(base_dir: String, persist_interval_seconds: u32) -> Self {
         let capacity = (LONG_TERM_RETENTION_SECONDS / LONG_TERM_INTERVAL_SECONDS) as u32;
 
         Self {
@@ -797,6 +798,7 @@ impl LongTermRingManager {
                 .to_string(),
             capacity,
             accumulators: Arc::new(Mutex::new(HashMap::new())),
+            persist_interval_seconds,
         }
     }
 
@@ -948,7 +950,7 @@ impl LongTermRingManager {
                 log::error!("Failed to save accumulators after hourly sample: {}", e);
             }
         } else {
-            let save_interval_sec = ts_sec % 60;
+            let save_interval_sec = ts_sec % self.persist_interval_seconds as u64;
             if save_interval_sec == 0 {
                 if let Err(e) = self.save_accumulators() {
                     log::error!("Failed to save accumulators: {}", e);
