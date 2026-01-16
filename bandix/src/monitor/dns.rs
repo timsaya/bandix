@@ -873,8 +873,9 @@ impl DnsMonitor {
                     // We'll match it when the response arrives
                     record.response_time_ms = None;
                 } else {
-                    // 这is a response, try to find matching query
-                    if let Some(matching_query_idx) = queries.iter().position(|q| {
+                    // This is a response, try to find matching query
+                    // Use rposition to find the LATEST matching query (search from end)
+                    if let Some(matching_query_idx) = queries.iter().rposition(|q| {
                         // Match criteria:
                         // 1. Transaction ID matches
                         q.transaction_id == transaction_id &&
@@ -907,8 +908,11 @@ impl DnsMonitor {
                             diff_ns / 1_000_000
                         };
 
-                        // Don't update the query record's response_time_ms - queries should never have response time
-                        // 仅set response time for this response record
+                        // Update the query record's response_time_ms to mark it as answered
+                        // This prevents future responses (with the same ID if reused) from matching this old query again
+                        queries[matching_query_idx].response_time_ms = Some(response_time_ms);
+                        
+                        // Set likely response time for this response record too
                         record.response_time_ms = Some(response_time_ms);
 
                         log::debug!(
