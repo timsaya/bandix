@@ -507,6 +507,7 @@ impl TrafficApiHandler {
 
         let bindings_map = self.hostname_bindings.lock().unwrap();
         let wifi_set = self.device_manager.get_wifi_macs_snapshot();
+        let wired_set = self.device_manager.get_wired_macs_snapshot();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
         let all_devices = self.device_manager.get_all_devices_with_mac();
@@ -543,6 +544,8 @@ impl TrafficApiHandler {
 
                 let connection_type = if wifi_set.contains(&mac) {
                     "wifi".to_string()
+                } else if wired_set.contains(&mac) {
+                    "wired".to_string()
                 } else {
                     "".to_string()
                 };
@@ -1131,6 +1134,9 @@ impl TrafficApiHandler {
                 rank: 0,         // Will set after sorting
             });
         }
+
+        // 过滤掉没有有效 IP 地址的设备（离线设备或从未获取到 IP 的设备）
+        rankings.retain(|r| r.ip != "0.0.0.0");
 
         // totals 统计所有设备（包括离线设备）
         let total_bytes: u64 = rankings.iter().map(|r| r.total_bytes).sum();
