@@ -154,6 +154,7 @@ pub struct DeviceManager {
     neighbor_ipv4_online: Arc<Mutex<HashMap<[u8; 6], bool>>>,
     neighbor_initialized: Arc<AtomicBool>,
     wifi_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
+    wired_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
 }
 
 impl DeviceManager {
@@ -166,6 +167,7 @@ impl DeviceManager {
             neighbor_ipv4_online: Arc::new(Mutex::new(HashMap::new())),
             neighbor_initialized: Arc::new(AtomicBool::new(false)),
             wifi_macs: Arc::new(Mutex::new(HashSet::new())),
+            wired_macs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -317,13 +319,20 @@ impl DeviceManager {
         }
 
         let wifi_set = self.get_wifi_macs_snapshot();
+        let wired_set = self.get_wired_macs_snapshot();
         let mut out = Vec::new();
 
         for (mac, now_online) in new_ipv4_online.iter() {
             let prev_online = old_ipv4_online.get(mac).copied().unwrap_or(false);
             if prev_online != *now_online {
                 let event = if *now_online { "online" } else { "offline" };
-                let ct = if wifi_set.contains(mac) { "wifi".to_string() } else { "wired".to_string() };
+                let ct = if wifi_set.contains(mac) {
+                    "wifi".to_string()
+                } else if wired_set.contains(mac) {
+                    "wired".to_string()
+                } else {
+                    "".to_string()
+                };
                 if let Some(p) = self.build_neighbor_event_payload(mac, event, now_ms, ct) {
                     out.push(p);
                 }
@@ -334,7 +343,13 @@ impl DeviceManager {
             if !new_ipv4_online.contains_key(mac) {
                 let prev_online = old_ipv4_online.get(mac).copied().unwrap_or(false);
                 if prev_online {
-                    let ct = if wifi_set.contains(mac) { "wifi".to_string() } else { "wired".to_string() };
+                    let ct = if wifi_set.contains(mac) {
+                        "wifi".to_string()
+                    } else if wired_set.contains(mac) {
+                        "wired".to_string()
+                    } else {
+                        "".to_string()
+                    };
                     if let Some(p) = self.build_neighbor_event_payload(mac, "offline", now_ms, ct) {
                         out.push(p);
                     }
@@ -539,6 +554,11 @@ impl DeviceManager {
         self.wifi_macs.lock().unwrap().clone()
     }
 
+    #[allow(dead_code)]
+    pub fn get_wired_macs_snapshot(&self) -> HashSet<[u8; 6]> {
+        self.wired_macs.lock().unwrap().clone()
+    }
+
     /// 添加离线设备（从 ring 文件恢复的设备）
     /// 如果设备已存在，则只更新主机名和 IP；如果不存在，则创建新设备
     pub fn add_offline_device(&self, mac: [u8; 6], ipv4: Option<[u8; 4]>) {
@@ -579,24 +599,70 @@ impl DeviceManager {
 
     fn refresh_wifi_macs_cache(&self) {
         let ifaces = Self::read_hostapd_interfaces();
-        if ifaces.is_empty() {
+        let wifi_set = if ifaces.is_empty() {
+            HashSet::new()
+        } else {
+            let mut out: HashSet<[u8; 6]> = HashSet::new();
+            for obj in ifaces {
+                for mac in Self::read_hostapd_clients(&obj) {
+                    if Self::is_special_mac_address(&mac) {
+                        continue;
+                    }
+                    out.insert(mac);
+                }
+            }
+            out
+        };
+
+        {
             let mut guard = self.wifi_macs.lock().unwrap();
-            guard.clear();
-            return;
+            *guard = wifi_set.clone();
         }
 
-        let mut out: HashSet<[u8; 6]> = HashSet::new();
-        for obj in ifaces {
-            for mac in Self::read_hostapd_clients(&obj) {
-                if Self::is_special_mac_address(&mac) {
+        let all_neighbor_macs = self.read_all_neighbor_macs();
+        let wired_set: HashSet<[u8; 6]> = all_neighbor_macs
+            .into_iter()
+            .filter(|mac| !wifi_set.contains(mac))
+            .collect();
+
+        {
+            let mut guard = self.wired_macs.lock().unwrap();
+            *guard = wired_set;
+        }
+    }
+
+    fn read_all_neighbor_macs(&self) -> HashSet<[u8; 6]> {
+        let mut macs = HashSet::new();
+
+        if let Ok(output) = std::process::Command::new("ip")
+            .args(["-4", "neigh", "show", "dev", &self.iface])
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            for line in output_str.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 4 {
                     continue;
                 }
-                out.insert(mac);
+
+                let state = Self::extract_neighbor_state(&parts).unwrap_or("UNKNOWN");
+                if !matches!(state, "REACHABLE" | "STALE" | "DELAY" | "PROBE") {
+                    continue;
+                }
+
+                if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
+                    if lladdr_pos + 1 < parts.len() {
+                        if let Ok(mac) = crate::utils::network_utils::parse_mac_address(parts[lladdr_pos + 1]) {
+                            if !Self::is_special_mac_address(&mac) {
+                                macs.insert(mac);
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        let mut guard = self.wifi_macs.lock().unwrap();
-        *guard = out;
+        macs
     }
 
     fn read_hostapd_interfaces() -> Vec<String> {
