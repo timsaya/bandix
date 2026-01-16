@@ -37,7 +37,20 @@ rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
 [target.mips-unknown-linux-musl]
 linker = "/opt/musl-cross/mips-linux-musl-cross/bin/mips-linux-musl-gcc"
-rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
+rustflags = [
+    "-C",
+    "target-feature=-crt-static",
+    "-C",
+    "link-arg=-dynamic",
+    "-L",
+    "/opt/musl-cross/mips-linux-musl-cross/mips-linux-musl/lib",
+    "-L",
+    "/opt/musl-cross/mips-linux-musl-cross/lib/gcc/mips-linux-musl/11.2.1",
+    "-C",
+    "link-arg=-Wl,--dynamic-linker=/lib/ld-musl-mips-sf.so.1",
+    "-C",
+    "panic=unwind",
+]
 
 [target.mipsel-unknown-linux-musl]
 linker = "/opt/musl-cross/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
