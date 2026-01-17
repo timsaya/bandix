@@ -1,3 +1,9 @@
+# x86_64 架构配置
+
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+
+
 # ARM 架构配置
 
 [target.aarch64-unknown-linux-musl]

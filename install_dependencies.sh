@@ -50,21 +50,21 @@ install_system_packages() {
     case "$PACKAGE_MANAGER" in
         apt)
             apt-get update
-            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file
+            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file musl-tools
             ;;
         yum)
             yum groupinstall -y "Development Tools"
-            yum install -y curl tar gzip xz pkgconfig gcc file
+            yum install -y curl tar gzip xz pkgconfig gcc file musl-gcc musl-libc-static
             ;;
         dnf)
             dnf groupinstall -y 'Development Tools'
-            dnf install -y curl tar gzip xz pkg-config gcc file
+            dnf install -y curl tar gzip xz pkg-config gcc file musl-gcc musl-libc-static
             ;;
         pacman)
-            pacman -Sy --noconfirm base-devel curl tar gzip xz pkgconf gcc file
+            pacman -Sy --noconfirm base-devel curl tar gzip xz pkgconf gcc file musl
             ;;
         *)
-            echo -e "${RED}错误: 未能识别的包管理器，请手动安装 gcc、make、curl、tar、gzip、xz、pkg-config${NC}"
+            echo -e "${RED}错误: 未能识别的包管理器，请手动安装 gcc、make、curl、tar、gzip、xz、pkg-config、musl-tools${NC}"
             exit 1
             ;;
     esac
