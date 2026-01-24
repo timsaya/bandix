@@ -508,6 +508,7 @@ impl TrafficApiHandler {
         let bindings_map = self.hostname_bindings.lock().unwrap();
         let wifi_set = self.device_manager.get_wifi_macs_snapshot();
         let wired_set = self.device_manager.get_wired_macs_snapshot();
+        let interface_mac = self.device_manager.get_interface_mac();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
         let all_devices = self.device_manager.get_all_devices_with_mac();
@@ -542,7 +543,9 @@ impl TrafficApiHandler {
                     bindings_map.get(&mac).cloned().unwrap_or_default()
                 };
 
-                let connection_type = if wifi_set.contains(&mac) {
+                let connection_type = if mac == interface_mac {
+                    "router".to_string()
+                } else if wifi_set.contains(&mac) {
                     "wifi".to_string()
                 } else if wired_set.contains(&mac) {
                     "wired".to_string()

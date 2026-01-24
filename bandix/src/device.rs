@@ -320,13 +320,16 @@ impl DeviceManager {
 
         let wifi_set = self.get_wifi_macs_snapshot();
         let wired_set = self.get_wired_macs_snapshot();
+        let interface_mac = self.get_interface_mac();
         let mut out = Vec::new();
 
         for (mac, now_online) in new_ipv4_online.iter() {
             let prev_online = old_ipv4_online.get(mac).copied().unwrap_or(false);
             if prev_online != *now_online {
                 let event = if *now_online { "online" } else { "offline" };
-                let ct = if wifi_set.contains(mac) {
+                let ct = if *mac == interface_mac {
+                    "router".to_string()
+                } else if wifi_set.contains(mac) {
                     "wifi".to_string()
                 } else if wired_set.contains(mac) {
                     "wired".to_string()
@@ -343,7 +346,9 @@ impl DeviceManager {
             if !new_ipv4_online.contains_key(mac) {
                 let prev_online = old_ipv4_online.get(mac).copied().unwrap_or(false);
                 if prev_online {
-                    let ct = if wifi_set.contains(mac) {
+                    let ct = if *mac == interface_mac {
+                        "router".to_string()
+                    } else if wifi_set.contains(mac) {
                         "wifi".to_string()
                     } else if wired_set.contains(mac) {
                         "wired".to_string()
@@ -557,6 +562,10 @@ impl DeviceManager {
     #[allow(dead_code)]
     pub fn get_wired_macs_snapshot(&self) -> HashSet<[u8; 6]> {
         self.wired_macs.lock().unwrap().clone()
+    }
+
+    pub fn get_interface_mac(&self) -> [u8; 6] {
+        self.subnet_info.interface_mac
     }
 
     /// 添加离线设备（从 ring 文件恢复的设备）
