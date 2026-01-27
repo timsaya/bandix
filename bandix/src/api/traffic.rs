@@ -1,6 +1,6 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
-use crate::storage::traffic::{self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot};
+use crate::storage::traffic::{self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot, save_all_scheduled_limits};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,7 @@ impl TryFrom<&TimeSlotApi> for TimeSlot {
 /// 预定速率限制信息，用于 API 响应
 #[derive(Serialize, Deserialize)]
 pub struct ScheduledRateLimitInfo {
+    pub id: String,
     pub mac: String,
     pub time_slot: TimeSlotApi,
     pub wan_rx_rate_limit: u64,
@@ -215,9 +216,19 @@ pub struct ScheduledRateLimitsResponse {
     pub limits: Vec<ScheduledRateLimitInfo>,
 }
 
-/// 设置预定限制请求结构
+/// 创建预定限制请求结构
 #[derive(Serialize, Deserialize)]
 pub struct SetScheduledLimitRequest {
+    pub mac: String,
+    pub time_slot: TimeSlotApi,
+    pub wan_rx_rate_limit: u64,
+    pub wan_tx_rate_limit: u64,
+}
+
+/// 更新预定限制请求结构
+#[derive(Serialize, Deserialize)]
+pub struct UpdateScheduledLimitRequest {
+    pub id: String,
     pub mac: String,
     pub time_slot: TimeSlotApi,
     pub wan_rx_rate_limit: u64,
@@ -227,8 +238,7 @@ pub struct SetScheduledLimitRequest {
 /// 删除预定限制请求结构
 #[derive(Serialize, Deserialize)]
 pub struct DeleteScheduledLimitRequest {
-    pub mac: String,
-    pub time_slot: TimeSlotApi,
+    pub id: String,
 }
 
 /// 流量 monitoring API handler
@@ -324,6 +334,7 @@ impl TrafficApiHandler {
             "/api/traffic/limits/schedule" => match request.method.as_str() {
                 "GET" => self.handle_scheduled_limits().await,
                 "POST" => self.handle_set_scheduled_limit(request).await,
+                "PUT" => self.handle_update_scheduled_limit(request).await,
                 "DELETE" => self.handle_delete_scheduled_limit(request).await,
                 _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
             },
@@ -849,6 +860,7 @@ impl TrafficApiHandler {
         let limits: Vec<ScheduledRateLimitInfo> = scheduled_limits
             .iter()
             .map(|rule| ScheduledRateLimitInfo {
+                id: rule.id.clone(),
                 mac: format_mac(&rule.mac),
                 time_slot: TimeSlotApi::from(&rule.time_slot),
                 wan_rx_rate_limit: rule.wan_rx_rate_limit,
@@ -862,42 +874,28 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// 处理/api/traffic/limits/schedule endpoint (POST)
+    /// 处理/api/traffic/limits/schedule endpoint (POST) - 创建新规则
     async fn handle_set_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
-        // 解析JSON request body
         let set_request: SetScheduledLimitRequest = serde_json::from_str(body)?;
 
         let mac = crate::utils::network_utils::parse_mac_address(&set_request.mac)?;
         let time_slot = TimeSlot::try_from(&set_request.time_slot).map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
 
-        let scheduled_limit = ScheduledRateLimit {
+        let scheduled_limit = ScheduledRateLimit::new(
             mac,
             time_slot,
-            wan_rx_rate_limit: set_request.wan_rx_rate_limit,
-            wan_tx_rate_limit: set_request.wan_tx_rate_limit,
-        };
+            set_request.wan_rx_rate_limit,
+            set_request.wan_tx_rate_limit,
+        );
 
-        // 更新in-memory scheduled rate limits
         {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
-            // 移除existing rule with same MAC and time slot
-            srl.retain(|r| {
-                !(r.mac == scheduled_limit.mac
-                    && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
-                    && r.time_slot.start_minute == scheduled_limit.time_slot.start_minute
-                    && r.time_slot.end_hour == scheduled_limit.time_slot.end_hour
-                    && r.time_slot.end_minute == scheduled_limit.time_slot.end_minute
-                    && r.time_slot.days_of_week == scheduled_limit.time_slot.days_of_week)
-            });
             srl.push(scheduled_limit.clone());
+            save_all_scheduled_limits(self.options.data_dir(), &srl)?;
         }
 
-        // Persist to file
-        traffic::upsert_scheduled_limit(self.options.data_dir(), &scheduled_limit)?;
-
-        // Log the change
         let rx_str = if scheduled_limit.wan_rx_rate_limit == 0 {
             "Unlimited".to_string()
         } else {
@@ -911,7 +909,69 @@ impl TrafficApiHandler {
         };
 
         log::info!(
-            "Scheduled rate limit set for MAC: {} - Time: {} to {} (days: {}) - Receive: {}, Transmit: {}",
+            "Scheduled rate limit created (id: {}) for MAC: {} - Time: {} to {} (days: {}) - Receive: {}, Transmit: {}",
+            scheduled_limit.id,
+            format_mac(&scheduled_limit.mac),
+            TimeSlot::format_time(scheduled_limit.time_slot.start_hour, scheduled_limit.time_slot.start_minute),
+            TimeSlot::format_time(scheduled_limit.time_slot.end_hour, scheduled_limit.time_slot.end_minute),
+            TimeSlot::format_days(scheduled_limit.time_slot.days_of_week),
+            rx_str,
+            tx_str
+        );
+
+        #[derive(Serialize)]
+        struct CreateResponse {
+            id: String,
+        }
+
+        let api_response = ApiResponse::success(CreateResponse { id: scheduled_limit.id });
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// 处理/api/traffic/limits/schedule endpoint (PUT) - 更新现有规则
+    async fn handle_update_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+
+        let update_request: UpdateScheduledLimitRequest = serde_json::from_str(body)?;
+
+        let mac = crate::utils::network_utils::parse_mac_address(&update_request.mac)?;
+        let time_slot = TimeSlot::try_from(&update_request.time_slot).map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
+
+        let scheduled_limit = ScheduledRateLimit {
+            id: update_request.id.clone(),
+            mac,
+            time_slot,
+            wan_rx_rate_limit: update_request.wan_rx_rate_limit,
+            wan_tx_rate_limit: update_request.wan_tx_rate_limit,
+        };
+
+        {
+            let mut srl = self.scheduled_rate_limits.lock().unwrap();
+            let found = srl.iter().any(|r| r.id == scheduled_limit.id);
+            if !found {
+                return Ok(HttpResponse::error(404, format!("Rule with id {} not found", scheduled_limit.id)));
+            }
+            srl.retain(|r| r.id != scheduled_limit.id);
+            srl.push(scheduled_limit.clone());
+            save_all_scheduled_limits(self.options.data_dir(), &srl)?;
+        }
+
+        let rx_str = if scheduled_limit.wan_rx_rate_limit == 0 {
+            "Unlimited".to_string()
+        } else {
+            format!("{}/s", format_bytes(scheduled_limit.wan_rx_rate_limit))
+        };
+
+        let tx_str = if scheduled_limit.wan_tx_rate_limit == 0 {
+            "Unlimited".to_string()
+        } else {
+            format!("{}/s", format_bytes(scheduled_limit.wan_tx_rate_limit))
+        };
+
+        log::info!(
+            "Scheduled rate limit updated (id: {}) for MAC: {} - Time: {} to {} (days: {}) - Receive: {}, Transmit: {}",
+            scheduled_limit.id,
             format_mac(&scheduled_limit.mac),
             TimeSlot::format_time(scheduled_limit.time_slot.start_hour, scheduled_limit.time_slot.start_minute),
             TimeSlot::format_time(scheduled_limit.time_slot.end_hour, scheduled_limit.time_slot.end_minute),
@@ -929,36 +989,29 @@ impl TrafficApiHandler {
     async fn handle_delete_scheduled_limit(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
 
-        // 解析JSON request body
         let delete_request: DeleteScheduledLimitRequest = serde_json::from_str(body)?;
 
-        let mac = crate::utils::network_utils::parse_mac_address(&delete_request.mac)?;
-        let time_slot = TimeSlot::try_from(&delete_request.time_slot).map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
-
-        // 移除from in-memory scheduled rate limits
+        let deleted_rule: Option<ScheduledRateLimit>;
         {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
-            srl.retain(|r| {
-                !(r.mac == mac
-                    && r.time_slot.start_hour == time_slot.start_hour
-                    && r.time_slot.start_minute == time_slot.start_minute
-                    && r.time_slot.end_hour == time_slot.end_hour
-                    && r.time_slot.end_minute == time_slot.end_minute
-                    && r.time_slot.days_of_week == time_slot.days_of_week)
-            });
+            deleted_rule = srl.iter().find(|r| r.id == delete_request.id).cloned();
+            if deleted_rule.is_none() {
+                return Ok(HttpResponse::error(404, format!("Rule with id {} not found", delete_request.id)));
+            }
+            srl.retain(|r| r.id != delete_request.id);
+            save_all_scheduled_limits(self.options.data_dir(), &srl)?;
         }
 
-        // 移除from file
-        traffic::delete_scheduled_limit(self.options.data_dir(), &mac, &time_slot)?;
-
-        // Log the change
-        log::info!(
-            "Scheduled rate limit deleted for MAC: {} - Time: {} to {} (days: {})",
-            format_mac(&mac),
-            TimeSlot::format_time(time_slot.start_hour, time_slot.start_minute),
-            TimeSlot::format_time(time_slot.end_hour, time_slot.end_minute),
-            TimeSlot::format_days(time_slot.days_of_week)
-        );
+        if let Some(rule) = deleted_rule {
+            log::info!(
+                "Scheduled rate limit deleted (id: {}) for MAC: {} - Time: {} to {} (days: {})",
+                rule.id,
+                format_mac(&rule.mac),
+                TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute),
+                TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute),
+                TimeSlot::format_days(rule.time_slot.days_of_week)
+            );
+        }
 
         let api_response = ApiResponse::success(());
         let body = serde_json::to_string(&api_response)?;

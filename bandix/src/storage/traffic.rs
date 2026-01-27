@@ -48,9 +48,13 @@ const SLOT_U64S_REALTIME: usize = 15; // 实时数据环形槽位大小（15个u
 // ------------------------------
 // 长期统计常量（1小时采样，365天保留）
 // ------------------------------
-const RING_VERSION_LONG_TERM: u32 = 4;
+const RING_VERSION: u32 = 5;
+const RING_VERSION_V4: u32 = 4;
 const SLOT_U64S_LONG_TERM: usize = 32;
 const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8;
+
+// v5 稀疏文件格式头部大小: magic(4) + version(4) + capacity(4) + entry_count(4) = 16 bytes
+const HEADER_SIZE_V5: usize = 16;
 
 // 长期统计环形文件槽位结构（小端字节序，32个u64字段，总共256字节）：
 // 索引 | 字段名              | 类型 | 说明
@@ -115,50 +119,47 @@ fn mac_to_filename(mac: &[u8; 6]) -> String {
 pub struct TimeSlot {
     pub start_hour: u8,   // 0-23
     pub start_minute: u8, // 0-59
-    pub end_hour: u8,     // 0-24（24 表示一天结束，即 24:00 = 次日 00:00）
-    pub end_minute: u8,   // 0-59（如果 end_hour == 24 则必须为 0）
+    pub end_hour: u8,     // 0-23
+    pub end_minute: u8,   // 0-59
     pub days_of_week: u8, // 位掩码：位 0=星期一，位 6=星期日（0b1111111 = 所有天）
 }
 
 impl TimeSlot {
-    /// 创建一个适用于所有天、所有小时的时间段（00:00-24:00）
+    /// 创建一个适用于所有天、所有小时的时间段（00:00-23:59，闭区间）
     pub fn all_time() -> Self {
         Self {
             start_hour: 0,
             start_minute: 0,
-            end_hour: 24,
-            end_minute: 0,
-            days_of_week: 0b1111111, // 所有7天
+            end_hour: 23,
+            end_minute: 59,
+            days_of_week: 0b1111111,
         }
     }
 
-    /// 检查当前时间是否匹配此时间段
+    /// 检查当前时间是否匹配此时间段（闭区间 [start, end]）
     pub fn matches(&self, now: &DateTime<Local>) -> bool {
         let current_hour = now.hour() as u8;
         let current_minute = now.minute() as u8;
         let current_day = (now.weekday().num_days_from_monday()) as u8;
 
-        // 检查星期几是否匹配
         if (self.days_of_week & (1 << current_day)) == 0 {
             return false;
         }
 
-        // 转换为分钟用于比较
         let current_time = current_hour as u32 * 60 + current_minute as u32;
         let start_time = self.start_hour as u32 * 60 + self.start_minute as u32;
         let end_time = self.end_hour as u32 * 60 + self.end_minute as u32;
 
         if start_time <= end_time {
-            // 同一天时间段
-            current_time >= start_time && current_time < end_time
+            // 同一天时间段（闭区间）
+            current_time >= start_time && current_time <= end_time
         } else {
-            // 跨天时间段（例如：22:00-06:00）
-            current_time >= start_time || current_time < end_time
+            // 跨天时间段（例如：22:00-06:00，闭区间）
+            current_time >= start_time || current_time <= end_time
         }
     }
 
     /// 从字符串格式 "HH:MM" 解析时间段
-    /// 支持使用 24:00 表示一天结束
     pub fn parse_time(time_str: &str) -> Result<(u8, u8), anyhow::Error> {
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() != 2 {
@@ -166,11 +167,8 @@ impl TimeSlot {
         }
         let hour: u8 = parts[0].parse().with_context(|| format!("Invalid hour: {}", parts[0]))?;
         let minute: u8 = parts[1].parse().with_context(|| format!("Invalid minute: {}", parts[1]))?;
-        if hour > 24 {
-            return Err(anyhow::anyhow!("小时必须是 0-24"));
-        }
-        if hour == 24 && minute != 0 {
-            return Err(anyhow::anyhow!("当小时为 24 时，分钟必须为 0"));
+        if hour > 23 {
+            return Err(anyhow::anyhow!("小时必须是 0-23"));
         }
         if minute > 59 {
             return Err(anyhow::anyhow!("分钟必须是 0-59"));
@@ -217,10 +215,23 @@ impl TimeSlot {
 /// 预定速率限制规则
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledRateLimit {
+    pub id: String,
     pub mac: [u8; 6],
     pub time_slot: TimeSlot,
     pub wan_rx_rate_limit: u64,
     pub wan_tx_rate_limit: u64,
+}
+
+impl ScheduledRateLimit {
+    pub fn new(mac: [u8; 6], time_slot: TimeSlot, wan_rx_rate_limit: u64, wan_tx_rate_limit: u64) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            mac,
+            time_slot,
+            wan_rx_rate_limit,
+            wan_tx_rate_limit,
+        }
+    }
 }
 
 /// 内存中实时数据环形结构（1秒采样）
@@ -282,23 +293,19 @@ impl RealtimeRing {
     }
 }
 
-/// 内存中长期统计数据环形结构（1小时采样）
+/// 内存中长期统计数据环形结构（1小时采样，稀疏存储）
 #[derive(Debug, Clone)]
 pub struct LongTermRing {
     pub capacity: u32,
-    pub slots: Vec<[u64; SLOT_U64S_LONG_TERM]>,
-    pub current_index: u64,
+    pub slots: BTreeMap<u64, [u64; SLOT_U64S_LONG_TERM]>,
     pub dirty: bool,
 }
 
 impl LongTermRing {
     pub fn new(capacity: u32) -> Self {
-        let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
-
         Self {
-            capacity: cap,
-            slots: vec![[0u64; SLOT_U64S_LONG_TERM]; cap as usize],
-            current_index: 0,
+            capacity: if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity },
+            slots: BTreeMap::new(),
             dirty: false,
         }
     }
@@ -307,11 +314,9 @@ impl LongTermRing {
         let idx = calc_slot_index_with_interval(ts_ms, self.capacity, interval_seconds);
         let mut slot = [0u64; SLOT_U64S_LONG_TERM];
 
-        // 时间段：start_ts_ms 和 end_ts_ms
         slot[0] = stats.ts_start_ms;
         slot[1] = stats.ts_end_ms;
 
-        // wan_rx_rate: avg, max, min, p90, p95, p99 (indices 2-7)
         slot[2] = stats.wan_rx_rate.avg;
         slot[3] = stats.wan_rx_rate.max;
         slot[4] = stats.wan_rx_rate.min;
@@ -319,7 +324,6 @@ impl LongTermRing {
         slot[6] = stats.wan_rx_rate.p95;
         slot[7] = stats.wan_rx_rate.p99;
 
-        // wan_tx_rate: avg, max, min, p90, p95, p99 (indices 8-13)
         slot[8] = stats.wan_tx_rate.avg;
         slot[9] = stats.wan_tx_rate.max;
         slot[10] = stats.wan_tx_rate.min;
@@ -327,11 +331,9 @@ impl LongTermRing {
         slot[12] = stats.wan_tx_rate.p95;
         slot[13] = stats.wan_tx_rate.p99;
 
-        // 广域网络流量字节数增量（索引14-15）
         slot[14] = stats.get_wan_rx_bytes_increment();
         slot[15] = stats.get_wan_tx_bytes_increment();
 
-        // lan_rx_rate: avg, max, min, p90, p95, p99 (indices 16-21)
         slot[16] = stats.lan_rx_rate.avg;
         slot[17] = stats.lan_rx_rate.max;
         slot[18] = stats.lan_rx_rate.min;
@@ -339,7 +341,6 @@ impl LongTermRing {
         slot[20] = stats.lan_rx_rate.p95;
         slot[21] = stats.lan_rx_rate.p99;
 
-        // lan_tx_rate: avg, max, min, p90, p95, p99 (indices 22-27)
         slot[22] = stats.lan_tx_rate.avg;
         slot[23] = stats.lan_tx_rate.max;
         slot[24] = stats.lan_tx_rate.min;
@@ -347,25 +348,24 @@ impl LongTermRing {
         slot[26] = stats.lan_tx_rate.p95;
         slot[27] = stats.lan_tx_rate.p99;
 
-        // 局域网流量字节数增量（索引28-29）
         slot[28] = stats.get_lan_rx_bytes_increment();
         slot[29] = stats.get_lan_tx_bytes_increment();
 
-        // 设备最后在线时间戳（索引30）
         slot[30] = stats.last_online_ts;
-
-        // IPv4地址（索引31，存储在低32位）
         slot[31] = if let Some(ipv4) = stats.ipv4 { u32::from_be_bytes(ipv4) as u64 } else { 0 };
 
-        self.slots[idx as usize] = slot;
-        self.current_index = idx;
+        self.slots.insert(idx, slot);
         self.dirty = true;
+    }
+
+    pub fn get_slot(&self, idx: u64) -> Option<&[u64; SLOT_U64S_LONG_TERM]> {
+        self.slots.get(&idx)
     }
 
     pub fn query_stats(&self, start_ms: u64, end_ms: u64) -> Vec<MetricsRowWithStats> {
         let mut rows = Vec::new();
 
-        for slot in &self.slots {
+        for slot in self.slots.values() {
             let start_ts = slot[0];
             let end_ts = slot[1];
             if end_ts == 0 {
@@ -378,41 +378,34 @@ impl LongTermRing {
             rows.push(MetricsRowWithStats {
                 start_ts_ms: slot[0],
                 end_ts_ms: slot[1],
-                // wan_rx_rate stats (indices 2-7)
                 wan_rx_rate_avg: slot[2],
                 wan_rx_rate_max: slot[3],
                 wan_rx_rate_min: slot[4],
                 wan_rx_rate_p90: slot[5],
                 wan_rx_rate_p95: slot[6],
                 wan_rx_rate_p99: slot[7],
-                // wan_tx_rate stats (indices 8-13)
                 wan_tx_rate_avg: slot[8],
                 wan_tx_rate_max: slot[9],
                 wan_tx_rate_min: slot[10],
                 wan_tx_rate_p90: slot[11],
                 wan_tx_rate_p95: slot[12],
                 wan_tx_rate_p99: slot[13],
-                // 广域网络流量字节数增量（索引14-15）
                 wan_rx_bytes_inc: slot[14],
                 wan_tx_bytes_inc: slot[15],
-                // lan_rx_rate stats (indices 16-21)
                 lan_rx_rate_avg: slot[16],
                 lan_rx_rate_max: slot[17],
                 lan_rx_rate_min: slot[18],
                 lan_rx_rate_p90: slot[19],
                 lan_rx_rate_p95: slot[20],
                 lan_rx_rate_p99: slot[21],
-                // lan_tx_rate stats (indices 22-27)
                 lan_tx_rate_avg: slot[22],
                 lan_tx_rate_max: slot[23],
                 lan_tx_rate_min: slot[24],
                 lan_tx_rate_p90: slot[25],
                 lan_tx_rate_p95: slot[26],
                 lan_tx_rate_p99: slot[27],
-                // 局域网流量字节数增量（索引28-29）
                 lan_rx_bytes_inc: slot[28],
                 lan_tx_bytes_inc: slot[29],
-                // 设备最后在线时间戳（索引30）
                 last_online_ts: slot[30],
             });
         }
@@ -429,8 +422,6 @@ impl LongTermRing {
         self.dirty = false;
     }
 
-    /// 获取所有增量累加后的总流量作为基线
-    /// 返回 (end_ts_ms, wan_rx_bytes_total, wan_tx_bytes_total, lan_rx_bytes_total, lan_tx_bytes_total, last_online_ts)
     pub fn get_latest_baseline_with_ts(&self) -> Option<(u64, u64, u64, u64, u64, u64)> {
         let mut latest_end_ts = 0u64;
         let mut total_wan_rx_bytes = 0u64;
@@ -439,7 +430,7 @@ impl LongTermRing {
         let mut total_lan_tx_bytes = 0u64;
         let mut latest_last_online_ts = 0u64;
 
-        for slot in &self.slots {
+        for slot in self.slots.values() {
             let start_ts = slot[0];
             if start_ts == 0 {
                 continue;
@@ -694,6 +685,8 @@ pub struct DeviceStatsAccumulator {
     pub last_online_ts: u64,      // 设备最后在线时间戳（毫秒）
     pub ipv4: Option<[u8; 4]>,    // IPv4地址
     pub is_first_sample: bool,    // 是否是第一次采样
+    #[serde(default)]
+    pub needs_recalibration: bool, // 重启后需要重新校准 start 值
 }
 
 impl DeviceStatsAccumulator {
@@ -716,18 +709,32 @@ impl DeviceStatsAccumulator {
             last_online_ts: 0,
             ipv4: None,
             is_first_sample: true,
+            needs_recalibration: false,
         }
     }
 
-    pub fn add_sample(&mut self, device: &crate::device::UnifiedDevice, ts_ms: u64) {
-        self.ts_end_ms = ts_ms;
+    pub fn add_sample(&mut self, device: &crate::device::UnifiedDevice, now_ts_ms: u64) {
+        self.ts_end_ms = now_ts_ms;
 
-        if self.is_first_sample {
-            self.wan_rx_bytes_start = device.wan_rx_bytes;
-            self.wan_tx_bytes_start = device.wan_tx_bytes;
-            self.lan_rx_bytes_start = device.lan_rx_bytes;
-            self.lan_tx_bytes_start = device.lan_tx_bytes;
+        if self.is_first_sample || self.needs_recalibration {
+            let (wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc) = if self.is_first_sample {
+                (0, 0, 0, 0)
+            } else {
+                (
+                    self.get_wan_rx_bytes_increment(),
+                    self.get_wan_tx_bytes_increment(),
+                    self.get_lan_rx_bytes_increment(),
+                    self.get_lan_tx_bytes_increment(),
+                )
+            };
+
+            self.wan_rx_bytes_start = device.wan_rx_bytes.saturating_sub(wan_rx_inc);
+            self.wan_tx_bytes_start = device.wan_tx_bytes.saturating_sub(wan_tx_inc);
+            self.lan_rx_bytes_start = device.lan_rx_bytes.saturating_sub(lan_rx_inc);
+            self.lan_tx_bytes_start = device.lan_tx_bytes.saturating_sub(lan_tx_inc);
+
             self.is_first_sample = false;
+            self.needs_recalibration = false;
         }
 
         self.wan_rx_rate.add_sample(device.wan_rx_rate);
@@ -889,6 +896,8 @@ impl LongTermRingManager {
             }
 
             if valid {
+                let mut acc = acc;
+                acc.needs_recalibration = true;
                 accumulators.insert(mac, acc);
             }
         }
@@ -902,19 +911,21 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn insert_metrics_batch(&self, ts_ms: u64, rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>) -> Result<(), anyhow::Error> {
+    pub fn insert_metrics_batch(&self, now_ts_ms: u64, rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
         }
 
         let mut accumulators = self.accumulators.lock().unwrap();
-        let ts_sec = ts_ms / 1000;
+        let ts_sec = now_ts_ms / 1000;
         let should_sample = ts_sec % LONG_TERM_INTERVAL_SECONDS == 0;
 
         for (mac, device) in rows.iter() {
-            let accumulator = accumulators.entry(*mac).or_insert_with(|| DeviceStatsAccumulator::new(ts_ms));
+            let accumulator = accumulators
+                .entry(*mac)
+                .or_insert_with(|| DeviceStatsAccumulator::new(now_ts_ms));
 
-            accumulator.add_sample(device, ts_ms);
+            accumulator.add_sample(device, now_ts_ms);
 
             if should_sample {
                 accumulator.finalize();
@@ -926,17 +937,19 @@ impl LongTermRingManager {
 
                 ring.insert_stats(accumulator.ts_end_ms, accumulator, LONG_TERM_INTERVAL_SECONDS);
 
-                let slot = ring.slots[slot_idx as usize];
+                let slot = ring.get_slot(slot_idx).copied();
                 drop(rings);
 
-                if let Err(e) = self.persist_single_slot(mac, accumulator.ts_end_ms, &slot) {
-                    log::error!("Failed to immediately persist slot for MAC {}: {}", mac_to_filename(mac), e);
-                } else {
-                    log::debug!(
-                        "Immediately persisted slot for MAC {} at {}",
-                        mac_to_filename(mac),
-                        accumulator.ts_end_ms
-                    );
+                if let Some(slot) = slot {
+                    if let Err(e) = self.persist_single_slot(mac, slot_idx, &slot) {
+                        log::error!("Failed to immediately persist slot for MAC {}: {}", mac_to_filename(mac), e);
+                    } else {
+                        log::debug!(
+                            "Immediately persisted slot for MAC {} at {}",
+                            mac_to_filename(mac),
+                            accumulator.ts_end_ms
+                        );
+                    }
                 }
 
                 accumulators.remove(mac);
@@ -996,6 +1009,7 @@ impl LongTermRingManager {
 
         let mut rings = self.rings.lock().unwrap();
         let mut device_info = Vec::new();
+        let mut files_to_migrate = Vec::new();
 
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
@@ -1027,15 +1041,16 @@ impl LongTermRingManager {
 
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_LONG_TERM {
+                    if ver == RING_VERSION {
+                        // v5 稀疏格式
                         let mut ring = LongTermRing::new(cap);
                         let mut latest_ipv4: Option<[u8; 4]> = None;
                         let mut latest_ts: u64 = 0;
 
-                        for i in 0..(cap as u64) {
-                            if let Ok(slot) = read_slot_v3(&f, i) {
+                        if let Ok(entries) = read_all_slots_v5(&mut f) {
+                            for (idx, slot) in entries {
                                 if slot[0] != 0 {
-                                    ring.slots[i as usize] = slot;
+                                    ring.slots.insert(idx, slot);
 
                                     if slot[0] > latest_ts {
                                         latest_ts = slot[0];
@@ -1051,35 +1066,66 @@ impl LongTermRingManager {
                         ring.mark_clean();
                         rings.insert(mac, ring);
                         device_info.push((mac, latest_ipv4));
+                    } else if ver == RING_VERSION_V4 {
+                        // v4 密集格式，需要迁移
+                        let mut ring = LongTermRing::new(cap);
+                        let mut latest_ipv4: Option<[u8; 4]> = None;
+                        let mut latest_ts: u64 = 0;
+
+                        for i in 0..(cap as u64) {
+                            if let Ok(slot) = read_slot_v4(&f, i, cap) {
+                                if slot[0] != 0 {
+                                    ring.slots.insert(i, slot);
+
+                                    if slot[0] > latest_ts {
+                                        latest_ts = slot[0];
+                                        if slot[31] != 0 {
+                                            let ip_u32 = slot[31] as u32;
+                                            latest_ipv4 = Some(ip_u32.to_be_bytes());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        ring.dirty = true;
+                        rings.insert(mac, ring.clone());
+                        device_info.push((mac, latest_ipv4));
+                        files_to_migrate.push((mac, ring, path.clone()));
                     }
                 }
+            }
+        }
+
+        drop(rings);
+
+        for (mac, ring, _old_path) in files_to_migrate {
+            log::info!("Migrating ring file from v4 to v5 for MAC {}", mac_to_filename(&mac));
+            if let Err(e) = self.persist_ring_to_file(&mac, &ring) {
+                log::error!("Failed to migrate ring file for MAC {}: {}", mac_to_filename(&mac), e);
+            } else {
+                let mut rings = self.rings.lock().unwrap();
+                if let Some(r) = rings.get_mut(&mac) {
+                    r.mark_clean();
+                }
+                log::info!("Successfully migrated ring file for MAC {}", mac_to_filename(&mac));
             }
         }
 
         Ok(device_info)
     }
 
-    fn persist_single_slot(&self, mac: &[u8; 6], ts_ms: u64, slot: &[u64; SLOT_U64S_LONG_TERM]) -> Result<(), anyhow::Error> {
-        let path = ring_file_path_v3(&self.base_dir, mac);
-        let f = init_ring_file_v3(&path, self.capacity)?;
-
-        let idx = calc_slot_index_with_interval(ts_ms, self.capacity, LONG_TERM_INTERVAL_SECONDS);
-        write_slot_v3(&f, idx, slot)?;
+    fn persist_single_slot(&self, mac: &[u8; 6], slot_idx: u64, slot: &[u64; SLOT_U64S_LONG_TERM]) -> Result<(), anyhow::Error> {
+        let path = ring_file_path(&self.base_dir, mac);
+        let mut f = open_or_create_ring_file_v5(&path, self.capacity)?;
+        append_slot_v5(&mut f, slot_idx, slot)?;
         f.sync_all()?;
-
         Ok(())
     }
 
     fn persist_ring_to_file(&self, mac: &[u8; 6], ring: &LongTermRing) -> Result<(), anyhow::Error> {
-        let path = ring_file_path_v3(&self.base_dir, mac);
-        let f = init_ring_file_v3(&path, ring.capacity)?;
-
-        for (idx, slot) in ring.slots.iter().enumerate() {
-            if slot[0] != 0 {
-                write_slot_v3(&f, idx as u64, slot)?;
-            }
-        }
-
+        let path = ring_file_path(&self.base_dir, mac);
+        let f = write_ring_file_v5(&path, ring.capacity, &ring.slots)?;
         f.sync_all()?;
         Ok(())
     }
@@ -1423,8 +1469,7 @@ fn parse_two_u64_line(line: &str) -> Option<[u64; 2]> {
     let tx = parts[1].parse::<u64>().ok()?;
     Some([rx, tx])
 }
-// bindings_path 已移动到 storage::hostname 模块
-fn ring_file_path_v3(base: &str, mac: &[u8; 6]) -> PathBuf {
+fn ring_file_path(base: &str, mac: &[u8; 6]) -> PathBuf {
     Path::new(base).join(format!("{}.ring", mac_to_filename(mac)))
 }
 
@@ -1465,69 +1510,10 @@ fn calc_slot_index_with_interval(ts_ms: u64, capacity: u32, interval_seconds: u6
 }
 
 // ============================================================================
-// 多级别环形文件 I/O 函数（v3 格式）
+// v4 密集格式文件 I/O 函数（仅用于迁移读取）
 // ============================================================================
 
-fn write_header_v3(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
-    f.seek(SeekFrom::Start(0))?;
-    f.write_all(&RING_MAGIC)?;
-    f.write_all(&RING_VERSION_LONG_TERM.to_le_bytes())?;
-    f.write_all(&capacity.to_le_bytes())?;
-    Ok(())
-}
-
-fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
-    ensure_parent_dir(path)?;
-    let mut f = OpenOptions::new().read(true).write(true).create(true).open(path)?;
-
-    let metadata = f.metadata()?;
-    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
-    let expected_size = HEADER_SIZE as u64 + (cap as u64) * (SLOT_SIZE_LONG_TERM as u64);
-
-    if metadata.len() != expected_size {
-        // 重新初始化
-        f.set_len(0)?;
-        write_header_v3(&mut f, cap)?;
-        // 写入零填充的槽位区域
-        let zero_chunk = vec![0u8; 4096];
-        let mut remaining = expected_size - HEADER_SIZE as u64;
-        while remaining > 0 {
-            let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
-            f.write_all(&zero_chunk[..to_write])?;
-            remaining -= to_write as u64;
-        }
-        f.flush()?;
-    } else {
-        let (ver, _) = read_header(&mut f)?;
-        if ver != RING_VERSION_LONG_TERM {
-            f.set_len(0)?;
-            write_header_v3(&mut f, cap)?;
-            let zero_chunk = vec![0u8; 4096];
-            let mut remaining = expected_size - HEADER_SIZE as u64;
-            while remaining > 0 {
-                let to_write = std::cmp::min(remaining, zero_chunk.len() as u64) as usize;
-                f.write_all(&zero_chunk[..to_write])?;
-                remaining -= to_write as u64;
-            }
-            f.flush()?;
-        }
-    }
-    Ok(f)
-}
-
-fn write_slot_v3(mut f: &File, idx: u64, data: &[u64; SLOT_U64S_LONG_TERM]) -> Result<(), anyhow::Error> {
-    let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_LONG_TERM as u64);
-    let mut bytes = vec![0u8; SLOT_SIZE_LONG_TERM];
-    for (i, v) in data.iter().enumerate() {
-        let b = v.to_le_bytes();
-        bytes[i * 8..(i + 1) * 8].copy_from_slice(&b);
-    }
-    f.seek(SeekFrom::Start(offset))?;
-    f.write_all(&bytes)?;
-    Ok(())
-}
-
-fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
+fn read_slot_v4(mut f: &File, idx: u64, _capacity: u32) -> Result<[u64; SLOT_U64S_LONG_TERM], anyhow::Error> {
     let offset = HEADER_SIZE as u64 + idx * (SLOT_SIZE_LONG_TERM as u64);
     let mut bytes = vec![0u8; SLOT_SIZE_LONG_TERM];
     f.seek(SeekFrom::Start(offset))?;
@@ -1539,6 +1525,148 @@ fn read_slot_v3(mut f: &File, idx: u64) -> Result<[u64; SLOT_U64S_LONG_TERM], an
         out[i] = u64::from_le_bytes(b);
     }
     Ok(out)
+}
+
+// ============================================================================
+// v5 稀疏格式文件 I/O 函数
+// v5 文件结构:
+//   Header (16 bytes): magic(4) + version(4) + capacity(4) + entry_count(4)
+//   Entries: [slot_index(8) + slot_data(256)] * entry_count
+// ============================================================================
+
+fn write_header_v5(f: &mut File, capacity: u32, entry_count: u32) -> Result<(), anyhow::Error> {
+    f.seek(SeekFrom::Start(0))?;
+    f.write_all(&RING_MAGIC)?;
+    f.write_all(&RING_VERSION.to_le_bytes())?;
+    f.write_all(&capacity.to_le_bytes())?;
+    f.write_all(&entry_count.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_header_v5(f: &mut File) -> Result<(u32, u32, u32), anyhow::Error> {
+    let mut magic = [0u8; 4];
+    f.seek(SeekFrom::Start(0))?;
+    f.read_exact(&mut magic)?;
+    if magic != RING_MAGIC {
+        return Err(anyhow::anyhow!("invalid ring file magic"));
+    }
+    let mut buf4 = [0u8; 4];
+    f.read_exact(&mut buf4)?;
+    let ver = u32::from_le_bytes(buf4);
+    f.read_exact(&mut buf4)?;
+    let cap = u32::from_le_bytes(buf4);
+    f.read_exact(&mut buf4)?;
+    let entry_count = u32::from_le_bytes(buf4);
+    Ok((ver, cap, entry_count))
+}
+
+fn open_or_create_ring_file_v5(path: &Path, capacity: u32) -> Result<File, anyhow::Error> {
+    ensure_parent_dir(path)?;
+    let mut f = OpenOptions::new().read(true).write(true).create(true).open(path)?;
+
+    let metadata = f.metadata()?;
+    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
+
+    if metadata.len() < HEADER_SIZE_V5 as u64 {
+        f.set_len(0)?;
+        write_header_v5(&mut f, cap, 0)?;
+        f.flush()?;
+    } else {
+        let (ver, _, _) = read_header_v5(&mut f)?;
+        if ver != RING_VERSION {
+            f.set_len(0)?;
+            write_header_v5(&mut f, cap, 0)?;
+            f.flush()?;
+        }
+    }
+    Ok(f)
+}
+
+fn append_slot_v5(f: &mut File, slot_idx: u64, data: &[u64; SLOT_U64S_LONG_TERM]) -> Result<(), anyhow::Error> {
+    let (_, cap, entry_count) = read_header_v5(f)?;
+
+    let mut existing_entries: BTreeMap<u64, [u64; SLOT_U64S_LONG_TERM]> = BTreeMap::new();
+    f.seek(SeekFrom::Start(HEADER_SIZE_V5 as u64))?;
+    for _ in 0..entry_count {
+        let mut idx_buf = [0u8; 8];
+        if f.read_exact(&mut idx_buf).is_err() {
+            break;
+        }
+        let idx = u64::from_le_bytes(idx_buf);
+
+        let mut slot_buf = vec![0u8; SLOT_SIZE_LONG_TERM];
+        if f.read_exact(&mut slot_buf).is_err() {
+            break;
+        }
+        let mut slot = [0u64; SLOT_U64S_LONG_TERM];
+        for i in 0..SLOT_U64S_LONG_TERM {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&slot_buf[i * 8..(i + 1) * 8]);
+            slot[i] = u64::from_le_bytes(b);
+        }
+        existing_entries.insert(idx, slot);
+    }
+
+    existing_entries.insert(slot_idx, *data);
+
+    f.set_len(0)?;
+    write_header_v5(f, cap, existing_entries.len() as u32)?;
+
+    for (idx, slot) in existing_entries.iter() {
+        f.write_all(&idx.to_le_bytes())?;
+        let mut bytes = vec![0u8; SLOT_SIZE_LONG_TERM];
+        for (i, v) in slot.iter().enumerate() {
+            let b = v.to_le_bytes();
+            bytes[i * 8..(i + 1) * 8].copy_from_slice(&b);
+        }
+        f.write_all(&bytes)?;
+    }
+
+    Ok(())
+}
+
+fn write_ring_file_v5(path: &Path, capacity: u32, slots: &BTreeMap<u64, [u64; SLOT_U64S_LONG_TERM]>) -> Result<File, anyhow::Error> {
+    ensure_parent_dir(path)?;
+    let mut f = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
+
+    let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
+    write_header_v5(&mut f, cap, slots.len() as u32)?;
+
+    for (idx, slot) in slots.iter() {
+        f.write_all(&idx.to_le_bytes())?;
+        let mut bytes = vec![0u8; SLOT_SIZE_LONG_TERM];
+        for (i, v) in slot.iter().enumerate() {
+            let b = v.to_le_bytes();
+            bytes[i * 8..(i + 1) * 8].copy_from_slice(&b);
+        }
+        f.write_all(&bytes)?;
+    }
+
+    Ok(f)
+}
+
+fn read_all_slots_v5(f: &mut File) -> Result<Vec<(u64, [u64; SLOT_U64S_LONG_TERM])>, anyhow::Error> {
+    let (_, _, entry_count) = read_header_v5(f)?;
+    let mut entries = Vec::with_capacity(entry_count as usize);
+
+    f.seek(SeekFrom::Start(HEADER_SIZE_V5 as u64))?;
+    for _ in 0..entry_count {
+        let mut idx_buf = [0u8; 8];
+        f.read_exact(&mut idx_buf)?;
+        let idx = u64::from_le_bytes(idx_buf);
+
+        let mut slot_buf = vec![0u8; SLOT_SIZE_LONG_TERM];
+        f.read_exact(&mut slot_buf)?;
+        let mut slot = [0u64; SLOT_U64S_LONG_TERM];
+        for i in 0..SLOT_U64S_LONG_TERM {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&slot_buf[i * 8..(i + 1) * 8]);
+            slot[i] = u64::from_le_bytes(b);
+        }
+        entries.push((idx, slot));
+    }
+
+    Ok(entries)
 }
 
 pub fn ensure_schema(base_dir: &str) -> Result<(), anyhow::Error> {
@@ -1703,10 +1831,16 @@ fn limits_schedule_path(base: &str) -> PathBuf {
     Path::new(base).join("rate_limits_schedule.txt")
 }
 
+fn is_valid_uuid(s: &str) -> bool {
+    uuid::Uuid::parse_str(s).is_ok()
+}
+
 /// 从文件加载所有预定速率限制
 /// 同时将旧版 rate_limits.txt 条目迁移到预定格式（全天候）
+/// 支持从无 id 的旧格式自动迁移
 pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimit>, anyhow::Error> {
     let mut out = Vec::new();
+    let mut needs_resave = false;
 
     let legacy_path = legacy_limits_path(base_dir);
 
@@ -1715,8 +1849,6 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
 
         let mut migrated_count = 0;
 
-        // 将旧版限制转换为预定格式并保存到新文件
-        // 跳过 rx 和 tx 都为 0 的条目（无限制，无需存储）
         for (mac, rx, tx) in legacy_limits.iter() {
             if *rx == 0 && *tx == 0 {
                 log::debug!(
@@ -1731,13 +1863,7 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
                 continue;
             }
 
-            let scheduled_limit = ScheduledRateLimit {
-                mac: *mac,
-                time_slot: TimeSlot::all_time(),
-                wan_rx_rate_limit: *rx,
-                wan_tx_rate_limit: *tx,
-            };
-            // 保存到新文件（将与现有的预定限制合并）
+            let scheduled_limit = ScheduledRateLimit::new(*mac, TimeSlot::all_time(), *rx, *tx);
             upsert_scheduled_limit(base_dir, &scheduled_limit)?;
             out.push(scheduled_limit);
             migrated_count += 1;
@@ -1750,13 +1876,11 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             );
         }
 
-        // 迁移后删除旧版文件（即使所有条目都是无限制的）
         if let Err(e) = fs::remove_file(&legacy_path) {
             log::warn!("Failed to remove legacy rate_limits.txt after migration: {}", e);
         }
     }
 
-    // 然后，从 rate_limits_schedule.txt 加载预定限制
     let path = limits_schedule_path(base_dir);
     if !path.exists() {
         return Ok(out);
@@ -1769,18 +1893,23 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             continue;
         }
 
-        // 格式：mac schedule start_hour:start_min end_hour:end_min days rx tx
-        // 示例：aabbccddeeff schedule 09:00 18:00 1111100 1048576 1048576
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 7 {
+
+        // 新格式: id mac schedule start end days rx tx (8个部分)
+        // 旧格式: mac schedule start end days rx tx (7个部分)
+        let (id, mac_str, schedule_idx) = if parts.len() == 8 && is_valid_uuid(parts[0]) {
+            (parts[0].to_string(), parts[1], 2)
+        } else if parts.len() == 7 && parts[1] == "schedule" {
+            needs_resave = true;
+            (uuid::Uuid::new_v4().to_string(), parts[0], 1)
+        } else {
+            continue;
+        };
+
+        if parts[schedule_idx] != "schedule" {
             continue;
         }
 
-        if parts[1] != "schedule" {
-            continue;
-        }
-
-        let mac_str = parts[0];
         let mac = if mac_str.contains(':') {
             parse_mac_text(mac_str)
         } else if mac_str.len() == 12 {
@@ -1794,15 +1923,19 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             Err(anyhow::anyhow!("invalid mac format at line {}", lineno + 1))
         }?;
 
+        let time_start_idx = schedule_idx + 1;
         let (start_hour, start_minute) =
-            TimeSlot::parse_time(parts[2]).with_context(|| format!("invalid start time at line {}", lineno + 1))?;
-        let (end_hour, end_minute) = TimeSlot::parse_time(parts[3]).with_context(|| format!("invalid end time at line {}", lineno + 1))?;
-        let days_of_week = TimeSlot::parse_days(parts[4]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
+            TimeSlot::parse_time(parts[time_start_idx]).with_context(|| format!("invalid start time at line {}", lineno + 1))?;
+        let (end_hour, end_minute) =
+            TimeSlot::parse_time(parts[time_start_idx + 1]).with_context(|| format!("invalid end time at line {}", lineno + 1))?;
+        let days_of_week =
+            TimeSlot::parse_days(parts[time_start_idx + 2]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
 
-        let rx: u64 = parts[5].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
-        let tx: u64 = parts[6].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
+        let rx: u64 = parts[time_start_idx + 3].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
+        let tx: u64 = parts[time_start_idx + 4].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
 
         out.push(ScheduledRateLimit {
+            id,
             mac,
             time_slot: TimeSlot {
                 start_hour,
@@ -1814,6 +1947,11 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             wan_rx_rate_limit: rx,
             wan_tx_rate_limit: tx,
         });
+    }
+
+    if needs_resave && !out.is_empty() {
+        log::info!("Migrating {} scheduled limits to new format with UUID", out.len());
+        save_all_scheduled_limits(base_dir, &out)?;
     }
 
     Ok(out)
@@ -1977,94 +2115,13 @@ pub fn save_rate_limit_policy(base_dir: &str, policy: &RateLimitPolicy) -> Resul
     Ok(())
 }
 
-/// 将预定速率限制保存到文件
-pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLimit) -> Result<(), anyhow::Error> {
+/// 保存所有预定速率限制到文件
+pub fn save_all_scheduled_limits(base_dir: &str, rules: &[ScheduledRateLimit]) -> Result<(), anyhow::Error> {
     let path = limits_schedule_path(base_dir);
     ensure_parent_dir(&path)?;
 
-    let mut rules: Vec<ScheduledRateLimit> = Vec::new();
-
-    // 加载现有规则
-    if path.exists() {
-        let content = fs::read_to_string(&path)?;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() != 7 || parts[1] != "schedule" {
-                continue;
-            }
-
-            let mac_str = parts[0];
-            let mac = if mac_str.contains(':') {
-                parse_mac_text(mac_str).ok()
-            } else if mac_str.len() == 12 {
-                let mut mac = [0u8; 6];
-                let mut ok = true;
-                for i in 0..6 {
-                    if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
-                        mac[i] = v;
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok {
-                    Some(mac)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            if let Some(mac) = mac {
-                if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[2]) {
-                    if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[3]) {
-                        if let Ok(days_of_week) = TimeSlot::parse_days(parts[4]) {
-                            if let Ok(rx) = parts[5].parse::<u64>() {
-                                if let Ok(tx) = parts[6].parse::<u64>() {
-                                    rules.push(ScheduledRateLimit {
-                                        mac,
-                                        time_slot: TimeSlot {
-                                            start_hour,
-                                            start_minute,
-                                            end_hour,
-                                            end_minute,
-                                            days_of_week,
-                                        },
-                                        wan_rx_rate_limit: rx,
-                                        wan_tx_rate_limit: tx,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 删除具有相同 MAC 和时间段的现有规则（用于更新）
-    let mac_key = mac_to_filename(&scheduled_limit.mac);
-    rules.retain(|r| {
-        let r_mac = mac_to_filename(&r.mac);
-        !(r_mac == mac_key
-            && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
-            && r.time_slot.start_minute == scheduled_limit.time_slot.start_minute
-            && r.time_slot.end_hour == scheduled_limit.time_slot.end_hour
-            && r.time_slot.end_minute == scheduled_limit.time_slot.end_minute
-            && r.time_slot.days_of_week == scheduled_limit.time_slot.days_of_week)
-    });
-
-    // 添加新的/更新的规则
-    rules.push(scheduled_limit.clone());
-
-    // 按 MAC 和时间段排序以确保输出一致性
-    rules.sort_by(|a, b| {
+    let mut sorted_rules = rules.to_vec();
+    sorted_rules.sort_by(|a, b| {
         let mac_a = mac_to_filename(&a.mac);
         let mac_b = mac_to_filename(&b.mac);
         mac_a.cmp(&mac_b).then_with(|| {
@@ -2075,18 +2132,17 @@ pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLim
         })
     });
 
-    // 写回文件
     let mut buf = String::new();
-    buf.push_str("# mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
+    buf.push_str("# id mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
     buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
-    for rule in rules {
+    for rule in sorted_rules {
         let mac_str = mac_to_filename(&rule.mac);
         let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
         let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
         buf.push_str(&format!(
-            "{} schedule {} {} {} {} {}\n",
-            mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
+            "{} {} schedule {} {} {} {} {}\n",
+            rule.id, mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
         ));
     }
 
@@ -2094,14 +2150,24 @@ pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLim
     Ok(())
 }
 
-/// 删除预定速率限制规则
-pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlot) -> Result<(), anyhow::Error> {
+/// 将预定速率限制保存到文件（插入或更新）
+pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLimit) -> Result<(), anyhow::Error> {
+    let mut rules = load_all_scheduled_limits_raw(base_dir)?;
+
+    rules.retain(|r| r.id != scheduled_limit.id);
+    rules.push(scheduled_limit.clone());
+
+    save_all_scheduled_limits(base_dir, &rules)?;
+    Ok(())
+}
+
+fn load_all_scheduled_limits_raw(base_dir: &str) -> Result<Vec<ScheduledRateLimit>, anyhow::Error> {
     let path = limits_schedule_path(base_dir);
     if !path.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    let mut rules: Vec<ScheduledRateLimit> = Vec::new();
+    let mut out = Vec::new();
     let content = fs::read_to_string(&path)?;
 
     for line in content.lines() {
@@ -2111,63 +2177,47 @@ pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlo
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 7 || parts[1] != "schedule" {
+
+        let (id, mac_str, schedule_idx) = if parts.len() == 8 && is_valid_uuid(parts[0]) {
+            (parts[0].to_string(), parts[1], 2)
+        } else if parts.len() == 7 && parts[1] == "schedule" {
+            (uuid::Uuid::new_v4().to_string(), parts[0], 1)
+        } else {
+            continue;
+        };
+
+        if parts[schedule_idx] != "schedule" {
             continue;
         }
 
-        let mac_str = parts[0];
-        let parsed_mac = if mac_str.contains(':') {
+        let mac = if mac_str.contains(':') {
             parse_mac_text(mac_str).ok()
         } else if mac_str.len() == 12 {
-            let mut parsed = [0u8; 6];
+            let mut mac = [0u8; 6];
             let mut ok = true;
             for i in 0..6 {
                 if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
-                    parsed[i] = v;
+                    mac[i] = v;
                 } else {
                     ok = false;
                     break;
                 }
             }
-            if ok {
-                Some(parsed)
-            } else {
-                None
-            }
+            if ok { Some(mac) } else { None }
         } else {
             None
         };
 
-        if let Some(parsed_mac) = parsed_mac {
-            if parsed_mac == *mac {
-                if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[2]) {
-                    if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[3]) {
-                        if let Ok(days_of_week) = TimeSlot::parse_days(parts[4]) {
-                            // 检查是否匹配要删除的时间段
-                            if start_hour == time_slot.start_hour
-                                && start_minute == time_slot.start_minute
-                                && end_hour == time_slot.end_hour
-                                && end_minute == time_slot.end_minute
-                                && days_of_week == time_slot.days_of_week
-                            {
-                                // 跳过此规则（删除它）
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 保留此规则
-        if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[2]) {
-            if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[3]) {
-                if let Ok(days_of_week) = TimeSlot::parse_days(parts[4]) {
-                    if let Ok(rx) = parts[5].parse::<u64>() {
-                        if let Ok(tx) = parts[6].parse::<u64>() {
-                            if let Some(parsed_mac) = parsed_mac {
-                                rules.push(ScheduledRateLimit {
-                                    mac: parsed_mac,
+        if let Some(mac) = mac {
+            let time_start_idx = schedule_idx + 1;
+            if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[time_start_idx]) {
+                if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[time_start_idx + 1]) {
+                    if let Ok(days_of_week) = TimeSlot::parse_days(parts[time_start_idx + 2]) {
+                        if let Ok(rx) = parts[time_start_idx + 3].parse::<u64>() {
+                            if let Ok(tx) = parts[time_start_idx + 4].parse::<u64>() {
+                                out.push(ScheduledRateLimit {
+                                    id,
+                                    mac,
                                     time_slot: TimeSlot {
                                         start_hour,
                                         start_minute,
@@ -2186,23 +2236,22 @@ pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlo
         }
     }
 
-    // 写回文件
-    let mut buf = String::new();
-    buf.push_str("# mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
-    buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
-    for rule in rules {
-        let mac_str = mac_to_filename(&rule.mac);
-        let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
-        let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
-        let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
-        buf.push_str(&format!(
-            "{} schedule {} {} {} {} {}\n",
-            mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
-        ));
+    Ok(out)
+}
+
+/// 按 ID 删除预定速率限制规则
+#[allow(dead_code)]
+pub fn delete_scheduled_limit_by_id(base_dir: &str, id: &str) -> Result<bool, anyhow::Error> {
+    let mut rules = load_all_scheduled_limits_raw(base_dir)?;
+    let original_len = rules.len();
+    rules.retain(|r| r.id != id);
+
+    if rules.len() == original_len {
+        return Ok(false);
     }
 
-    fs::write(&path, buf)?;
-    Ok(())
+    save_all_scheduled_limits(base_dir, &rules)?;
+    Ok(true)
 }
 
 /// 根据预定规则计算 MAC 地址的当前有效速率限制
