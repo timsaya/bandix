@@ -7,7 +7,8 @@ pub fn bindings_path(base_dir: &str) -> PathBuf {
 }
 
 /// 从文件加载主机名绑定
-/// 文件格式：每行一个条目 - "mac12 hostname"
+/// 文件格式：每行一个条目 - "mac hostname"
+/// 支持两种 MAC 格式：12位十六进制(06c99dd26238) 或 冒号分隔(06:c9:9d:d2:62:38)
 pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, anyhow::Error> {
     let path = bindings_path(base_dir);
     let mut out = Vec::new();
@@ -26,20 +27,24 @@ pub fn load_hostname_bindings(base_dir: &str) -> Result<Vec<([u8; 6], String)>, 
         }
         let mac_str = parts[0];
         let hostname = parts[1];
-        if mac_str.len() != 12 {
-            continue;
-        }
-        let mut mac = [0u8; 6];
-        let mut ok = true;
-        for i in 0..6 {
-            if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
-                mac[i] = v;
-            } else {
-                ok = false;
-                break;
+        let mac = if mac_str.contains(':') {
+            crate::utils::network_utils::parse_mac_address(mac_str).ok()
+        } else if mac_str.len() == 12 {
+            let mut mac = [0u8; 6];
+            let mut ok = true;
+            for i in 0..6 {
+                if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
+                    mac[i] = v;
+                } else {
+                    ok = false;
+                    break;
+                }
             }
-        }
-        if ok {
+            if ok { Some(mac) } else { None }
+        } else {
+            None
+        };
+        if let Some(mac) = mac {
             out.push((mac, hostname.to_string()));
         }
     }

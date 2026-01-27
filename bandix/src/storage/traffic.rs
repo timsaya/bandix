@@ -114,6 +114,13 @@ fn mac_to_filename(mac: &[u8; 6]) -> String {
     s
 }
 
+fn mac_to_colon_format(mac: &[u8; 6]) -> String {
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
 /// 预定速率限制的时间段
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeSlot {
@@ -2104,7 +2111,7 @@ pub fn load_rate_limit_policy(base_dir: &str) -> Result<RateLimitPolicy, anyhow:
 pub fn save_rate_limit_policy(base_dir: &str, policy: &RateLimitPolicy) -> Result<(), anyhow::Error> {
     let path = rate_limit_policy_path(base_dir);
     ensure_parent_dir(&path)?;
-    let mut macs: Vec<String> = policy.whitelist.iter().map(|m| mac_to_filename(m)).collect();
+    let mut macs: Vec<String> = policy.whitelist.iter().map(|m| mac_to_colon_format(m)).collect();
     macs.sort();
     let mut buf = String::new();
     buf.push_str(if policy.enabled { "true\n" } else { "false\n" });
@@ -2136,7 +2143,7 @@ pub fn save_all_scheduled_limits(base_dir: &str, rules: &[ScheduledRateLimit]) -
     buf.push_str("# id mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
     buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
     for rule in sorted_rules {
-        let mac_str = mac_to_filename(&rule.mac);
+        let mac_str = mac_to_colon_format(&rule.mac);
         let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
         let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
