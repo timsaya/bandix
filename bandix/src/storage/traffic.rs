@@ -48,7 +48,7 @@ const SLOT_U64S_REALTIME: usize = 15; // 实时数据环形槽位大小（15个u
 // ------------------------------
 // 长期统计常量（1小时采样，365天保留）
 // ------------------------------
-const RING_VERSION_LONG_TERM: u32 = 4;
+const RING_VERSION: u32 = 4;
 const SLOT_U64S_LONG_TERM: usize = 32;
 const SLOT_SIZE_LONG_TERM: usize = SLOT_U64S_LONG_TERM * 8;
 
@@ -694,6 +694,8 @@ pub struct DeviceStatsAccumulator {
     pub last_online_ts: u64,      // 设备最后在线时间戳（毫秒）
     pub ipv4: Option<[u8; 4]>,    // IPv4地址
     pub is_first_sample: bool,    // 是否是第一次采样
+    #[serde(default)]
+    pub needs_recalibration: bool, // 重启后需要重新校准 start 值
 }
 
 impl DeviceStatsAccumulator {
@@ -716,18 +718,32 @@ impl DeviceStatsAccumulator {
             last_online_ts: 0,
             ipv4: None,
             is_first_sample: true,
+            needs_recalibration: false,
         }
     }
 
-    pub fn add_sample(&mut self, device: &crate::device::UnifiedDevice, ts_ms: u64) {
-        self.ts_end_ms = ts_ms;
+    pub fn add_sample(&mut self, device: &crate::device::UnifiedDevice, now_ts_ms: u64) {
+        self.ts_end_ms = now_ts_ms;
 
-        if self.is_first_sample {
-            self.wan_rx_bytes_start = device.wan_rx_bytes;
-            self.wan_tx_bytes_start = device.wan_tx_bytes;
-            self.lan_rx_bytes_start = device.lan_rx_bytes;
-            self.lan_tx_bytes_start = device.lan_tx_bytes;
+        if self.is_first_sample || self.needs_recalibration {
+            let (wan_rx_inc, wan_tx_inc, lan_rx_inc, lan_tx_inc) = if self.is_first_sample {
+                (0, 0, 0, 0)
+            } else {
+                (
+                    self.get_wan_rx_bytes_increment(),
+                    self.get_wan_tx_bytes_increment(),
+                    self.get_lan_rx_bytes_increment(),
+                    self.get_lan_tx_bytes_increment(),
+                )
+            };
+
+            self.wan_rx_bytes_start = device.wan_rx_bytes.saturating_sub(wan_rx_inc);
+            self.wan_tx_bytes_start = device.wan_tx_bytes.saturating_sub(wan_tx_inc);
+            self.lan_rx_bytes_start = device.lan_rx_bytes.saturating_sub(lan_rx_inc);
+            self.lan_tx_bytes_start = device.lan_tx_bytes.saturating_sub(lan_tx_inc);
+
             self.is_first_sample = false;
+            self.needs_recalibration = false;
         }
 
         self.wan_rx_rate.add_sample(device.wan_rx_rate);
@@ -889,6 +905,8 @@ impl LongTermRingManager {
             }
 
             if valid {
+                let mut acc = acc;
+                acc.needs_recalibration = true;
                 accumulators.insert(mac, acc);
             }
         }
@@ -902,19 +920,21 @@ impl LongTermRingManager {
         Ok(())
     }
 
-    pub fn insert_metrics_batch(&self, ts_ms: u64, rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>) -> Result<(), anyhow::Error> {
+    pub fn insert_metrics_batch(&self, now_ts_ms: u64, rows: &Vec<([u8; 6], crate::device::UnifiedDevice)>) -> Result<(), anyhow::Error> {
         if rows.is_empty() {
             return Ok(());
         }
 
         let mut accumulators = self.accumulators.lock().unwrap();
-        let ts_sec = ts_ms / 1000;
+        let ts_sec = now_ts_ms / 1000;
         let should_sample = ts_sec % LONG_TERM_INTERVAL_SECONDS == 0;
 
         for (mac, device) in rows.iter() {
-            let accumulator = accumulators.entry(*mac).or_insert_with(|| DeviceStatsAccumulator::new(ts_ms));
+            let accumulator = accumulators
+                .entry(*mac)
+                .or_insert_with(|| DeviceStatsAccumulator::new(now_ts_ms));
 
-            accumulator.add_sample(device, ts_ms);
+            accumulator.add_sample(device, now_ts_ms);
 
             if should_sample {
                 accumulator.finalize();
@@ -1027,7 +1047,7 @@ impl LongTermRingManager {
 
             if let Ok(mut f) = OpenOptions::new().read(true).open(&path) {
                 if let Ok((ver, cap)) = read_header(&mut f) {
-                    if ver == RING_VERSION_LONG_TERM {
+                    if ver == RING_VERSION {
                         let mut ring = LongTermRing::new(cap);
                         let mut latest_ipv4: Option<[u8; 4]> = None;
                         let mut latest_ts: u64 = 0;
@@ -1471,7 +1491,7 @@ fn calc_slot_index_with_interval(ts_ms: u64, capacity: u32, interval_seconds: u6
 fn write_header_v3(f: &mut File, capacity: u32) -> Result<(), anyhow::Error> {
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&RING_MAGIC)?;
-    f.write_all(&RING_VERSION_LONG_TERM.to_le_bytes())?;
+    f.write_all(&RING_VERSION.to_le_bytes())?;
     f.write_all(&capacity.to_le_bytes())?;
     Ok(())
 }
@@ -1499,7 +1519,7 @@ fn init_ring_file_v3(path: &Path, capacity: u32) -> Result<File, anyhow::Error> 
         f.flush()?;
     } else {
         let (ver, _) = read_header(&mut f)?;
-        if ver != RING_VERSION_LONG_TERM {
+        if ver != RING_VERSION {
             f.set_len(0)?;
             write_header_v3(&mut f, cap)?;
             let zero_chunk = vec![0u8; 4096];

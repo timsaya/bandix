@@ -105,24 +105,24 @@ impl TrafficMonitor {
             log::error!("Failed to update rate limits: {}", e);
         }
 
-        let ts_ms = SystemTime::now()
+        let now_ts_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(std::time::Duration::from_secs(0))
             .as_millis() as u64;
 
         let traffic_snapshot = ctx.device_manager.get_all_devices_with_mac();
 
-        if let Err(e) = ctx.realtime_manager.insert_metrics_batch(ts_ms, &traffic_snapshot) {
+        if let Err(e) = ctx.realtime_manager.insert_metrics_batch(now_ts_ms, &traffic_snapshot) {
             log::error!("Failed to persist metrics to memory ring: {}", e);
         }
 
-        if let Err(e) = ctx.long_term_manager.insert_metrics_batch(ts_ms, &traffic_snapshot) {
+        if let Err(e) = ctx.long_term_manager.insert_metrics_batch(now_ts_ms, &traffic_snapshot) {
             log::error!("Failed to persist metrics to long-term ring: {}", e);
         }
 
         let export_url = ctx.options.traffic_export_url().trim();
         if !export_url.is_empty() {
-            self.export_devices_snapshot(ctx, export_url.to_string(), ts_ms, &traffic_snapshot)
+            self.export_devices_snapshot(ctx, export_url.to_string(), now_ts_ms, &traffic_snapshot)
                 .await;
         }
     }
