@@ -766,6 +766,15 @@ impl DnsMonitor {
                         RData::SOA(soa) => {
                             response_records.push(format!("SOA:{}", soa.mname()));
                         }
+                        RData::SRV(srv) => {
+                            response_records.push(format!(
+                                "SRV:{} (Priority:{} Weight:{} Port:{})",
+                                srv.target(),
+                                srv.priority(),
+                                srv.weight(),
+                                srv.port()
+                            ));
+                        }
                         _ => {
                             // 处理other record types (including HTTPS, SVCB, and unknown ones)
                             // Format: RecordType:<hex data> for better visibility
