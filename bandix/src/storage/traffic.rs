@@ -119,50 +119,47 @@ fn mac_to_filename(mac: &[u8; 6]) -> String {
 pub struct TimeSlot {
     pub start_hour: u8,   // 0-23
     pub start_minute: u8, // 0-59
-    pub end_hour: u8,     // 0-24（24 表示一天结束，即 24:00 = 次日 00:00）
-    pub end_minute: u8,   // 0-59（如果 end_hour == 24 则必须为 0）
+    pub end_hour: u8,     // 0-23
+    pub end_minute: u8,   // 0-59
     pub days_of_week: u8, // 位掩码：位 0=星期一，位 6=星期日（0b1111111 = 所有天）
 }
 
 impl TimeSlot {
-    /// 创建一个适用于所有天、所有小时的时间段（00:00-24:00）
+    /// 创建一个适用于所有天、所有小时的时间段（00:00-23:59，闭区间）
     pub fn all_time() -> Self {
         Self {
             start_hour: 0,
             start_minute: 0,
-            end_hour: 24,
-            end_minute: 0,
-            days_of_week: 0b1111111, // 所有7天
+            end_hour: 23,
+            end_minute: 59,
+            days_of_week: 0b1111111,
         }
     }
 
-    /// 检查当前时间是否匹配此时间段
+    /// 检查当前时间是否匹配此时间段（闭区间 [start, end]）
     pub fn matches(&self, now: &DateTime<Local>) -> bool {
         let current_hour = now.hour() as u8;
         let current_minute = now.minute() as u8;
         let current_day = (now.weekday().num_days_from_monday()) as u8;
 
-        // 检查星期几是否匹配
         if (self.days_of_week & (1 << current_day)) == 0 {
             return false;
         }
 
-        // 转换为分钟用于比较
         let current_time = current_hour as u32 * 60 + current_minute as u32;
         let start_time = self.start_hour as u32 * 60 + self.start_minute as u32;
         let end_time = self.end_hour as u32 * 60 + self.end_minute as u32;
 
         if start_time <= end_time {
-            // 同一天时间段
-            current_time >= start_time && current_time < end_time
+            // 同一天时间段（闭区间）
+            current_time >= start_time && current_time <= end_time
         } else {
-            // 跨天时间段（例如：22:00-06:00）
-            current_time >= start_time || current_time < end_time
+            // 跨天时间段（例如：22:00-06:00，闭区间）
+            current_time >= start_time || current_time <= end_time
         }
     }
 
     /// 从字符串格式 "HH:MM" 解析时间段
-    /// 支持使用 24:00 表示一天结束
     pub fn parse_time(time_str: &str) -> Result<(u8, u8), anyhow::Error> {
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() != 2 {
@@ -170,11 +167,8 @@ impl TimeSlot {
         }
         let hour: u8 = parts[0].parse().with_context(|| format!("Invalid hour: {}", parts[0]))?;
         let minute: u8 = parts[1].parse().with_context(|| format!("Invalid minute: {}", parts[1]))?;
-        if hour > 24 {
-            return Err(anyhow::anyhow!("小时必须是 0-24"));
-        }
-        if hour == 24 && minute != 0 {
-            return Err(anyhow::anyhow!("当小时为 24 时，分钟必须为 0"));
+        if hour > 23 {
+            return Err(anyhow::anyhow!("小时必须是 0-23"));
         }
         if minute > 59 {
             return Err(anyhow::anyhow!("分钟必须是 0-59"));
@@ -221,10 +215,23 @@ impl TimeSlot {
 /// 预定速率限制规则
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledRateLimit {
+    pub id: String,
     pub mac: [u8; 6],
     pub time_slot: TimeSlot,
     pub wan_rx_rate_limit: u64,
     pub wan_tx_rate_limit: u64,
+}
+
+impl ScheduledRateLimit {
+    pub fn new(mac: [u8; 6], time_slot: TimeSlot, wan_rx_rate_limit: u64, wan_tx_rate_limit: u64) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            mac,
+            time_slot,
+            wan_rx_rate_limit,
+            wan_tx_rate_limit,
+        }
+    }
 }
 
 /// 内存中实时数据环形结构（1秒采样）
@@ -1824,10 +1831,16 @@ fn limits_schedule_path(base: &str) -> PathBuf {
     Path::new(base).join("rate_limits_schedule.txt")
 }
 
+fn is_valid_uuid(s: &str) -> bool {
+    uuid::Uuid::parse_str(s).is_ok()
+}
+
 /// 从文件加载所有预定速率限制
 /// 同时将旧版 rate_limits.txt 条目迁移到预定格式（全天候）
+/// 支持从无 id 的旧格式自动迁移
 pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimit>, anyhow::Error> {
     let mut out = Vec::new();
+    let mut needs_resave = false;
 
     let legacy_path = legacy_limits_path(base_dir);
 
@@ -1836,8 +1849,6 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
 
         let mut migrated_count = 0;
 
-        // 将旧版限制转换为预定格式并保存到新文件
-        // 跳过 rx 和 tx 都为 0 的条目（无限制，无需存储）
         for (mac, rx, tx) in legacy_limits.iter() {
             if *rx == 0 && *tx == 0 {
                 log::debug!(
@@ -1852,13 +1863,7 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
                 continue;
             }
 
-            let scheduled_limit = ScheduledRateLimit {
-                mac: *mac,
-                time_slot: TimeSlot::all_time(),
-                wan_rx_rate_limit: *rx,
-                wan_tx_rate_limit: *tx,
-            };
-            // 保存到新文件（将与现有的预定限制合并）
+            let scheduled_limit = ScheduledRateLimit::new(*mac, TimeSlot::all_time(), *rx, *tx);
             upsert_scheduled_limit(base_dir, &scheduled_limit)?;
             out.push(scheduled_limit);
             migrated_count += 1;
@@ -1871,13 +1876,11 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             );
         }
 
-        // 迁移后删除旧版文件（即使所有条目都是无限制的）
         if let Err(e) = fs::remove_file(&legacy_path) {
             log::warn!("Failed to remove legacy rate_limits.txt after migration: {}", e);
         }
     }
 
-    // 然后，从 rate_limits_schedule.txt 加载预定限制
     let path = limits_schedule_path(base_dir);
     if !path.exists() {
         return Ok(out);
@@ -1890,18 +1893,23 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             continue;
         }
 
-        // 格式：mac schedule start_hour:start_min end_hour:end_min days rx tx
-        // 示例：aabbccddeeff schedule 09:00 18:00 1111100 1048576 1048576
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 7 {
+
+        // 新格式: id mac schedule start end days rx tx (8个部分)
+        // 旧格式: mac schedule start end days rx tx (7个部分)
+        let (id, mac_str, schedule_idx) = if parts.len() == 8 && is_valid_uuid(parts[0]) {
+            (parts[0].to_string(), parts[1], 2)
+        } else if parts.len() == 7 && parts[1] == "schedule" {
+            needs_resave = true;
+            (uuid::Uuid::new_v4().to_string(), parts[0], 1)
+        } else {
+            continue;
+        };
+
+        if parts[schedule_idx] != "schedule" {
             continue;
         }
 
-        if parts[1] != "schedule" {
-            continue;
-        }
-
-        let mac_str = parts[0];
         let mac = if mac_str.contains(':') {
             parse_mac_text(mac_str)
         } else if mac_str.len() == 12 {
@@ -1915,15 +1923,19 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             Err(anyhow::anyhow!("invalid mac format at line {}", lineno + 1))
         }?;
 
+        let time_start_idx = schedule_idx + 1;
         let (start_hour, start_minute) =
-            TimeSlot::parse_time(parts[2]).with_context(|| format!("invalid start time at line {}", lineno + 1))?;
-        let (end_hour, end_minute) = TimeSlot::parse_time(parts[3]).with_context(|| format!("invalid end time at line {}", lineno + 1))?;
-        let days_of_week = TimeSlot::parse_days(parts[4]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
+            TimeSlot::parse_time(parts[time_start_idx]).with_context(|| format!("invalid start time at line {}", lineno + 1))?;
+        let (end_hour, end_minute) =
+            TimeSlot::parse_time(parts[time_start_idx + 1]).with_context(|| format!("invalid end time at line {}", lineno + 1))?;
+        let days_of_week =
+            TimeSlot::parse_days(parts[time_start_idx + 2]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
 
-        let rx: u64 = parts[5].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
-        let tx: u64 = parts[6].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
+        let rx: u64 = parts[time_start_idx + 3].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
+        let tx: u64 = parts[time_start_idx + 4].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
 
         out.push(ScheduledRateLimit {
+            id,
             mac,
             time_slot: TimeSlot {
                 start_hour,
@@ -1935,6 +1947,11 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
             wan_rx_rate_limit: rx,
             wan_tx_rate_limit: tx,
         });
+    }
+
+    if needs_resave && !out.is_empty() {
+        log::info!("Migrating {} scheduled limits to new format with UUID", out.len());
+        save_all_scheduled_limits(base_dir, &out)?;
     }
 
     Ok(out)
@@ -2098,94 +2115,13 @@ pub fn save_rate_limit_policy(base_dir: &str, policy: &RateLimitPolicy) -> Resul
     Ok(())
 }
 
-/// 将预定速率限制保存到文件
-pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLimit) -> Result<(), anyhow::Error> {
+/// 保存所有预定速率限制到文件
+pub fn save_all_scheduled_limits(base_dir: &str, rules: &[ScheduledRateLimit]) -> Result<(), anyhow::Error> {
     let path = limits_schedule_path(base_dir);
     ensure_parent_dir(&path)?;
 
-    let mut rules: Vec<ScheduledRateLimit> = Vec::new();
-
-    // 加载现有规则
-    if path.exists() {
-        let content = fs::read_to_string(&path)?;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() != 7 || parts[1] != "schedule" {
-                continue;
-            }
-
-            let mac_str = parts[0];
-            let mac = if mac_str.contains(':') {
-                parse_mac_text(mac_str).ok()
-            } else if mac_str.len() == 12 {
-                let mut mac = [0u8; 6];
-                let mut ok = true;
-                for i in 0..6 {
-                    if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
-                        mac[i] = v;
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok {
-                    Some(mac)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            if let Some(mac) = mac {
-                if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[2]) {
-                    if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[3]) {
-                        if let Ok(days_of_week) = TimeSlot::parse_days(parts[4]) {
-                            if let Ok(rx) = parts[5].parse::<u64>() {
-                                if let Ok(tx) = parts[6].parse::<u64>() {
-                                    rules.push(ScheduledRateLimit {
-                                        mac,
-                                        time_slot: TimeSlot {
-                                            start_hour,
-                                            start_minute,
-                                            end_hour,
-                                            end_minute,
-                                            days_of_week,
-                                        },
-                                        wan_rx_rate_limit: rx,
-                                        wan_tx_rate_limit: tx,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 删除具有相同 MAC 和时间段的现有规则（用于更新）
-    let mac_key = mac_to_filename(&scheduled_limit.mac);
-    rules.retain(|r| {
-        let r_mac = mac_to_filename(&r.mac);
-        !(r_mac == mac_key
-            && r.time_slot.start_hour == scheduled_limit.time_slot.start_hour
-            && r.time_slot.start_minute == scheduled_limit.time_slot.start_minute
-            && r.time_slot.end_hour == scheduled_limit.time_slot.end_hour
-            && r.time_slot.end_minute == scheduled_limit.time_slot.end_minute
-            && r.time_slot.days_of_week == scheduled_limit.time_slot.days_of_week)
-    });
-
-    // 添加新的/更新的规则
-    rules.push(scheduled_limit.clone());
-
-    // 按 MAC 和时间段排序以确保输出一致性
-    rules.sort_by(|a, b| {
+    let mut sorted_rules = rules.to_vec();
+    sorted_rules.sort_by(|a, b| {
         let mac_a = mac_to_filename(&a.mac);
         let mac_b = mac_to_filename(&b.mac);
         mac_a.cmp(&mac_b).then_with(|| {
@@ -2196,18 +2132,17 @@ pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLim
         })
     });
 
-    // 写回文件
     let mut buf = String::new();
-    buf.push_str("# mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
+    buf.push_str("# id mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
     buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
-    for rule in rules {
+    for rule in sorted_rules {
         let mac_str = mac_to_filename(&rule.mac);
         let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
         let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
         let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
         buf.push_str(&format!(
-            "{} schedule {} {} {} {} {}\n",
-            mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
+            "{} {} schedule {} {} {} {} {}\n",
+            rule.id, mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
         ));
     }
 
@@ -2215,14 +2150,24 @@ pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLim
     Ok(())
 }
 
-/// 删除预定速率限制规则
-pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlot) -> Result<(), anyhow::Error> {
+/// 将预定速率限制保存到文件（插入或更新）
+pub fn upsert_scheduled_limit(base_dir: &str, scheduled_limit: &ScheduledRateLimit) -> Result<(), anyhow::Error> {
+    let mut rules = load_all_scheduled_limits_raw(base_dir)?;
+
+    rules.retain(|r| r.id != scheduled_limit.id);
+    rules.push(scheduled_limit.clone());
+
+    save_all_scheduled_limits(base_dir, &rules)?;
+    Ok(())
+}
+
+fn load_all_scheduled_limits_raw(base_dir: &str) -> Result<Vec<ScheduledRateLimit>, anyhow::Error> {
     let path = limits_schedule_path(base_dir);
     if !path.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    let mut rules: Vec<ScheduledRateLimit> = Vec::new();
+    let mut out = Vec::new();
     let content = fs::read_to_string(&path)?;
 
     for line in content.lines() {
@@ -2232,63 +2177,47 @@ pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlo
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 7 || parts[1] != "schedule" {
+
+        let (id, mac_str, schedule_idx) = if parts.len() == 8 && is_valid_uuid(parts[0]) {
+            (parts[0].to_string(), parts[1], 2)
+        } else if parts.len() == 7 && parts[1] == "schedule" {
+            (uuid::Uuid::new_v4().to_string(), parts[0], 1)
+        } else {
+            continue;
+        };
+
+        if parts[schedule_idx] != "schedule" {
             continue;
         }
 
-        let mac_str = parts[0];
-        let parsed_mac = if mac_str.contains(':') {
+        let mac = if mac_str.contains(':') {
             parse_mac_text(mac_str).ok()
         } else if mac_str.len() == 12 {
-            let mut parsed = [0u8; 6];
+            let mut mac = [0u8; 6];
             let mut ok = true;
             for i in 0..6 {
                 if let Ok(v) = u8::from_str_radix(&mac_str[i * 2..i * 2 + 2], 16) {
-                    parsed[i] = v;
+                    mac[i] = v;
                 } else {
                     ok = false;
                     break;
                 }
             }
-            if ok {
-                Some(parsed)
-            } else {
-                None
-            }
+            if ok { Some(mac) } else { None }
         } else {
             None
         };
 
-        if let Some(parsed_mac) = parsed_mac {
-            if parsed_mac == *mac {
-                if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[2]) {
-                    if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[3]) {
-                        if let Ok(days_of_week) = TimeSlot::parse_days(parts[4]) {
-                            // 检查是否匹配要删除的时间段
-                            if start_hour == time_slot.start_hour
-                                && start_minute == time_slot.start_minute
-                                && end_hour == time_slot.end_hour
-                                && end_minute == time_slot.end_minute
-                                && days_of_week == time_slot.days_of_week
-                            {
-                                // 跳过此规则（删除它）
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 保留此规则
-        if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[2]) {
-            if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[3]) {
-                if let Ok(days_of_week) = TimeSlot::parse_days(parts[4]) {
-                    if let Ok(rx) = parts[5].parse::<u64>() {
-                        if let Ok(tx) = parts[6].parse::<u64>() {
-                            if let Some(parsed_mac) = parsed_mac {
-                                rules.push(ScheduledRateLimit {
-                                    mac: parsed_mac,
+        if let Some(mac) = mac {
+            let time_start_idx = schedule_idx + 1;
+            if let Ok((start_hour, start_minute)) = TimeSlot::parse_time(parts[time_start_idx]) {
+                if let Ok((end_hour, end_minute)) = TimeSlot::parse_time(parts[time_start_idx + 1]) {
+                    if let Ok(days_of_week) = TimeSlot::parse_days(parts[time_start_idx + 2]) {
+                        if let Ok(rx) = parts[time_start_idx + 3].parse::<u64>() {
+                            if let Ok(tx) = parts[time_start_idx + 4].parse::<u64>() {
+                                out.push(ScheduledRateLimit {
+                                    id,
+                                    mac,
                                     time_slot: TimeSlot {
                                         start_hour,
                                         start_minute,
@@ -2307,23 +2236,22 @@ pub fn delete_scheduled_limit(base_dir: &str, mac: &[u8; 6], time_slot: &TimeSlo
         }
     }
 
-    // 写回文件
-    let mut buf = String::new();
-    buf.push_str("# mac schedule start_hour:start_min end_hour:end_min days rx tx\n");
-    buf.push_str("# days: 7位二进制（周一-周日）或逗号分隔（1-7）\n");
-    for rule in rules {
-        let mac_str = mac_to_filename(&rule.mac);
-        let start_str = TimeSlot::format_time(rule.time_slot.start_hour, rule.time_slot.start_minute);
-        let end_str = TimeSlot::format_time(rule.time_slot.end_hour, rule.time_slot.end_minute);
-        let days_str = TimeSlot::format_days(rule.time_slot.days_of_week);
-        buf.push_str(&format!(
-            "{} schedule {} {} {} {} {}\n",
-            mac_str, start_str, end_str, days_str, rule.wan_rx_rate_limit, rule.wan_tx_rate_limit
-        ));
+    Ok(out)
+}
+
+/// 按 ID 删除预定速率限制规则
+#[allow(dead_code)]
+pub fn delete_scheduled_limit_by_id(base_dir: &str, id: &str) -> Result<bool, anyhow::Error> {
+    let mut rules = load_all_scheduled_limits_raw(base_dir)?;
+    let original_len = rules.len();
+    rules.retain(|r| r.id != id);
+
+    if rules.len() == original_len {
+        return Ok(false);
     }
 
-    fs::write(&path, buf)?;
-    Ok(())
+    save_all_scheduled_limits(base_dir, &rules)?;
+    Ok(true)
 }
 
 /// 根据预定规则计算 MAC 地址的当前有效速率限制
