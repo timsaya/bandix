@@ -106,12 +106,17 @@ fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
 }
 
 // 将 MAC 转换为文件名安全的12位十六进制字符串（不含冒号）
+// fn mac_to_filename(mac: &[u8; 6]) -> String {
+//     let mut s = String::with_capacity(12);
+//     for b in mac {
+//         s.push_str(&format!("{:02x}", b));
+//     }
+//     s
+// }
+
+// 将 MAC 转换为冒号分隔的格式
 fn mac_to_filename(mac: &[u8; 6]) -> String {
-    let mut s = String::with_capacity(12);
-    for b in mac {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+    mac_to_colon_format(mac)
 }
 
 fn mac_to_colon_format(mac: &[u8; 6]) -> String {
