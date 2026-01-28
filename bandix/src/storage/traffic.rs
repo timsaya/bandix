@@ -1938,8 +1938,15 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
         let time_start_idx = schedule_idx + 1;
         let (start_hour, start_minute) =
             TimeSlot::parse_time(parts[time_start_idx]).with_context(|| format!("invalid start time at line {}", lineno + 1))?;
-        let (end_hour, end_minute) =
-            TimeSlot::parse_time(parts[time_start_idx + 1]).with_context(|| format!("invalid end time at line {}", lineno + 1))?;
+        
+        let end_time_str = parts[time_start_idx + 1];
+        let (end_hour, end_minute) = if end_time_str == "24:00" {
+            needs_resave = true;
+            (23, 59)
+        } else {
+            TimeSlot::parse_time(end_time_str).with_context(|| format!("invalid end time at line {}", lineno + 1))?
+        };
+        
         let days_of_week =
             TimeSlot::parse_days(parts[time_start_idx + 2]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
 
@@ -1966,7 +1973,7 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
     }
 
     if needs_resave && !out.is_empty() {
-        log::info!("Migrating {} scheduled limits to new format with UUID", out.len());
+        log::info!("Migrating {} scheduled limits (added UUID or fixed 24:00 end time)", out.len());
         save_all_scheduled_limits(base_dir, &out)?;
     }
 
