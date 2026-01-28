@@ -106,17 +106,12 @@ fn parse_mac_text(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
 }
 
 // 将 MAC 转换为文件名安全的12位十六进制字符串（不含冒号）
-// fn mac_to_filename(mac: &[u8; 6]) -> String {
-//     let mut s = String::with_capacity(12);
-//     for b in mac {
-//         s.push_str(&format!("{:02x}", b));
-//     }
-//     s
-// }
-
-// 将 MAC 转换为冒号分隔的格式
 fn mac_to_filename(mac: &[u8; 6]) -> String {
-    mac_to_colon_format(mac)
+    let mut s = String::with_capacity(12);
+    for b in mac {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 fn mac_to_colon_format(mac: &[u8; 6]) -> String {
@@ -1639,7 +1634,12 @@ fn append_slot_v5(f: &mut File, slot_idx: u64, data: &[u64; SLOT_U64S_LONG_TERM]
 
 fn write_ring_file_v5(path: &Path, capacity: u32, slots: &BTreeMap<u64, [u64; SLOT_U64S_LONG_TERM]>) -> Result<File, anyhow::Error> {
     ensure_parent_dir(path)?;
-    let mut f = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
 
     let cap = if capacity == 0 { DEFAULT_RING_CAPACITY } else { capacity };
     write_header_v5(&mut f, cap, slots.len() as u32)?;
@@ -1758,7 +1758,7 @@ pub fn upsert_hostname_binding(base_dir: &str, mac: &[u8; 6], hostname: &str) ->
             map.insert(parts[0].to_string(), parts[1].to_string());
         }
     }
-    let key = mac_to_filename(mac);
+    let key = mac_to_colon_format(mac);
 
     if hostname.is_empty() {
         // 如果主机名为空则删除绑定
@@ -1943,8 +1943,12 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
         let days_of_week =
             TimeSlot::parse_days(parts[time_start_idx + 2]).with_context(|| format!("invalid days format at line {}", lineno + 1))?;
 
-        let rx: u64 = parts[time_start_idx + 3].parse().with_context(|| format!("invalid rx at line {}", lineno + 1))?;
-        let tx: u64 = parts[time_start_idx + 4].parse().with_context(|| format!("invalid tx at line {}", lineno + 1))?;
+        let rx: u64 = parts[time_start_idx + 3]
+            .parse()
+            .with_context(|| format!("invalid rx at line {}", lineno + 1))?;
+        let tx: u64 = parts[time_start_idx + 4]
+            .parse()
+            .with_context(|| format!("invalid tx at line {}", lineno + 1))?;
 
         out.push(ScheduledRateLimit {
             id,
@@ -2215,7 +2219,11 @@ fn load_all_scheduled_limits_raw(base_dir: &str) -> Result<Vec<ScheduledRateLimi
                     break;
                 }
             }
-            if ok { Some(mac) } else { None }
+            if ok {
+                Some(mac)
+            } else {
+                None
+            }
         } else {
             None
         };
