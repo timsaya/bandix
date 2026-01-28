@@ -238,7 +238,7 @@ impl TrafficMonitor {
 
         // 如果发现新设备，立即刷新设备列表以获取 IP 地址
         if has_new_device {
-            log::info!("Detected new device(s) with traffic, refreshing device list...");
+            log::debug!("Detected new device(s) with traffic, refreshing device list...");
             if let Err(e) = ctx.device_manager.refresh_devices().await {
                 log::warn!("Failed to refresh devices for new device detection: {}", e);
             }
