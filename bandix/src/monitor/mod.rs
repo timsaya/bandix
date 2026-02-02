@@ -28,13 +28,14 @@ pub struct TrafficModuleContext {
     pub ingress_ebpf: Option<Arc<aya::Ebpf>>,
     pub egress_ebpf: Option<Arc<aya::Ebpf>>,
     pub last_ebpf_traffic: Arc<Mutex<StdHashMap<[u8; 6], [u64; 4]>>>, // 上次从 eBPF 读取的累积值
+    pub timezone: chrono_tz::Tz,                                       // 系统时区
 }
 
 impl TrafficModuleContext {
     /// 创建流量模块上下文
     /// ingress_ebpf 和 egress_ebpf 都是对同一个 eBPF 对象的 Arc 引用
     /// 这确保两个程序共享相同的映射（MAC_TRAFFIC、MAC_RATE_LIMITS 等）
-    pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>, device_manager: Arc<DeviceManager>) -> Self {
+    pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>, device_manager: Arc<DeviceManager>, timezone: chrono_tz::Tz) -> Self {
         let realtime_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
             options.traffic_retention_seconds(),
@@ -63,6 +64,7 @@ impl TrafficModuleContext {
             ingress_ebpf: Some(ingress_ebpf),
             egress_ebpf: Some(egress_ebpf),
             last_ebpf_traffic: Arc::new(Mutex::new(StdHashMap::new())),
+            timezone,
         }
     }
 }
@@ -141,6 +143,7 @@ impl Clone for ModuleContext {
                 ingress_ebpf: ctx.ingress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 egress_ebpf: ctx.egress_ebpf.as_ref().map(|e| Arc::clone(e)),
                 last_ebpf_traffic: Arc::clone(&ctx.last_ebpf_traffic),
+                timezone: ctx.timezone,
             }),
             ModuleContext::Dns(ctx) => ModuleContext::Dns(DnsModuleContext {
                 options: ctx.options.clone(),

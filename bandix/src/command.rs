@@ -204,7 +204,9 @@ impl Options {
 fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
-        return Err(anyhow::anyhow!("Invalid CIDR format, expected IP/prefix (e.g., 192.168.2.0/24)"));
+        return Err(anyhow::anyhow!(
+            "Invalid CIDR format, expected IP/prefix (e.g., 192.168.2.0/24)"
+        ));
     }
 
     // 解析 IP 地址
@@ -215,12 +217,14 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
 
     let mut ip = [0u8; 4];
     for (i, part) in ip_parts.iter().enumerate() {
-        ip[i] = part.parse::<u8>()
+        ip[i] = part
+            .parse::<u8>()
             .map_err(|_| anyhow::anyhow!("Invalid IP address octet: {}", part))?;
     }
 
     // 解析前缀长度
-    let prefix_len = parts[1].parse::<u8>()
+    let prefix_len = parts[1]
+        .parse::<u8>()
         .map_err(|_| anyhow::anyhow!("Invalid prefix length: {}", parts[1]))?;
 
     if prefix_len > 32 {
@@ -228,11 +232,7 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
     }
 
     // 计算子网掩码
-    let mask_bits = if prefix_len == 0 {
-        0u32
-    } else {
-        !0u32 << (32 - prefix_len)
-    };
+    let mask_bits = if prefix_len == 0 { 0u32 } else { !0u32 << (32 - prefix_len) };
 
     let subnet_mask = [
         ((mask_bits >> 24) & 0xFF) as u8,
@@ -283,9 +283,7 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
                     continue;
                 }
                 // 尝试解析以验证格式
-                parse_cidr(subnet_cidr).map_err(|e| {
-                    anyhow::anyhow!("Invalid subnet CIDR '{}': {}", subnet_cidr, e)
-                })?;
+                parse_cidr(subnet_cidr).map_err(|e| anyhow::anyhow!("Invalid subnet CIDR '{}': {}", subnet_cidr, e))?;
             }
         }
     }
@@ -336,6 +334,7 @@ async fn create_module_contexts(
     subnet_info: &SubnetInfo,
     shared_hostname_bindings: &Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
     device_manager: Arc<DeviceManager>,
+    timezone: chrono_tz::Tz,
 ) -> Result<Vec<ModuleContext>, anyhow::Error> {
     let mut module_contexts = Vec::new();
 
@@ -367,8 +366,14 @@ async fn create_module_contexts(
             log::info!(
                 "Configured IPv4 subnet {}: {}/{} (interface subnet)",
                 subnet_count,
-                format!("{}.{}.{}.{}", subnet_info.interface_ip[0], subnet_info.interface_ip[1], subnet_info.interface_ip[2], subnet_info.interface_ip[3]),
-                format!("{}.{}.{}.{}", subnet_info.subnet_mask[0], subnet_info.subnet_mask[1], subnet_info.subnet_mask[2], subnet_info.subnet_mask[3])
+                format!(
+                    "{}.{}.{}.{}",
+                    subnet_info.interface_ip[0], subnet_info.interface_ip[1], subnet_info.interface_ip[2], subnet_info.interface_ip[3]
+                ),
+                format!(
+                    "{}.{}.{}.{}",
+                    subnet_info.subnet_mask[0], subnet_info.subnet_mask[1], subnet_info.subnet_mask[2], subnet_info.subnet_mask[3]
+                )
             );
             subnet_count += 1;
 
@@ -397,7 +402,10 @@ async fn create_module_contexts(
                             log::info!(
                                 "Configured IPv4 subnet {}: {}/{} (additional)",
                                 subnet_count,
-                                format!("{}.{}.{}.{}", network_addr[0], network_addr[1], network_addr[2], network_addr[3]),
+                                format!(
+                                    "{}.{}.{}.{}",
+                                    network_addr[0], network_addr[1], network_addr[2], network_addr[3]
+                                ),
                                 format!("{}.{}.{}.{}", subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3])
                             );
                             subnet_count += 1;
@@ -484,7 +492,7 @@ async fn create_module_contexts(
             let egress = Arc::clone(&shared_ebpf_arc);
 
             // 创建流量模块上下文（使用共享的 device_manager）
-            let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress, Arc::clone(&device_manager));
+            let mut traffic_ctx = TrafficModuleContext::new(options.clone(), ingress, egress, Arc::clone(&device_manager), timezone);
             traffic_ctx.hostname_bindings = Arc::clone(shared_hostname_bindings);
 
             module_contexts.push(ModuleContext::Traffic(traffic_ctx));
@@ -581,6 +589,7 @@ fn start_hostname_refresh_task(
 
 // 运行服务
 async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
+    let timezone = crate::system::detect_system_timezone();
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let shutdown_notify_clone = shutdown_notify.clone();
     let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -618,7 +627,14 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         Arc::clone(&device_manager).start_background_task(Duration::from_secs(30), shutdown_notify.clone(), event_url);
 
     // 创建模块上下文：加载 eBPF 程序并配置内核映射
-    let module_contexts = create_module_contexts(options, &subnet_info, &shared_hostname_bindings, Arc::clone(&device_manager)).await?;
+    let module_contexts = create_module_contexts(
+        options,
+        &subnet_info,
+        &shared_hostname_bindings,
+        Arc::clone(&device_manager),
+        timezone,
+    )
+    .await?;
 
     // 初始化模块
     let mut monitor_manager = MonitorManager::from_contexts(&module_contexts);

@@ -308,7 +308,7 @@ impl TrafficMonitor {
         // 更新设备流量统计
         if let Err(e) = ctx.device_manager.update_device_traffic_stats(mac, |stats| {
             // 从预定规则计算当前有效速率限制
-            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(scheduled_limits, mac) {
+            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(scheduled_limits, mac, &ctx.timezone) {
                 stats.wan_rx_rate_limit = limits[0];
                 stats.wan_tx_rate_limit = limits[1];
             }
@@ -361,7 +361,7 @@ impl TrafficMonitor {
 
         if let Err(e) = ctx.device_manager.update_device_traffic_stats(mac, |stats| {
             // 从预定规则计算当前有效速率限制
-            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(scheduled_limits, mac) {
+            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(scheduled_limits, mac, &ctx.timezone) {
                 stats.wan_rx_rate_limit = limits[0];
                 stats.wan_tx_rate_limit = limits[1];
             }
@@ -428,7 +428,7 @@ impl TrafficMonitor {
         let mut desired_limits: std::collections::HashMap<[u8; 6], [u64; 2]> = std::collections::HashMap::new();
 
         for mac in device_macs {
-            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac) {
+            if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac, &ctx.timezone) {
                 desired_limits.insert(mac, limits);
                 continue;
             }

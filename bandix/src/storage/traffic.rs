@@ -1,5 +1,6 @@
 use anyhow::Context;
-use chrono::{DateTime, Datelike, Local, Timelike};
+use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -144,7 +145,7 @@ impl TimeSlot {
     }
 
     /// 检查当前时间是否匹配此时间段（闭区间 [start, end]）
-    pub fn matches(&self, now: &DateTime<Local>) -> bool {
+    pub fn matches<Tz: TimeZone>(&self, now: &DateTime<Tz>) -> bool {
         let current_hour = now.hour() as u8;
         let current_minute = now.minute() as u8;
         let current_day = (now.weekday().num_days_from_monday()) as u8;
@@ -1973,7 +1974,7 @@ pub fn load_all_scheduled_limits(base_dir: &str) -> Result<Vec<ScheduledRateLimi
     }
 
     if needs_resave && !out.is_empty() {
-        log::info!("Migrating {} scheduled limits (added UUID or fixed 24:00 end time)", out.len());
+        log::info!("Migrating {} scheduled limits to new format with UUID", out.len());
         save_all_scheduled_limits(base_dir, &out)?;
     }
 
@@ -2282,13 +2283,14 @@ pub fn delete_scheduled_limit_by_id(base_dir: &str, id: &str) -> Result<bool, an
 }
 
 /// 根据预定规则计算 MAC 地址的当前有效速率限制
-pub fn calculate_current_rate_limit(scheduled_limits: &[ScheduledRateLimit], mac: &[u8; 6]) -> Option<[u64; 2]> {
-    let now = Local::now();
+pub fn calculate_current_rate_limit(scheduled_limits: &[ScheduledRateLimit], mac: &[u8; 6], tz: &Tz) -> Option<[u64; 2]> {
+    let utc_now = Utc::now();
+    let local_now = utc_now.with_timezone(tz);
 
     // 查找此 MAC 的所有匹配规则
     let matching_rules: Vec<&ScheduledRateLimit> = scheduled_limits
         .iter()
-        .filter(|rule| rule.mac == *mac && rule.time_slot.matches(&now))
+        .filter(|rule| rule.mac == *mac && rule.time_slot.matches(&local_now))
         .collect();
 
     if matching_rules.is_empty() {

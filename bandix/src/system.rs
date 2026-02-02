@@ -1,6 +1,8 @@
 use crate::command::Options;
 use crate::utils::format_utils::format_ip;
 use crate::utils::network_utils::get_interface_info;
+use chrono::Utc;
+use chrono_tz::Tz;
 use log::{info, warn};
 use std::env;
 use std::fs;
@@ -76,6 +78,48 @@ fn cpu_model_and_cores() -> Option<(String, usize)> {
         }
     }
     Some(("Unknown CPU".to_string(), cores))
+}
+
+pub fn detect_system_timezone() -> Tz {
+    match iana_time_zone::get_timezone() {
+        Ok(tz_str) => {
+            match tz_str.parse::<Tz>() {
+                Ok(tz) => {
+                    info!("Detected system timezone: {} ({})", tz_str, format_timezone_offset(&tz));
+                    tz
+                }
+                Err(e) => {
+                    warn!("Failed to parse timezone '{}': {}, using UTC", tz_str, e);
+                    chrono_tz::UTC
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to detect system timezone: {}, using UTC", e);
+            chrono_tz::UTC
+        }
+    }
+}
+
+fn format_timezone_offset(tz: &Tz) -> String {
+    let utc_now = Utc::now();
+    let local_time = utc_now.with_timezone(tz);
+    
+    let offset_str = local_time.format("%z").to_string();
+    
+    if offset_str.len() >= 5 {
+        let sign = &offset_str[0..1];
+        let hours = &offset_str[1..3];
+        let minutes = &offset_str[3..5];
+        
+        if minutes == "00" {
+            format!("UTC{}{}", sign, hours)
+        } else {
+            format!("UTC{}{}:{}", sign, hours, minutes)
+        }
+    } else {
+        "UTC+0".to_string()
+    }
 }
 
 fn current_user_ids() -> (u32, u32) {
