@@ -35,6 +35,13 @@ pub struct CommonArgs {
         help = "Log level: trace, debug, info, warn, error (default: info). Web and DNS logs are always at DEBUG level."
     )]
     pub log_level: String,
+
+    #[clap(
+        long,
+        default_value = "0",
+        help = "TC filter priority (lower number = higher priority, 0 = kernel auto-assign). Use this to control execution order when running alongside other eBPF TC programs."
+    )]
+    pub tc_priority: u16,
 }
 
 /// 流量模块参数
@@ -150,6 +157,11 @@ impl Options {
     /// 从通用参数获取日志级别
     pub fn log_level(&self) -> &str {
         &self.common.log_level
+    }
+
+    /// 从通用参数获取 TC 优先级
+    pub fn tc_priority(&self) -> u16 {
+        self.common.tc_priority
     }
 
     /// 从流量参数获取启用流量
@@ -295,7 +307,7 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
 
 // 初始化共享的 eBPF 程序（被流量和 DNS 模块共同使用）
 async fn init_shared_ebpf(options: &Options) -> Result<aya::Ebpf, anyhow::Error> {
-    load_shared(options.iface().to_string()).await
+    load_shared(options.iface().to_string(), options.tc_priority()).await
 }
 
 // 子网信息结构体（跨模块共享）

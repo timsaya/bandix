@@ -49,6 +49,7 @@ sudo ./bandix --iface <网络接口名称> [选项]
 - **--port**: Web 服务器监听端口。默认值：`8686`
 - **--data-dir**: 数据目录（环形文件和限速配置将存储在此处）。默认值：`bandix-data`
 - **--log-level**: 日志级别：trace, debug, info, warn, error（默认：info）。Web 和 DNS 日志始终为 DEBUG 级别。
+- **--tc-priority**: TC filter 优先级（数字越小优先级越高，0 = 内核自动分配）。默认值：0。用于控制与其他 eBPF TC 程序共存时的执行顺序。
 - **--web-log**: 启用每个请求的 Web 日志记录。默认值：`false`
 - **--enable-traffic**: 启用流量监控模块。默认值：`false`
 - **--traffic-retention-seconds**: 实时指标的保留时长（秒），即环形文件容量（每秒一个槽位）。默认值：`600`
@@ -75,6 +76,12 @@ sudo ./bandix --iface br-lan --enable-traffic --enable-connection --enable-dns
 
 # 自定义端口和数据目录
 sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection --enable-dns
+
+# 以较高优先级运行 bandix（在其他 TC 程序之前执行）
+sudo ./bandix --iface br-lan --tc-priority 1 --enable-traffic
+
+# 以较低优先级运行 bandix（在其他 TC 程序之后执行）
+sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 ```
 
 ## API 接口
