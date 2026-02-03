@@ -49,6 +49,7 @@ sudo ./bandix --iface <network_interface_name> [options]
 - **--port**: Web server listening port. Default: `8686`
 - **--data-dir**: Data directory (ring files and rate limit configurations will be stored here). Default: `bandix-data`
 - **--log-level**: Log level: trace, debug, info, warn, error (default: info). Web and DNS logs are always at DEBUG level.
+- **--tc-priority**: TC filter priority (lower number = higher priority, 0 = kernel auto-assign). Default: 0. Use this to control execution order when running alongside other eBPF TC programs.
 - **--web-log**: Enable per-request web logging. Default: `false`
 - **--enable-traffic**: Enable traffic monitoring module. Default: `false`
 - **--traffic-retention-seconds**: Retention duration (seconds) for real-time metrics, i.e., ring file capacity (one slot per second). Default: `600`
@@ -75,6 +76,12 @@ sudo ./bandix --iface br-lan --enable-traffic --enable-connection --enable-dns
 
 # Custom port and data directory
 sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection --enable-dns
+
+# Run bandix with higher priority (execute before other TC programs)
+sudo ./bandix --iface br-lan --tc-priority 1 --enable-traffic
+
+# Run bandix with lower priority (execute after other TC programs)
+sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 ```
 
 ## API Endpoints
