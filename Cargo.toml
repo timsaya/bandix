@@ -7,18 +7,17 @@ default-members = ["bandix", "bandix-common"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Fixed to latest commit hash (latest 2024)
-aya = { git = "https://github.com/aya-rs/aya", rev = "a01b1d8b76d1ea4a0229edf595ebe1473a33636b", default-features = false }
-aya-build = { git = "https://github.com/aya-rs/aya", rev = "a01b1d8b76d1ea4a0229edf595ebe1473a33636b", default-features = false }
-aya-ebpf = { git = "https://github.com/aya-rs/aya", rev = "a01b1d8b76d1ea4a0229edf595ebe1473a33636b", default-features = false }
-aya-log = { git = "https://github.com/aya-rs/aya", rev = "a01b1d8b76d1ea4a0229edf595ebe1473a33636b", default-features = false }
-aya-log-ebpf = { git = "https://github.com/aya-rs/aya", rev = "a01b1d8b76d1ea4a0229edf595ebe1473a33636b", default-features = false }
+aya = { git = "https://github.com/aya-rs/aya", rev = "519abffef7064ae8a79502e49b8187a363af3ad5", default-features = false }
+aya-build = { git = "https://github.com/aya-rs/aya", rev = "519abffef7064ae8a79502e49b8187a363af3ad5", default-features = false }
+aya-ebpf = { git = "https://github.com/aya-rs/aya", rev = "519abffef7064ae8a79502e49b8187a363af3ad5", default-features = false }
+aya-log = { git = "https://github.com/aya-rs/aya", rev = "519abffef7064ae8a79502e49b8187a363af3ad5", default-features = false }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya", rev = "519abffef7064ae8a79502e49b8187a363af3ad5", default-features = false }
+
+
 network-types = { version = "0.0.8", default-features = false }
 ctrlc = { version = "3.4.7" }
 anyhow = { version = "1", default-features = false }
-# `std` feature is currently required to build `clap`.
-#
-# See https://github.com/clap-rs/clap/blob/61f5ee5/clap_builder/src/lib.rs#L15.
+cargo_metadata = { version = "0.23.0", default-features = false }
 clap = { version = "4.5.40", features = ["derive"] }
 env_logger = { version = "0.11.5", default-features = false }
 libc = { version = "0.2.159", default-features = false }

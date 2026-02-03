@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context as _};
-use aya_build::{cargo_metadata, Toolchain};
+use aya_build::Toolchain;
 
 fn main() -> anyhow::Result<()> {
     let cargo_metadata::Metadata { packages, .. } = cargo_metadata::MetadataCommand::new()
@@ -10,5 +10,14 @@ fn main() -> anyhow::Result<()> {
         .into_iter()
         .find(|cargo_metadata::Package { name, .. }| name.as_str() == "bandix-ebpf")
         .ok_or_else(|| anyhow!("bandix-ebpf package not found"))?;
+    let cargo_metadata::Package { name, manifest_path, .. } = ebpf_package;
+    let ebpf_package = aya_build::Package {
+        name: name.as_str(),
+        root_dir: manifest_path
+            .parent()
+            .ok_or_else(|| anyhow!("no parent for {manifest_path}"))?
+            .as_str(),
+        ..Default::default()
+    };
     aya_build::build_ebpf([ebpf_package], Toolchain::default())
 }
