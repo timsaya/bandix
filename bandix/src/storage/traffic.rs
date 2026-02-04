@@ -274,25 +274,25 @@ impl RealtimeRing {
             if ts == 0 {
                 continue;
             }
-            if ts < start_ms || ts > end_ms {
-                continue;
+            
+            // 使用左闭右开区间 [start_ms, end_ms)
+            if ts >= start_ms && ts < end_ms {
+                rows.push(MetricsRow {
+                    ts_ms: slot[0],
+                    total_rx_rate: slot[1],
+                    total_tx_rate: slot[2],
+                    lan_rx_rate: slot[3],
+                    lan_tx_rate: slot[4],
+                    wan_rx_rate: slot[5],
+                    wan_tx_rate: slot[6],
+                    total_rx_bytes: slot[7],
+                    total_tx_bytes: slot[8],
+                    lan_rx_bytes_inc: slot[9],
+                    lan_tx_bytes_inc: slot[10],
+                    wan_rx_bytes_inc: slot[11],
+                    wan_tx_bytes_inc: slot[12],
+                });
             }
-
-            rows.push(MetricsRow {
-                ts_ms: slot[0],
-                total_rx_rate: slot[1],
-                total_tx_rate: slot[2],
-                lan_rx_rate: slot[3],
-                lan_tx_rate: slot[4],
-                wan_rx_rate: slot[5],
-                wan_tx_rate: slot[6],
-                total_rx_bytes: slot[7],
-                total_tx_bytes: slot[8],
-                lan_rx_bytes_inc: slot[9],
-                lan_tx_bytes_inc: slot[10],
-                wan_rx_bytes_inc: slot[11],
-                wan_tx_bytes_inc: slot[12],
-            });
         }
 
         rows.sort_by_key(|r| r.ts_ms);
@@ -378,46 +378,47 @@ impl LongTermRing {
             if end_ts == 0 {
                 continue;
             }
-            if end_ts < start_ms || start_ts > end_ms {
-                continue;
+            
+            // 只判断时间段的开始时间是否在查询范围内 [start_ms, end_ms)
+            // 这样每个时间段归属到它开始的时间点，不论 end_ts 是否跨天
+            if start_ts >= start_ms && start_ts < end_ms {
+                rows.push(MetricsRowWithStats {
+                    start_ts_ms: slot[0],
+                    end_ts_ms: slot[1],
+                    wan_rx_rate_avg: slot[2],
+                    wan_rx_rate_max: slot[3],
+                    wan_rx_rate_min: slot[4],
+                    wan_rx_rate_p90: slot[5],
+                    wan_rx_rate_p95: slot[6],
+                    wan_rx_rate_p99: slot[7],
+                    wan_tx_rate_avg: slot[8],
+                    wan_tx_rate_max: slot[9],
+                    wan_tx_rate_min: slot[10],
+                    wan_tx_rate_p90: slot[11],
+                    wan_tx_rate_p95: slot[12],
+                    wan_tx_rate_p99: slot[13],
+                    wan_rx_bytes_inc: slot[14],
+                    wan_tx_bytes_inc: slot[15],
+                    lan_rx_rate_avg: slot[16],
+                    lan_rx_rate_max: slot[17],
+                    lan_rx_rate_min: slot[18],
+                    lan_rx_rate_p90: slot[19],
+                    lan_rx_rate_p95: slot[20],
+                    lan_rx_rate_p99: slot[21],
+                    lan_tx_rate_avg: slot[22],
+                    lan_tx_rate_max: slot[23],
+                    lan_tx_rate_min: slot[24],
+                    lan_tx_rate_p90: slot[25],
+                    lan_tx_rate_p95: slot[26],
+                    lan_tx_rate_p99: slot[27],
+                    lan_rx_bytes_inc: slot[28],
+                    lan_tx_bytes_inc: slot[29],
+                    last_online_ts: slot[30],
+                });
             }
-
-            rows.push(MetricsRowWithStats {
-                start_ts_ms: slot[0],
-                end_ts_ms: slot[1],
-                wan_rx_rate_avg: slot[2],
-                wan_rx_rate_max: slot[3],
-                wan_rx_rate_min: slot[4],
-                wan_rx_rate_p90: slot[5],
-                wan_rx_rate_p95: slot[6],
-                wan_rx_rate_p99: slot[7],
-                wan_tx_rate_avg: slot[8],
-                wan_tx_rate_max: slot[9],
-                wan_tx_rate_min: slot[10],
-                wan_tx_rate_p90: slot[11],
-                wan_tx_rate_p95: slot[12],
-                wan_tx_rate_p99: slot[13],
-                wan_rx_bytes_inc: slot[14],
-                wan_tx_bytes_inc: slot[15],
-                lan_rx_rate_avg: slot[16],
-                lan_rx_rate_max: slot[17],
-                lan_rx_rate_min: slot[18],
-                lan_rx_rate_p90: slot[19],
-                lan_rx_rate_p95: slot[20],
-                lan_rx_rate_p99: slot[21],
-                lan_tx_rate_avg: slot[22],
-                lan_tx_rate_max: slot[23],
-                lan_tx_rate_min: slot[24],
-                lan_tx_rate_p90: slot[25],
-                lan_tx_rate_p95: slot[26],
-                lan_tx_rate_p99: slot[27],
-                lan_rx_bytes_inc: slot[28],
-                lan_tx_bytes_inc: slot[29],
-                last_online_ts: slot[30],
-            });
         }
 
-        rows.sort_by_key(|r| r.end_ts_ms);
+        rows.sort_by_key(|r| r.start_ts_ms);
         rows
     }
 
@@ -551,15 +552,15 @@ impl RealtimeRingManager {
                 if ts == 0 {
                     continue;
                 }
-                if ts < start_ms || ts > end_ms {
-                    continue;
-                }
-
-                let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S_REALTIME]);
-                agg[0] = ts; // 保留时间戳
-                             // 仅聚合指标字段（排除索引 13 处的 last_online_ts）
-                for j in 1..13 {
-                    agg[j] = agg[j].saturating_add(slot[j]);
+                
+                // 使用左闭右开区间 [start_ms, end_ms)
+                if ts >= start_ms && ts < end_ms {
+                    let agg = ts_to_agg.entry(ts).or_insert([0u64; SLOT_U64S_REALTIME]);
+                    agg[0] = ts; // 保留时间戳
+                                 // 仅聚合指标字段（排除索引 13 处的 last_online_ts）
+                    for j in 1..13 {
+                        agg[j] = agg[j].saturating_add(slot[j]);
+                    }
                 }
             }
         }
@@ -1339,7 +1340,7 @@ impl LongTermRingManager {
         let mut ts_to_stats: BTreeMap<u64, MetricsRowWithStats> = BTreeMap::new();
 
         for row in all_rows {
-            let entry: &mut MetricsRowWithStats = ts_to_stats.entry(row.end_ts_ms).or_insert(MetricsRowWithStats {
+            let entry: &mut MetricsRowWithStats = ts_to_stats.entry(row.start_ts_ms).or_insert_with(|| MetricsRowWithStats {
                 start_ts_ms: row.start_ts_ms,
                 end_ts_ms: row.end_ts_ms,
                 wan_rx_rate_avg: 0,
