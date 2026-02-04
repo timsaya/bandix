@@ -1,5 +1,26 @@
 use super::remove_rlimit_memlock;
 use aya::programs::tc::{self, NlOptions, SchedClassifier, TcAttachOptions, TcAttachType};
+use std::time::Duration;
+
+const MAX_LOAD_RETRIES: u32 = 3;
+const RETRY_DELAY_SECS: u64 = 3;
+
+fn load_program_with_retry(program: &mut SchedClassifier, name: &str) -> anyhow::Result<()> {
+    let mut last_err = None;
+    for attempt in 1..=MAX_LOAD_RETRIES {
+        match program.load() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("Failed to load {} (attempt {}/{}): {}", name, attempt, MAX_LOAD_RETRIES, e);
+                last_err = Some(e);
+                if attempt < MAX_LOAD_RETRIES {
+                    std::thread::sleep(Duration::from_secs(RETRY_DELAY_SECS));
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!("Failed to load {} after {} retries: {}", name, MAX_LOAD_RETRIES, last_err.unwrap()))
+}
 
 /// 加载共享的 eBPF 程序（入口和出口）
 /// DNS 和流量模块共享相同的入口和出口钩子
@@ -17,27 +38,21 @@ pub async fn load_shared(iface: String, tc_priority: u16) -> anyhow::Result<aya:
         if tc_priority == 0 { "auto".to_string() } else { tc_priority.to_string() }
     );
 
-    // 一次性加载 eBPF 对象 - 入口和出口程序都在同一个对象中
-    // 这确保它们共享相同的映射（DNS_DATA、MAC_TRAFFIC、MAC_RATE_LIMITS 等）
     let mut ebpf = aya::EbpfLoader::new()
         .load(aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/bandix")))
         .map_err(|e| anyhow::anyhow!("Failed to load eBPF program: {}", e))?;
 
-    // 添加 clsact qdisc（如果尚未存在，错误是无害的）
     if let Err(e) = tc::qdisc_add_clsact(&iface) {
         log::debug!("Failed to add clsact qdisc (may already exist): {}", e);
     }
 
-    // 加载 shared ingress program
     let ingress_program: &mut SchedClassifier = ebpf
         .program_mut("shared_ingress")
         .ok_or_else(|| anyhow::anyhow!("Shared ingress program not found in eBPF object"))?
         .try_into()
         .map_err(|e| anyhow::anyhow!("Failed to convert to SchedClassifier: {:?}", e))?;
 
-    ingress_program
-        .load()
-        .map_err(|e| anyhow::anyhow!("Failed to load shared ingress program: {}", e))?;
+    load_program_with_retry(ingress_program, "shared_ingress")?;
 
     // 根据 tc_priority 选择 attach 方式
     if tc_priority > 0 {
@@ -64,9 +79,7 @@ pub async fn load_shared(iface: String, tc_priority: u16) -> anyhow::Result<aya:
         .try_into()
         .map_err(|e| anyhow::anyhow!("Failed to convert to SchedClassifier: {:?}", e))?;
 
-    egress_program
-        .load()
-        .map_err(|e| anyhow::anyhow!("Failed to load shared egress program: {}", e))?;
+    load_program_with_retry(egress_program, "shared_egress")?;
 
     // 根据 tc_priority 选择 attach 方式
     if tc_priority > 0 {
