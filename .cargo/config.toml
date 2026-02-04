@@ -1,7 +1,7 @@
 # x86_64 架构配置
 
 [target.x86_64-unknown-linux-musl]
-linker = "musl-gcc"
+linker = "/opt/musl-cross/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc"
 
 
 # ARM 架构配置
