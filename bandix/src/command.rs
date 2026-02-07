@@ -216,7 +216,9 @@ impl Options {
 fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
     let parts: Vec<&str> = cidr.split('/').collect();
     if parts.len() != 2 {
-        return Err(anyhow::anyhow!("Invalid CIDR format, expected IP/prefix (e.g., 192.168.2.0/24)"));
+        return Err(anyhow::anyhow!(
+            "Invalid CIDR format, expected IP/prefix (e.g., 192.168.2.0/24)"
+        ));
     }
 
     // 解析 IP 地址
@@ -227,12 +229,14 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
 
     let mut ip = [0u8; 4];
     for (i, part) in ip_parts.iter().enumerate() {
-        ip[i] = part.parse::<u8>()
+        ip[i] = part
+            .parse::<u8>()
             .map_err(|_| anyhow::anyhow!("Invalid IP address octet: {}", part))?;
     }
 
     // 解析前缀长度
-    let prefix_len = parts[1].parse::<u8>()
+    let prefix_len = parts[1]
+        .parse::<u8>()
         .map_err(|_| anyhow::anyhow!("Invalid prefix length: {}", parts[1]))?;
 
     if prefix_len > 32 {
@@ -240,11 +244,7 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
     }
 
     // 计算子网掩码
-    let mask_bits = if prefix_len == 0 {
-        0u32
-    } else {
-        !0u32 << (32 - prefix_len)
-    };
+    let mask_bits = if prefix_len == 0 { 0u32 } else { !0u32 << (32 - prefix_len) };
 
     let subnet_mask = [
         ((mask_bits >> 24) & 0xFF) as u8,
@@ -295,9 +295,7 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
                     continue;
                 }
                 // 尝试解析以验证格式
-                parse_cidr(subnet_cidr).map_err(|e| {
-                    anyhow::anyhow!("Invalid subnet CIDR '{}': {}", subnet_cidr, e)
-                })?;
+                parse_cidr(subnet_cidr).map_err(|e| anyhow::anyhow!("Invalid subnet CIDR '{}': {}", subnet_cidr, e))?;
             }
         }
     }
@@ -379,8 +377,14 @@ async fn create_module_contexts(
             log::info!(
                 "Configured IPv4 subnet {}: {}/{} (interface subnet)",
                 subnet_count,
-                format!("{}.{}.{}.{}", subnet_info.interface_ip[0], subnet_info.interface_ip[1], subnet_info.interface_ip[2], subnet_info.interface_ip[3]),
-                format!("{}.{}.{}.{}", subnet_info.subnet_mask[0], subnet_info.subnet_mask[1], subnet_info.subnet_mask[2], subnet_info.subnet_mask[3])
+                format!(
+                    "{}.{}.{}.{}",
+                    subnet_info.interface_ip[0], subnet_info.interface_ip[1], subnet_info.interface_ip[2], subnet_info.interface_ip[3]
+                ),
+                format!(
+                    "{}.{}.{}.{}",
+                    subnet_info.subnet_mask[0], subnet_info.subnet_mask[1], subnet_info.subnet_mask[2], subnet_info.subnet_mask[3]
+                )
             );
             subnet_count += 1;
 
@@ -409,7 +413,10 @@ async fn create_module_contexts(
                             log::info!(
                                 "Configured IPv4 subnet {}: {}/{} (additional)",
                                 subnet_count,
-                                format!("{}.{}.{}.{}", network_addr[0], network_addr[1], network_addr[2], network_addr[3]),
+                                format!(
+                                    "{}.{}.{}.{}",
+                                    network_addr[0], network_addr[1], network_addr[2], network_addr[3]
+                                ),
                                 format!("{}.{}.{}.{}", subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3])
                             );
                             subnet_count += 1;

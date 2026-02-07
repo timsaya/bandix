@@ -126,7 +126,7 @@ pub struct DnsApiHandler {
     options: Options,
     dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>,
     hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
-    boot_time_offset_ns: u64, // 用于将单调时间转换为 Unix 时间戳的偏移量
+    boot_time_unix_ns: u64, // 系统启动时的 Unix 时间戳（纳秒）
 }
 
 impl DnsApiHandler {
@@ -135,49 +135,57 @@ impl DnsApiHandler {
         dns_queries: Arc<Mutex<Vec<DnsQueryRecord>>>,
         hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>>,
     ) -> Self {
-        // 计算启动时间偏移量：Unix 时间 - 单调时间
-        // 如果有可用的第一个 DNS 记录的时间戳，则使用它作为参考，
-        // 否则从当前时间计算
-        let boot_time_offset_ns = Self::calculate_boot_time_offset();
+        // 计算系统启动时的 Unix 时间戳
+        let boot_time_unix_ns =
+            Self::calculate_boot_time_unix_ns().expect("Failed to get system boot time: both /proc/uptime and /proc/stat are unavailable");
 
         Self {
             options,
             dns_queries,
             hostname_bindings,
-            boot_time_offset_ns,
+            boot_time_unix_ns,
         }
     }
 
-    /// 计算启动时间偏移量，将单调时间转换为 Unix 时间戳
-    /// 读取 /proc/uptime 获取系统运行时间，然后计算启动时间
-    fn calculate_boot_time_offset() -> u64 {
-        // Method 1: Read /proc/uptime
+    /// 计算系统启动时的 Unix 时间戳（纳秒）
+    /// 如果无法获取启动时间，返回错误
+    fn calculate_boot_time_unix_ns() -> Result<u64, String> {
+        // 方法一：读取 /proc/uptime
         if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
             if let Some(uptime_secs_str) = content.split_whitespace().next() {
                 if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
                     let uptime_ns = (uptime_secs * 1_000_000_000.0) as u64;
                     let now_unix_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
-                    // Boot time = current Unix time - uptime
+                    // 启动时间 = 当前 Unix 时间 - 运行时间
                     let boot_time_unix_ns = now_unix_ns.saturating_sub(uptime_ns);
-                    // Offset = boot time (we'll add this to monotonic timestamps)
-                    // Actually, we need: unix_time = monotonic_time + offset
-                    // So: offset = unix_time - monotonic_time
-                    // But we don't have monotonic time here, so we use:
-                    // offset = boot_time_unix_ns (since monotonic time starts at 0 at boot)
-                    return boot_time_unix_ns;
+                    // 偏移量 = 启动时间，将加在单调时间戳上；单调时间在启动时为 0，故 offset = boot_time_unix_ns
+                    return Ok(boot_time_unix_ns);
                 }
             }
         }
 
-        // 后备方案：使用当前时间作为近似值
-        // 精度较低，但如果 /proc/uptime 不可用时可以使用
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64
+        // 方案二：读取 /proc/stat 的 btime 字段
+        if let Ok(content) = std::fs::read_to_string("/proc/stat") {
+            for line in content.lines() {
+                if line.starts_with("btime ") {
+                    if let Some(btime_str) = line.strip_prefix("btime ") {
+                        if let Ok(btime_secs) = btime_str.trim().parse::<u64>() {
+                            // btime 是秒，转换为纳秒
+                            return Ok(btime_secs * 1_000_000_000);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 如果两个文件都不可用，返回错误
+        Err("Failed to get system boot time from /proc/uptime or /proc/stat".to_string())
     }
 
     /// 将单调时间戳（纳秒）转换为 Unix 时间戳（毫秒）
     fn convert_to_unix_timestamp(&self, monotonic_ns: u64) -> u64 {
-        // Unix 时间戳 = 单调时间戳 + 启动时间偏移量
-        let unix_ns = monotonic_ns.saturating_add(self.boot_time_offset_ns);
+        // Unix 时间戳 = 单调时间戳 + 系统启动时的 Unix 时间戳
+        let unix_ns = monotonic_ns.saturating_add(self.boot_time_unix_ns);
         unix_ns / 1_000_000 // 转换为毫秒
     }
 
@@ -549,7 +557,7 @@ impl DnsApiHandler {
                 // 将单调时间戳转换为 Unix 时间戳
                 let unix_timestamp_ms = self.convert_to_unix_timestamp(q.timestamp);
 
-                // 格式化timestamp
+                // 格式化 timestamp
                 let timestamp_formatted = Self::format_timestamp(unix_timestamp_ms);
 
                 // 根据 MAC 地址从绑定中获取最新的主机名
@@ -561,7 +569,6 @@ impl DnsApiHandler {
                             q.device_name.clone()
                         })
                     } else {
-                        // 如果MAC parsing fails, use stored hostname
                         q.device_name.clone()
                     }
                 } else {

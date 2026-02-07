@@ -19,37 +19,28 @@ impl DnsMonitor {
     /// 启动 DNS 监控（包括内部循环）
     pub async fn start(&self, ctx: &mut DnsModuleContext, shutdown_notify: std::sync::Arc<tokio::sync::Notify>) -> Result<()> {
         // 从 eBPF 获取 RingBuf
-        // 如果 dns_map 已预获取（与其他模块共享 eBPF 时），则使用它
-        // 否则，尝试从 eBPF 对象获取它（独立 DNS 模块的遗留路径）
         let mut ringbuf = if let Some(map) = ctx.dns_map.take() {
             // 使用预获取的映射（与其他模块共享 eBPF 时）
             log::debug!("Using pre-acquired DNS RingBuf map");
             RingBuf::<MapData>::try_from(map)?
         } else {
-            // 遗留路径：从 eBPF 对象获取映射
-            // 注意：DNS_DATA 是由入口和出口程序共享的映射，
-            // 因此我们可以从任何一个读取以获取所有 DNS 数据包
-            // 由于 ingress_ebpf 和 egress_ebpf 都是对同一 eBPF 对象的 Arc 引用，
-            // 我们需要临时丢弃所有引用以获得独占访问
             let egress_backup = ctx.egress_ebpf.take();
             let ingress_ebpf = ctx
                 .ingress_ebpf
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("Ingress eBPF program not initialized"))?;
 
-            // Drop egress_backup to reduce Arc reference count to 1
-            // This is necessary because both ingress_ebpf and egress_backup point to the same Arc
             drop(egress_backup);
 
-            // Now try to unwrap - this should succeed since we dropped egress_backup
-            // If it fails, it means there are still other references (e.g., from ModuleContext clone)
+            // 尝试 unwrap，丢弃 egress_backup 后应能成功
+            // 若失败说明仍有其他引用（如 ModuleContext 被 clone）
             let mut ebpf = match std::sync::Arc::try_unwrap(ingress_ebpf) {
                 Ok(ebpf) => ebpf,
                 Err(arc) => {
-                    // 如果unwrap fails, put back the Arc and return error
-                    // This can happen if ModuleContext was cloned, creating additional Arc references
+                    // unwrap 失败则还原 Arc 并返回错误
+                    // 可能因 ModuleContext 被 clone 而产生额外 Arc 引用
                     ctx.ingress_ebpf = Some(arc);
-                    // Recreate egress reference from ingress (they point to the same object)
+                    // 用 ingress 重新创建 egress 引用（指向同一对象）
                     ctx.egress_ebpf = ctx.ingress_ebpf.as_ref().map(|e| std::sync::Arc::clone(e));
                     return Err(anyhow::anyhow!(
                         "Cannot get exclusive access to eBPF object. \
@@ -60,13 +51,13 @@ impl DnsMonitor {
                 }
             };
 
-            // Get DNS_DATA RingBuf map (take ownership)
+            // 获取 DNS_DATA RingBuf 映射（取得所有权）
             let map = ebpf
                 .take_map("DNS_DATA")
                 .ok_or_else(|| anyhow::anyhow!("Cannot find DNS_DATA map. Make sure DNS eBPF programs are loaded correctly."))?;
 
-            // Put back the Arc references (both point to the same underlying eBPF object)
-            // Note: The map has been taken out, but the eBPF object is still needed to keep programs attached
+            // 还原 Arc 引用（均指向同一 eBPF 对象）
+            // 映射已取出，但 eBPF 对象仍需保留以维持程序挂载
             let ebpf_shared = std::sync::Arc::new(ebpf);
             ctx.ingress_ebpf = Some(std::sync::Arc::clone(&ebpf_shared));
             ctx.egress_ebpf = Some(ebpf_shared);
@@ -78,11 +69,11 @@ impl DnsMonitor {
 
         log::debug!("DNS monitoring started, waiting for DNS packets...");
 
-        // Start monitoring loop
+        // 启动监控循环
         self.start_monitoring_loop(&mut ringbuf, ctx, shutdown_notify).await
     }
 
-    /// DNS 监控 internal loop
+    /// DNS 监控内部循环
     async fn start_monitoring_loop(
         &self,
         ringbuf: &mut RingBuf<MapData>,
@@ -98,7 +89,7 @@ impl DnsMonitor {
                     break;
                 }
                 _ = interval.tick() => {
-                    // Process RingBuf events
+                    // 处理 RingBuf 事件
                     self.process_ringbuf_events(ringbuf, ctx).await;
                 }
             }
@@ -107,7 +98,7 @@ impl DnsMonitor {
         Ok(())
     }
 
-    /// 处理events from RingBuf
+    /// 处理来自 RingBuf 的事件
     async fn process_ringbuf_events(&self, ringbuf: &mut RingBuf<MapData>, ctx: &DnsModuleContext) {
         let mut packet_count = 0;
         while let Some(item) = ringbuf.next() {
@@ -115,7 +106,7 @@ impl DnsMonitor {
             let bytes: &[u8] = item.as_ref();
             let header_size = std::mem::size_of::<PacketHeader>();
 
-            // Ensure data length is at least PacketHeader size
+            // 确保数据长度至少为 PacketHeader 大小
             if bytes.len() < header_size {
                 log::warn!(
                     "DNS RingBuf item too small: {} bytes (expected at least {})",
@@ -125,17 +116,17 @@ impl DnsMonitor {
                 continue;
             }
 
-            // Parse PacketHeader
+            // 解析 PacketHeader
             let header: PacketHeader = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const PacketHeader) };
 
-            // Extract payload from Record structure
+            // 从 Record 结构取出载荷
             let payload_all = &bytes[header_size..];
 
-            // Use captured_len to determine actual data length
+            // 用 captured_len 确定实际数据长度
             let cap_len = std::cmp::min(payload_all.len(), header.captured_len as usize);
             let payload = &payload_all[..cap_len];
 
-            // Parse DNS packet
+            // 解析 DNS 包
             match self.parse_dns_packet_from_ethernet(payload, header.timestamp, ctx) {
                 Some(dns_info) => {
                     let direction_str = if header.direction == 0 { "Ingress" } else { "Egress" };
@@ -150,24 +141,24 @@ impl DnsMonitor {
                     );
                 }
                 None => {
-                    // Not a DNS packet - this shouldn't happen if eBPF filtering works correctly
+                    // 非 DNS 包，eBPF 过滤正常时不应出现
                     if cap_len >= 14 {
                         let eth_type = u16::from_be_bytes([payload[12], payload[13]]);
                         let direction_str = if header.direction == 0 { "Ingress" } else { "Egress" };
 
-                        // Simple warning for normal operations
+                        // 常规情况下的简单告警
                         log::warn!(
                             "Received non-DNS packet [{}] [EthType:0x{:04X}] - eBPF filtering may have issues",
                             direction_str,
                             eth_type
                         );
 
-                        // Detailed debug information (only shown when debug logging is enabled)
+                        // 详细调试信息（仅开启 debug 日志时输出）
                         if log::max_level() >= log::Level::Debug {
-                            // 解析more details for better debugging
+                            // 解析更多细节便于调试
                             let mut detail_info = String::new();
 
-                            // Try to parse IP layer information
+                            // 尝试解析 IP 层信息
                             match eth_type {
                                 0x0800 => {
                                     // IPv4
@@ -199,7 +190,7 @@ impl DnsMonitor {
 
                                         detail_info.push_str(&format!(" Protocol:{} {}->{}", protocol_name, src_ip, dst_ip));
 
-                                        // Try to parse port information for TCP/UDP
+                                        // 尝试解析 TCP/UDP 端口
                                         let ihl = (payload[ip_start] & 0x0F) as usize;
                                         let ip_header_len = ihl * 4;
                                         let transport_start = ip_start + ip_header_len;
@@ -230,7 +221,7 @@ impl DnsMonitor {
 
                                         detail_info.push_str(&format!(" Protocol:{} {}->{}", protocol_name, src_ip, dst_ip));
 
-                                        // Try to parse port information for TCP/UDP
+                                        // 尝试解析 TCP/UDP 端口
                                         let transport_start = ip_start + 40;
                                         if (next_header == 6 || next_header == 17) && cap_len >= transport_start + 4 {
                                             let src_port = u16::from_be_bytes([payload[transport_start], payload[transport_start + 1]]);
@@ -243,7 +234,7 @@ impl DnsMonitor {
                                 _ => detail_info.push_str(&format!("Unknown(0x{:04X})", eth_type)),
                             }
 
-                            // 添加packet hex dump (first 64 bytes or less)
+                            // 添加包十六进制 dump（前 64 字节或更少）
                             let dump_len = std::cmp::min(cap_len, 64);
                             let hex_dump: String = payload[..dump_len]
                                 .iter()
@@ -300,61 +291,60 @@ impl DnsMonitor {
             }
         }
 
-        // Log if we processed any packets (for debugging)
+        // 若本批处理了包则打日志（调试用）
         if packet_count > 0 && log::max_level() >= log::Level::Debug {
             log::debug!("Processed {} packets in this batch", packet_count);
         }
     }
 
-    /// Parse DNS packet from Ethernet frame
-    /// Returns Some(String) if DNS packet, None otherwise
-    /// Supports both IPv4 and IPv6
+    /// 从以太网帧解析 DNS 包
+    /// 若是 DNS 包返回 Some(String)，否则 None
+    /// 支持 IPv4 与 IPv6
     fn parse_dns_packet_from_ethernet(&self, data: &[u8], timestamp: u64, ctx: &DnsModuleContext) -> Option<String> {
-        // At least need Ethernet header (14 bytes)
+        // 至少需要以太网头（14 字节）
         if data.len() < 14 {
             return None;
         }
 
-        // Parse Ethernet header
+        // 解析以太网头
         let eth_type = u16::from_be_bytes([data[12], data[13]]);
 
-        // Handle IPv4 and IPv6
+        // 处理 IPv4 与 IPv6
         match eth_type {
             0x0800 => self.parse_dns_ipv4(data, timestamp, ctx),
             0x86DD => self.parse_dns_ipv6(data, timestamp, ctx),
-            _ => None, // Not IP packet
+            _ => None, // 非 IP 包
         }
     }
 
-    /// Parse IPv4 DNS packet (supports both UDP and TCP)
+    /// 解析 IPv4 DNS 包（支持 UDP 与 TCP）
     fn parse_dns_ipv4(&self, data: &[u8], timestamp: u64, ctx: &DnsModuleContext) -> Option<String> {
-        // IPv4 header start position (after Ethernet header)
+        // IPv4 头起始位置（以太网头之后）
         let ip_header_start = 14;
 
-        // At least need IPv4 header minimum length (20 bytes)
+        // 至少需要 IPv4 头最小长度（20 字节）
         if data.len() < ip_header_start + 20 {
             return None;
         }
 
-        // Read IPv4 header length (IHL, Internet Header Length)
-        // IHL is in the lower 4 bits of the first byte, unit is 4 bytes
+        // 读取 IPv4 头长度（IHL），IHL 在首字节低 4 位，单位为 4 字节
         let ihl = (data[ip_header_start] & 0x0F) as usize;
         let ip_header_len = ihl * 4;
 
-        // Validate IPv4 header length (minimum 20 bytes, maximum 60 bytes)
+        // 校验 IPv4 头长度（最小 20 字节，最大 60 字节）
         if ip_header_len < 20 || ip_header_len > 60 {
             return None;
         }
 
-        // Check if packet length is sufficient
+        // 检查包长度是否足够
         if data.len() < ip_header_start + ip_header_len {
             return None;
         }
 
-        // Check protocol type, DNS uses UDP (17) or TCP (6)
+        // 检查协议类型，DNS 使用 UDP(17) 或 TCP(6)
         let protocol = data[ip_header_start + 9];
 
-        // Parse IP addresses (source and destination addresses in IPv4 header)
+        // 解析 IP 地址（IPv4 头中的源、目的地址）
         let src_ip = format!(
             "{}.{}.{}.{}",
             data[ip_header_start + 12],
@@ -375,18 +365,18 @@ impl DnsMonitor {
                 // UDP DNS
                 let udp_header_start = ip_header_start + ip_header_len;
 
-                // Check UDP header length (at least 8 bytes)
+                // 检查 UDP 头长度（至少 8 字节）
                 if data.len() < udp_header_start + 8 {
                     return None;
                 }
 
-                // Parse UDP ports
+                // 解析 UDP 端口
                 let src_port = u16::from_be_bytes([data[udp_header_start], data[udp_header_start + 1]]);
                 let dst_port = u16::from_be_bytes([data[udp_header_start + 2], data[udp_header_start + 3]]);
 
-                // Check if DNS packet (port 53)
+                // 判断是否为 DNS 包（端口 53）
                 if src_port == 53 || dst_port == 53 {
-                    // DNS data start position (after UDP header, offset 8 bytes)
+                    // DNS 数据起始位置（UDP 头后，偏移 8 字节）
                     let dns_offset = udp_header_start + 8;
                     Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "UDP"))
                 } else {
@@ -397,38 +387,38 @@ impl DnsMonitor {
                 // TCP DNS
                 let tcp_header_start = ip_header_start + ip_header_len;
 
-                // Check TCP header minimum length (20 bytes)
+                // 检查 TCP 头最小长度（20 字节）
                 if data.len() < tcp_header_start + 20 {
                     return None;
                 }
 
-                // Parse TCP ports
+                // 解析 TCP 端口
                 let src_port = u16::from_be_bytes([data[tcp_header_start], data[tcp_header_start + 1]]);
                 let dst_port = u16::from_be_bytes([data[tcp_header_start + 2], data[tcp_header_start + 3]]);
 
-                // Check if DNS packet (port 53)
+                // 判断是否为 DNS 包（端口 53）
                 if src_port == 53 || dst_port == 53 {
-                    // Get TCP header length (data offset field, upper 4 bits of byte 12)
+                    // 取 TCP 头长度（数据偏移字段，第 12 字节高 4 位）
                     let data_offset = ((data[tcp_header_start + 12] >> 4) & 0x0F) as usize;
                     let tcp_header_len = data_offset * 4;
 
-                    // Validate TCP header length
+                    // 校验 TCP 头长度
                     if tcp_header_len < 20 || data.len() < tcp_header_start + tcp_header_len {
                         return None;
                     }
 
-                    // TCP DNS data start position (after TCP header)
+                    // TCP DNS 数据起始位置（TCP 头之后）
                     let tcp_data_start = tcp_header_start + tcp_header_len;
 
-                    // TCP DNS messages have a 2-byte length prefix
+                    // TCP DNS 消息带 2 字节长度前缀
                     if data.len() < tcp_data_start + 2 {
                         return None;
                     }
 
-                    // Skip the 2-byte length prefix to get to DNS data
+                    // 跳过 2 字节长度前缀得到 DNS 数据
                     let dns_offset = tcp_data_start + 2;
 
-                    // Check if there's actual DNS data
+                    // 检查是否有实际 DNS 数据
                     if data.len() <= dns_offset {
                         return None;
                     }
@@ -439,42 +429,41 @@ impl DnsMonitor {
                 }
             }
             _ => {
-                // Not UDP or TCP
+                // 非 UDP 或 TCP
                 None
             }
         }
     }
 
-    /// Parse IPv6 DNS packet (supports both UDP and TCP)
+    /// 解析 IPv6 DNS 包（支持 UDP 与 TCP）
     fn parse_dns_ipv6(&self, data: &[u8], timestamp: u64, ctx: &DnsModuleContext) -> Option<String> {
         const IPV6_HEADER_START: usize = 14;
         const IPV6_HEADER_LEN: usize = 40;
 
-        // At least need IPv6 header
+        // 至少需要 IPv6 头
         if data.len() < IPV6_HEADER_START + IPV6_HEADER_LEN {
             return None;
         }
 
-        // Parse IPv6 addresses
-        // IPv6 header: [version(4) + traffic class(4)][flow label(20)][payload len(16)][next header(8)][hop limit(8)][src addr(128)][dst addr(128)]
-        // Source address starts at offset 8 (relative to IPv6 header start)
-        // Destination address starts at offset 24 (relative to IPv6 header start)
+        // 解析 IPv6 地址
+        // IPv6 头：[版本(4)+流类型(4)][流标签(20)][载荷长(16)][下一头(8)][跳限(8)][源地址(128)][目的地址(128)]
+        // 源地址相对 IPv6 头起始偏移 8，目的地址偏移 24
         if data.len() < IPV6_HEADER_START + 40 {
             return None;
         }
         let src_ip = self.format_ipv6(&data[IPV6_HEADER_START + 8..IPV6_HEADER_START + 24]);
         let dst_ip = self.format_ipv6(&data[IPV6_HEADER_START + 24..IPV6_HEADER_START + 40]);
 
-        // IPv6 Next Header field is at offset 6 (relative to IPv6 header)
+        // IPv6 下一头部字段在相对 IPv6 头偏移 6
         let mut next_header: u8 = data[IPV6_HEADER_START + 6];
         let mut offset = IPV6_HEADER_START + IPV6_HEADER_LEN;
 
-        // Process extension headers (simplified, handle common cases)
-        // Most DNS packets have 0-1 extension headers
+        // 处理扩展头（简化，仅处理常见情况）
+        // 多数 DNS 包有 0～1 个扩展头
         let mut max_ext_headers = 3;
         while next_header != 17 && next_header != 6 && max_ext_headers > 0 && offset + 8 <= data.len() {
             if next_header >= 60 {
-                return None; // Invalid next header
+                return None; // 无效下一头部
             }
 
             let ext_len = data[offset + 1] as usize;
@@ -489,22 +478,22 @@ impl DnsMonitor {
             max_ext_headers -= 1;
         }
 
-        // Support both UDP and TCP
+        // 同时支持 UDP 与 TCP
         match next_header {
             17 => {
                 // UDP DNS
-                // Check UDP header length (at least 8 bytes)
+                // 检查 UDP 头长度（至少 8 字节）
                 if data.len() < offset + 8 {
                     return None;
                 }
 
-                // Parse UDP ports
+                // 解析 UDP 端口
                 let src_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
                 let dst_port = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-                // Check if DNS packet (port 53)
+                // 判断是否为 DNS 包（端口 53）
                 if src_port == 53 || dst_port == 53 {
-                    // DNS data start position (after UDP header, offset 8 bytes)
+                    // DNS 数据起始位置（UDP 头后，偏移 8 字节）
                     let dns_offset = offset + 8;
                     Some(self.parse_dns_packet(data, dns_offset, &src_ip, &dst_ip, src_port, dst_port, timestamp, ctx, "UDP"))
                 } else {
@@ -513,38 +502,38 @@ impl DnsMonitor {
             }
             6 => {
                 // TCP DNS
-                // Check TCP header minimum length (20 bytes)
+                // 检查 TCP 头最小长度（20 字节）
                 if data.len() < offset + 20 {
                     return None;
                 }
 
-                // Parse TCP ports
+                // 解析 TCP 端口
                 let src_port = u16::from_be_bytes([data[offset], data[offset + 1]]);
                 let dst_port = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-                // Check if DNS packet (port 53)
+                // 判断是否为 DNS 包（端口 53）
                 if src_port == 53 || dst_port == 53 {
-                    // Get TCP header length (data offset field, upper 4 bits of byte 12)
+                    // 取 TCP 头长度（数据偏移字段，第 12 字节高 4 位）
                     let data_offset = ((data[offset + 12] >> 4) & 0x0F) as usize;
                     let tcp_header_len = data_offset * 4;
 
-                    // Validate TCP header length
+                    // 校验 TCP 头长度
                     if tcp_header_len < 20 || data.len() < offset + tcp_header_len {
                         return None;
                     }
 
-                    // TCP DNS data start position (after TCP header)
+                    // TCP DNS 数据起始位置（TCP 头之后）
                     let tcp_data_start = offset + tcp_header_len;
 
-                    // TCP DNS messages have a 2-byte length prefix
+                    // TCP DNS 消息带 2 字节长度前缀
                     if data.len() < tcp_data_start + 2 {
                         return None;
                     }
 
-                    // Skip the 2-byte length prefix to get to DNS data
+                    // 跳过 2 字节长度前缀得到 DNS 数据
                     let dns_offset = tcp_data_start + 2;
 
-                    // Check if there's actual DNS data
+                    // 检查是否有实际 DNS 数据
                     if data.len() <= dns_offset {
                         return None;
                     }
@@ -555,52 +544,52 @@ impl DnsMonitor {
                 }
             }
             _ => {
-                // Not UDP or TCP
+                // 非 UDP 或 TCP
                 None
             }
         }
     }
 
-    /// 格式化IPv6 address from bytes
+    /// 从字节格式化 IPv6 地址
     fn format_ipv6(&self, bytes: &[u8]) -> String {
         if bytes.len() < 16 {
             return "::".to_string();
         }
-        // Convert bytes to IPv6 address
+        // 将字节转为 IPv6 地址
         let mut ipv6_bytes = [0u8; 16];
         ipv6_bytes.copy_from_slice(&bytes[..16]);
         let ipv6 = std::net::Ipv6Addr::from(ipv6_bytes);
         ipv6.to_string()
     }
 
-    /// Get device information (MAC and hostname) from IP address
-    /// Supports both IPv4 and IPv6 addresses
+    /// 根据 IP 获取设备信息（MAC 与主机名）
+    /// 支持 IPv4 与 IPv6
     fn get_device_info(&self, ip: &str, ctx: &DnsModuleContext) -> (String, String) {
         use crate::utils::network_utils;
 
-        // Try IPv4 first
+        // 先尝试 IPv4
         if let Ok(ipv4_addr) = ip.parse::<std::net::Ipv4Addr>() {
             let ip_bytes = ipv4_addr.octets();
 
-            // Try to get MAC address from ARP table
+            // 从 ARP 表获取 MAC
             let ip_mac_mapping = match network_utils::get_ip_mac_mapping() {
                 Ok(mapping) => mapping,
                 Err(_) => return ("".to_string(), "".to_string()),
             };
 
-            // Get MAC address
+            // 取 MAC 地址
             let mac = match ip_mac_mapping.get(&ip_bytes) {
                 Some(mac) => *mac,
                 None => return ("".to_string(), "".to_string()),
             };
 
-            // Format MAC address
+            // 格式化 MAC 地址
             let mac_str = format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
             );
 
-            // Get hostname from bindings
+            // 从绑定表取主机名
             let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
                 bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
             } else {
@@ -610,17 +599,17 @@ impl DnsMonitor {
             return (mac_str, hostname);
         }
 
-        // Try IPv6
+        // 再尝试 IPv6
         if let Ok(ipv6_addr) = ip.parse::<std::net::Ipv6Addr>() {
             let ipv6_bytes = ipv6_addr.octets();
 
-            // Try to get MAC address from IPv6 neighbor table
+            // 从 IPv6 邻居表获取 MAC
             let ipv6_neighbors = match network_utils::get_ipv6_neighbors() {
                 Ok(mapping) => mapping,
                 Err(_) => return ("".to_string(), "".to_string()),
             };
 
-            // Find MAC address by searching for matching IPv6 address
+            // 按匹配的 IPv6 地址查找 MAC
             let mut mac: Option<[u8; 6]> = None;
             for (mac_addr, ipv6_list) in ipv6_neighbors.iter() {
                 if ipv6_list.iter().any(|&addr| addr == ipv6_bytes) {
@@ -634,13 +623,13 @@ impl DnsMonitor {
                 None => return ("".to_string(), "".to_string()),
             };
 
-            // Format MAC address
+            // 格式化 MAC 地址
             let mac_str = format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
             );
 
-            // Get hostname from bindings
+            // 从绑定表取主机名
             let hostname = if let Ok(bindings) = ctx.hostname_bindings.lock() {
                 bindings.get(&mac).cloned().unwrap_or_else(|| "".to_string())
             } else {
@@ -650,11 +639,11 @@ impl DnsMonitor {
             return (mac_str, hostname);
         }
 
-        // Neither IPv4 nor IPv6, return empty
+        // 既非 IPv4 也非 IPv6，返回空
         ("".to_string(), "".to_string())
     }
 
-    /// Parse DNS packet (using trust-dns-proto library)
+    /// 解析 DNS 包（使用 trust-dns-proto）
     fn parse_dns_packet(
         &self,
         data: &[u8],
@@ -665,9 +654,9 @@ impl DnsMonitor {
         dst_port: u16,
         timestamp: u64,
         ctx: &DnsModuleContext,
-        protocol: &str, // "UDP" or "TCP"
+        protocol: &str, // "UDP" 或 "TCP"
     ) -> String {
-        // Check DNS data length (at least need 12 bytes DNS header)
+        // 检查 DNS 数据长度（至少需要 12 字节 DNS 头）
         if data.len() < dns_offset + 12 {
             return format!(
                 "DNS {}:{} -> {}:{} (DNS header incomplete, data length: {}, required: {})",
@@ -680,10 +669,10 @@ impl DnsMonitor {
             );
         }
 
-        // Extract DNS data portion
+        // 取出 DNS 数据段
         let dns_data = &data[dns_offset..];
 
-        // Parse DNS message using trust-dns-proto
+        // 用 trust-dns-proto 解析 DNS 消息
         let message = match Message::from_bytes(dns_data) {
             Ok(msg) => msg,
             Err(e) => {
@@ -704,7 +693,7 @@ impl DnsMonitor {
         let transaction_id = message.id();
         let is_query = matches!(message.message_type(), MessageType::Query);
 
-        // Parse query domain name and type
+        // 解析查询域名与类型
         let mut domain_name = String::new();
         let mut query_type = String::new();
         if let Some(question) = message.queries().first() {
@@ -712,14 +701,14 @@ impl DnsMonitor {
             query_type = format!("{:?}", question.query_type());
         }
 
-        // Parse response records (A, AAAA, CNAME, etc.)
+        // 解析应答记录（A、AAAA、CNAME 等）
         let mut response_ips = Vec::new();
         let mut response_records = Vec::new();
         if !is_query {
-            // This is a response packet
+            // 为应答包
             let answer_count = message.answer_count();
 
-            // Log for debugging empty responses
+            // 空应答时打调试日志
             if answer_count == 0 && log::max_level() >= log::Level::Debug {
                 log::debug!(
                     "DNS response has no answers: Domain={}, Type={}, ResponseCode={:?}",
@@ -729,7 +718,7 @@ impl DnsMonitor {
                 );
             }
 
-            // Process answer section
+            // 处理 answer 区
             for answer in message.answers() {
                 let record_type = answer.record_type();
 
@@ -776,10 +765,10 @@ impl DnsMonitor {
                             ));
                         }
                         _ => {
-                            // 处理other record types (including HTTPS, SVCB, and unknown ones)
-                            // Format: RecordType:<hex data> for better visibility
+                            // 处理其他记录类型（含 HTTPS、SVCB 及未知类型）
+                            // 格式：RecordType:<hex data> 便于查看
                             let rdata_str = format!("{:?}", rdata);
-                            // Limit output to avoid very long strings
+                            // 限制长度避免过长
                             let rdata_display = if rdata_str.len() > 100 {
                                 format!("{}...", &rdata_str[..100])
                             } else {
@@ -787,14 +776,14 @@ impl DnsMonitor {
                             };
                             response_records.push(format!("{}:{}", record_type, rdata_display));
 
-                            // Log for debugging to help diagnose HTTPS and other special record types
+                            // 调试用，便于排查 HTTPS 等特殊记录类型
                             if log::max_level() >= log::Level::Debug
                                 && (format!("{:?}", record_type).contains("HTTPS") || 
                                 format!("{:?}", record_type).contains("SVCB") ||
-                                format!("{:?}", record_type) == "Unknown(65)" ||  // HTTPS type code
+                                format!("{:?}", record_type) == "Unknown(65)" ||  // HTTPS 类型码
                                 format!("{:?}", record_type) == "Unknown(64)")
                             {
-                                // SVCB type code
+                                // SVCB 类型码
                                 log::debug!(
                                     "DNS special record: Domain={}, Type={:?}, Data={}",
                                     domain_name,
@@ -805,7 +794,7 @@ impl DnsMonitor {
                         }
                     }
                 } else {
-                    // No data in answer (should not happen, but log it for debugging)
+                    // answer 无数据（不应出现，仅作调试日志）
                     log::warn!(
                         "DNS answer has no data: Type={:?}, Name={}, Domain={}",
                         record_type,
@@ -816,7 +805,7 @@ impl DnsMonitor {
                 }
             }
 
-            // Also check authority section (may contain SOA or NS records for NODATA responses)
+            // 同时检查 authority 区（NODATA 应答可能含 SOA/NS）
             for authority in message.name_servers() {
                 if let Some(rdata) = authority.data() {
                     match rdata {
@@ -834,7 +823,7 @@ impl DnsMonitor {
             }
         }
 
-        // Get response status
+        // 取应答状态
         let response_code = if !is_query {
             match message.response_code() {
                 ResponseCode::NoError => "Success",
@@ -849,11 +838,9 @@ impl DnsMonitor {
             ""
         };
 
-        // Store DNS query record
+        // 存储 DNS 查询记录
         if !domain_name.is_empty() {
-            // Get device information based on packet type:
-            // - For queries: use source IP (the device making the query)
-            // - For responses: use destination IP (the device receiving the response)
+            // 按包类型取设备信息：查询用源 IP（发起方），应答用目的 IP（接收方）
             let device_ip = if is_query { src_ip } else { dst_ip };
             let (device_mac, device_name) = self.get_device_info(device_ip, ctx);
 
@@ -875,53 +862,37 @@ impl DnsMonitor {
                 device_name,
             };
 
-            // Try to match with existing records and calculate response time
+            // 尝试与已有记录匹配并计算响应时间
             if let Ok(mut queries) = ctx.dns_queries.lock() {
                 if is_query {
-                    // 这is a query, try to find matching response (response might come after)
-                    // We'll match it when the response arrives
+                    // 这是查询，稍后应答到达时再匹配
                     record.response_time_ms = None;
                 } else {
-                    // This is a response, try to find matching query
-                    // Use rposition to find the LATEST matching query (search from end)
+                    // 这是应答，查找匹配的查询（从末尾用 rposition 找最近一条）
                     if let Some(matching_query_idx) = queries.iter().rposition(|q| {
-                        // Match criteria:
-                        // 1. Transaction ID matches
-                        q.transaction_id == transaction_id &&
-                        // 2. IP addresses are swapped
-                        q.source_ip == dst_ip &&
-                        q.destination_ip == src_ip &&
-                        // 3. Ports are swapped
-                        q.source_port == dst_port &&
-                        q.destination_port == src_port &&
-                        // 4. Domain and query type match
-                        q.domain == domain_name &&
-                        q.query_type == query_type &&
-                        // 5. It's a query (not a response)
-                        q.is_query &&
-                        // 6. Response time hasn't been set yet (not needed anymore, but keep for consistency)
-                        q.response_time_ms.is_none() &&
-                        // 7. Response timestamp is after query timestamp
-                        timestamp > q.timestamp
+                        q.transaction_id == transaction_id
+                            && q.source_ip == dst_ip
+                            && q.destination_ip == src_ip
+                            && q.source_port == dst_port
+                            && q.destination_port == src_port
+                            && q.domain == domain_name
+                            && q.query_type == query_type
+                            && q.is_query
+                            && q.response_time_ms.is_none()
+                            && timestamp > q.timestamp
                     }) {
-                        // 计算response time in milliseconds
                         let query_timestamp = queries[matching_query_idx].timestamp;
-                        // 计算response time: convert nanoseconds to milliseconds
-                        // Use floating point division then round to avoid precision loss
                         let diff_ns = timestamp - query_timestamp;
                         let response_time_ms = if diff_ns < 1_000_000 {
-                            // 如果difference is less than 1ms, round up to 1ms for visibility
-                            // (0ms would indicate no response matched)
+                            // 不足 1ms 按 1ms 显示（0ms 表示未匹配到应答）
                             1
                         } else {
                             diff_ns / 1_000_000
                         };
 
-                        // Update the query record's response_time_ms to mark it as answered
-                        // This prevents future responses (with the same ID if reused) from matching this old query again
+                        // 更新查询记录的 response_time_ms 表示已应答，避免后续同 ID 应答再次匹配
                         queries[matching_query_idx].response_time_ms = Some(response_time_ms);
-                        
-                        // Set likely response time for this response record too
+
                         record.response_time_ms = Some(response_time_ms);
 
                         log::debug!(
@@ -941,9 +912,9 @@ impl DnsMonitor {
                     }
                 }
 
-                // Store the new record (both query and response are stored)
+                // 写入新记录（查询与应答都存）
                 queries.push(record);
-                // Keep only last N records (configurable via --dns-max-records)
+                // 只保留最近 N 条（由 --dns-max-records 配置）
                 let max_records = ctx.options.dns_max_records();
                 if queries.len() > max_records {
                     queries.remove(0);
@@ -951,28 +922,28 @@ impl DnsMonitor {
             }
         }
 
-        // Build output string
+        // 拼输出字符串
         let mut result = format!(
             "DNS/{} {} {}:{} -> {}:{} [ID:0x{:04X}]",
             protocol, direction, src_ip, src_port, dst_ip, dst_port, transaction_id
         );
 
-        // Add query type if present (especially useful for PTR queries)
+        // 若有查询类型则追加（对 PTR 等有用）
         if !query_type.is_empty() {
             result.push_str(&format!(" [Type:{}]", query_type));
         }
 
-        // Add domain name (in query or response)
+        // 追加域名（查询或应答中）
         if !domain_name.is_empty() {
             result.push_str(&format!(" Domain:{}", domain_name));
         }
 
-        // Add response information for response packets
+        // 应答包追加应答信息
         if !is_query {
-            // Add response status (always show for responses)
+            // 追加应答状态（应答包始终显示）
             result.push_str(&format!(" [{}]", response_code));
 
-            // Add record count
+            // 追加记录数量
             let answer_count = message.answer_count();
             let authority_count = message.name_server_count();
             let additional_count = message.additional_count();
@@ -988,12 +959,11 @@ impl DnsMonitor {
                 result.push_str("]");
             }
 
-            // Add response records
+            // 追加应答记录
             if !response_ips.is_empty() {
-                // Has IP addresses (A/AAAA records)
                 result.push_str(&format!(" => IP:{}", response_ips.join(",")));
 
-                // Show other non-IP records separately
+                // 其他非 IP 记录单独列出
                 let non_ip_records: Vec<_> = response_records
                     .iter()
                     .filter(|r| !r.starts_with("A:") && !r.starts_with("AAAA:"))
@@ -1005,7 +975,7 @@ impl DnsMonitor {
                     ));
                 }
             } else if !response_records.is_empty() {
-                // No IP addresses, show all records (CNAME, PTR, MX, etc.)
+                // 无 IP 时列出全部记录（CNAME、PTR、MX 等）
                 result.push_str(&format!(" => {}", response_records.join(", ")));
             }
         }

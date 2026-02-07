@@ -179,16 +179,12 @@ impl DeviceManager {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(refresh_interval);
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_millis(800))
-                .build()
-                .unwrap();
+            let http = reqwest::Client::builder().timeout(Duration::from_millis(800)).build().unwrap();
 
             if let Some(url) = event_url.as_ref() {
                 log::debug!("Traffic event notifier enabled: {} (interval {:?})", url, refresh_interval);
             }
 
-            // Best-effort initial refresh so API / events have wifi/wired classification early.
             self.refresh_wifi_macs_cache();
 
             loop {
@@ -297,10 +293,7 @@ impl DeviceManager {
         let neighbor_devices = self.read_neighbor_table()?;
         self.apply_neighbor_devices(neighbor_devices)?;
 
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
 
         let new_ipv4_online = self.read_ipv4_neighbor_online_map()?;
         let old_ipv4_online = {
@@ -399,8 +392,7 @@ impl DeviceManager {
 
     fn extract_neighbor_state(parts: &[&str]) -> Option<&'static str> {
         fn normalize_token(s: &str) -> String {
-            s.trim_matches(|c: char| !c.is_ascii_alphabetic())
-                .to_ascii_uppercase()
+            s.trim_matches(|c: char| !c.is_ascii_alphabetic()).to_ascii_uppercase()
         }
 
         for p in parts.iter().rev() {
@@ -629,10 +621,7 @@ impl DeviceManager {
         }
 
         let all_neighbor_macs = self.read_all_neighbor_macs();
-        let wired_set: HashSet<[u8; 6]> = all_neighbor_macs
-            .into_iter()
-            .filter(|mac| !wifi_set.contains(mac))
-            .collect();
+        let wired_set: HashSet<[u8; 6]> = all_neighbor_macs.into_iter().filter(|mac| !wifi_set.contains(mac)).collect();
 
         {
             let mut guard = self.wired_macs.lock().unwrap();
@@ -713,7 +702,6 @@ impl DeviceManager {
         }
         macs
     }
-
 }
 
 #[derive(serde::Serialize)]
