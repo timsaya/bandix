@@ -119,7 +119,7 @@ pub struct DnsConfigResponse {
     pub config: DnsConfigInfo,
 }
 
-/// DNS 监控 API handler
+/// DNS 监控 API 处理器
 #[derive(Clone)]
 pub struct DnsApiHandler {
     #[allow(dead_code)]
@@ -289,12 +289,12 @@ impl DnsApiHandler {
             "180.76.76.76",
         ];
 
-        // Use a base monotonic timestamp (simulating system boot time)
-        // Timestamp is in nanoseconds (monotonic time)
-        let base_timestamp_ns = 1_000_000_000_000_000_000u64; // 1e9 seconds in ns
+        // 使用基准单调时间戳（模拟系统启动时间）
+        // 时间戳单位为纳秒（单调时间）
+        let base_timestamp_ns = 1_000_000_000_000_000_000u64; // 约 1e9 秒（纳秒）
 
         for i in 0..100_0000 {
-            // Simple pseudo-random number generator using index
+            // 基于索引的简单伪随机数
             let seed = (i as u64).wrapping_mul(1103515245).wrapping_add(12345);
             let r1 = (seed >> 16) & 0x7fff;
             let r2 = (seed >> 8) & 0x7fff;
@@ -308,10 +308,10 @@ impl DnsApiHandler {
             let dns_server_idx = (r4 as usize) % dns_servers.len();
             let is_query = (i % 2) == 0;
 
-            // Generate client IP (192.168.x.y)
+            // 生成客户端 IP（192.168.x.y）
             let client_ip = format!("192.168.{}.{}", (r1 % 255) as u8, (r2 % 255) as u8);
 
-            // Generate MAC address
+            // 生成 MAC 地址
             let mac = format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 (r1 % 255) as u8,
@@ -322,18 +322,18 @@ impl DnsApiHandler {
                 (i % 255) as u8,
             );
 
-            // Generate device name
+            // 生成设备名
             let device_name = format!("device-{}", (r1 % 100) as u32);
 
-            // Generate timestamp (monotonic time in nanoseconds, spread over last 24 hours)
-            // Each record is spaced by ~0.864 seconds (24 hours / 100k records)
-            let timestamp_offset_ns = (i as u64) * 864_000_000; // ~0.864 seconds per record
+            // 生成时间戳（单调时间纳秒，分布在最近 24 小时内）
+            // 每条记录间隔约 0.864 秒（24 小时 / 10 万条）
+            let timestamp_offset_ns = (i as u64) * 864_000_000; // 每条约 0.864 秒
             let timestamp = base_timestamp_ns + timestamp_offset_ns;
 
-            // Generate transaction ID
+            // 生成事务 ID
             let transaction_id = (r1 % 65535) as u16;
 
-            // Generate response data for responses
+            // 为响应生成应答数据
             let (response_ips, response_records, response_time_ms) = if !is_query {
                 let ip_count = (r2 % 3) + 1;
                 let mut ips = Vec::new();
@@ -349,7 +349,7 @@ impl DnsApiHandler {
                     ips.push(ip.clone());
                     records.push(format!("A {}", ip));
                 }
-                let response_time = (r3 % 500) + 1; // 1-500ms
+                let response_time = (r3 % 500) + 1; // 1～500 毫秒
                 (ips, records, Some(response_time))
             } else {
                 (Vec::new(), Vec::new(), None)
@@ -393,32 +393,31 @@ impl DnsApiHandler {
     /// - dns_server: 按 DNS 服务器 IP 地址过滤（查询时为 destination_ip，响应时为 source_ip）
     /// - page: 页码（默认：1）
     /// - page_size: 每页记录数（默认：20，最大：1000）
-    /// - limit: （已弃用，使用 page_size）返回的最大记录数
     async fn handle_queries(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         // Self::_generate_test_data(&self.dns_queries);
 
-        // 获取query parameters
+        // 获取查询参数
         let domain_filter = request.query_params.get("domain");
         let device_filter = request.query_params.get("device").map(|s| s.to_lowercase());
         let is_query_filter = request.query_params.get("is_query").and_then(|s| s.parse::<bool>().ok());
         let query_type_filter = request.query_params.get("query_type").map(|s| s.to_uppercase());
         let dns_server_filter = request.query_params.get("dns_server");
 
-        // Pagination parameters
+        // 分页参数
         let page = request
             .query_params
             .get("page")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(1)
-            .max(1); // Minimum page is 1
+            .max(1); // 页码最小为 1
 
         let page_size = request
             .query_params
             .get("page_size")
-            .or(request.query_params.get("limit")) // Support legacy 'limit' parameter
+            .or(request.query_params.get("limit")) // 兼容旧参数 limit
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(20)
-            .min(1000); // Maximum 1000 records per page
+            .min(1000); // 每页最多 1000 条
 
         let queries_guard = if let Ok(guard) = self.dns_queries.lock() {
             guard
@@ -468,12 +467,12 @@ impl DnsApiHandler {
                 // 对于响应：DNS 服务器是 source_ip（端口 53）
                 if let Some(dns_server) = dns_server_filter {
                     if q.is_query {
-                        // Query: DNS server is destination
+                        // 查询时 DNS 服务器为目的 IP
                         if !q.destination_ip.contains(dns_server) {
                             return false;
                         }
                     } else {
-                        // Response: DNS server is source
+                        // 响应时 DNS 服务器为源 IP
                         if !q.source_ip.contains(dns_server) {
                             return false;
                         }
@@ -493,7 +492,7 @@ impl DnsApiHandler {
 
         use std::collections::HashMap;
 
-        // 创建分组：key = (transaction_id, domain, ip_pair_key)
+        // 分组键：(transaction_id, domain, ip_pair_key)
         let mut groups: HashMap<(u16, String, String), Vec<usize>> = HashMap::new();
 
         for &idx in &filtered_indices {
@@ -531,7 +530,7 @@ impl DnsApiHandler {
 
         // 计算分页
         let total = sorted_indices.len();
-        let total_pages = (total + page_size - 1) / page_size; // Ceiling division
+        let total_pages = (total + page_size - 1) / page_size; // 向上取整
         let start_idx = (page - 1) * page_size;
         let end_idx = (start_idx + page_size).min(total);
 
@@ -539,7 +538,7 @@ impl DnsApiHandler {
         let paginated_indices = if start_idx < total {
             &sorted_indices[start_idx..end_idx]
         } else {
-            &[] // 页码超出范围
+            &[] // 页码越界
         };
 
         // 获取最新的主机名绑定以进行动态查找
@@ -557,15 +556,15 @@ impl DnsApiHandler {
                 // 将单调时间戳转换为 Unix 时间戳
                 let unix_timestamp_ms = self.convert_to_unix_timestamp(q.timestamp);
 
-                // 格式化 timestamp
+                // 格式化时间戳
                 let timestamp_formatted = Self::format_timestamp(unix_timestamp_ms);
 
                 // 根据 MAC 地址从绑定中获取最新的主机名
                 let device_name = if !q.device_mac.is_empty() {
-                    // 解析MAC address string to [u8; 6]
+                    // 将 MAC 字符串解析为 [u8; 6]
                     if let Ok(mac_bytes) = Self::parse_mac_address(&q.device_mac) {
                         hostname_bindings.get(&mac_bytes).cloned().unwrap_or_else(|| {
-                            // Fallback to stored hostname if not found in bindings
+                            // 绑定中未找到则用记录中的主机名
                             q.device_name.clone()
                         })
                     } else {
@@ -581,7 +580,7 @@ impl DnsApiHandler {
                     domain: q.domain.clone(),
                     query_type: q.query_type.clone(),
                     response_code: q.response_code.clone(),
-                    response_time_ms: q.response_time_ms, // Queries are None, responses may have value
+                    response_time_ms: q.response_time_ms, // 查询为 None，响应可有值
                     source_ip: q.source_ip.clone(),
                     destination_ip: q.destination_ip.clone(),
                     source_port: q.source_port,
@@ -660,16 +659,16 @@ impl DnsApiHandler {
             return Ok(HttpResponse::ok(body));
         }
 
-        // 计算basic counts
+        // 计算基本计数
         let total_queries = queries.iter().filter(|q| q.is_query).count();
         let total_responses = queries.iter().filter(|q| !q.is_query).count();
         let queries_with_response = queries.iter().filter(|q| q.is_query && q.response_time_ms.is_some()).count();
         let queries_without_response = total_queries - queries_with_response;
 
-        // 计算response time statistics
+        // 计算响应时间统计
         let response_times: Vec<u64> = queries.iter().filter_map(|q| q.response_time_ms).filter(|&t| t > 0).collect();
 
-        // 获取latest response time (from the most recent response with response_time_ms)
+        // 取最近一条带 response_time_ms 的响应的响应时间
         let latest_response_time_ms = queries
             .iter()
             .filter(|q| !q.is_query && q.response_time_ms.is_some())
@@ -706,7 +705,7 @@ impl DnsApiHandler {
             )
         };
 
-        // 计算success/failure metrics
+        // 计算成功/失败指标
         let success_count = queries.iter().filter(|q| !q.is_query && q.response_code == "Success").count();
         let failure_count = queries
             .iter()
