@@ -457,7 +457,7 @@ impl DnsApiHandler {
                 // 按 DNS 记录类型过滤（例如：A, AAAA, CNAME, MX 等）
                 // query_type_filter 已经转换为大写，这里也将 q.query_type 转换为大写进行子串匹配
                 if let Some(ref query_type) = query_type_filter {
-                    if !q.query_type.contains(query_type) {
+                    if !q.query_type.eq(query_type) {
                         return false;
                     }
                 }
