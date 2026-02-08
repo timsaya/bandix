@@ -411,9 +411,7 @@ impl TrafficMonitor {
     }
 
     fn apply_rate_limits(&self, ctx: &mut TrafficModuleContext, _ebpf: &Arc<aya::Ebpf>) -> Result<(), anyhow::Error> {
-        // 从预定规则计算当前有效速率限制
         let scheduled_limits = ctx.scheduled_rate_limits.lock().unwrap();
-
         let policy_enabled = ctx.rate_limit_whitelist_enabled.load(std::sync::atomic::Ordering::Relaxed);
         let whitelist = ctx.rate_limit_whitelist.lock().unwrap().clone();
         let default_limits = *ctx.default_wan_rate_limits.lock().unwrap();
@@ -428,21 +426,40 @@ impl TrafficMonitor {
         let mut desired_limits: std::collections::HashMap<[u8; 6], [u64; 2]> = std::collections::HashMap::new();
 
         for mac in device_macs {
+            let mut scheduled_limit = None;
             if let Some(limits) = crate::storage::traffic::calculate_current_rate_limit(&scheduled_limits, &mac) {
-                desired_limits.insert(mac, limits);
-                continue;
+                scheduled_limit = Some(limits);
             }
 
-            if !policy_enabled {
-                desired_limits.insert(mac, [0, 0]);
-                continue;
+            let mut default_limit = None;
+            if policy_enabled && !whitelist.contains(&mac) {
+                default_limit = Some(default_limits);
             }
 
-            if whitelist.contains(&mac) {
-                desired_limits.insert(mac, [0, 0]);
-            } else {
-                desired_limits.insert(mac, default_limits);
-            }
+            let final_limit = match (scheduled_limit, default_limit) {
+                (Some(sched), Some(def)) => {
+                    let rx = if sched[0] == 0 {
+                        def[0]
+                    } else if def[0] == 0 {
+                        sched[0]
+                    } else {
+                        sched[0].min(def[0])
+                    };
+                    let tx = if sched[1] == 0 {
+                        def[1]
+                    } else if def[1] == 0 {
+                        sched[1]
+                    } else {
+                        sched[1].min(def[1])
+                    };
+                    [rx, tx]
+                }
+                (Some(sched), None) => sched,
+                (None, Some(def)) => def,
+                (None, None) => [0, 0],
+            };
+
+            desired_limits.insert(mac, final_limit);
         }
 
         drop(scheduled_limits);
