@@ -37,12 +37,12 @@ impl TrafficModuleContext {
     pub fn new(options: Options, ingress_ebpf: Arc<aya::Ebpf>, egress_ebpf: Arc<aya::Ebpf>, device_manager: Arc<DeviceManager>) -> Self {
         let realtime_manager = Arc::new(RealtimeRingManager::new(
             options.data_dir().to_string(),
-            options.traffic_retention_seconds(),
+            options.traffic_realtime_window(),
         ));
 
         let long_term_manager = Arc::new(LongTermRingManager::new(
             options.data_dir().to_string(),
-            options.traffic_persist_interval_seconds(),
+            options.traffic_flush_interval(),
         ));
 
         let hostname_bindings = Arc::new(Mutex::new(StdHashMap::new()));
@@ -193,7 +193,7 @@ impl ModuleType {
                 }
 
                 // 如果开启了持久化，那么从历史数据，加载基线流量
-                if traffic_ctx.options.traffic_persist_history() {
+                if traffic_ctx.options.traffic_enable_storage() {
                     // 加载 ring 文件中的设备
                     match traffic_ctx.long_term_manager.load_from_files() {
                         Ok(device_info) => {
@@ -256,8 +256,29 @@ impl ModuleType {
 
                 Ok(())
             }
-            (ModuleType::Dns, ModuleContext::Dns(_dns_ctx)) => {
+            (ModuleType::Dns, ModuleContext::Dns(dns_ctx)) => {
                 // DNS 模块数据初始化逻辑
+                let base_dir = dns_ctx.options.data_dir();
+                
+                // 确保 DNS 存储目录结构存在
+                crate::storage::dns::ensure_dns_schema(base_dir)?;
+                
+                // 如果启用了持久化，加载历史记录
+                if dns_ctx.options.dns_enable_storage() {
+                    let max_records = dns_ctx.options.dns_max_records();
+                    
+                    match crate::storage::dns::load_dns_queries(base_dir, max_records) {
+                        Ok(records) => {
+                            let mut queries = dns_ctx.dns_queries.lock().unwrap();
+                            *queries = records;
+                            log::info!("Loaded {} DNS records from storage", queries.len());
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to load DNS records from storage: {}, starting with empty records", e);
+                        }
+                    }
+                }
+                
                 Ok(())
             }
             (ModuleType::Connection, ModuleContext::Connection(_connection_ctx)) => {

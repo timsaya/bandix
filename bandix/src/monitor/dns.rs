@@ -81,21 +81,65 @@ impl DnsMonitor {
         shutdown_notify: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
+        
+        let mut flush_interval = if ctx.options.dns_enable_storage() {
+            let flush_secs = ctx.options.dns_flush_interval();
+            Some(tokio::time::interval(tokio::time::Duration::from_secs(flush_secs)))
+        } else {
+            None
+        };
 
         loop {
             tokio::select! {
                 _ = shutdown_notify.notified() => {
                     log::debug!("DNS monitoring module received shutdown signal, stopping...");
+                    
+                    if ctx.options.dns_enable_storage() {
+                        log::debug!("Saving DNS records before shutdown...");
+                        self.save_dns_records(ctx);
+                    }
+                    
                     break;
                 }
                 _ = interval.tick() => {
-                    // 处理 RingBuf 事件
                     self.process_ringbuf_events(ringbuf, ctx).await;
+                }
+                _ = async {
+                    if let Some(ref mut fi) = flush_interval {
+                        fi.tick().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                }, if flush_interval.is_some() => {
+                    log::debug!("Periodic DNS records flush triggered");
+                    self.save_dns_records(ctx);
                 }
             }
         }
 
         Ok(())
+    }
+    
+    fn save_dns_records(&self, ctx: &DnsModuleContext) {
+        let base_dir = ctx.options.data_dir();
+        let max_records = ctx.options.dns_max_records();
+        
+        let records = match ctx.dns_queries.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                log::error!("Failed to lock dns_queries for saving: {}", e);
+                return;
+            }
+        };
+        
+        match crate::storage::dns::save_dns_queries(base_dir, &records, max_records) {
+            Ok(_) => {
+                log::debug!("Successfully saved {} DNS records to storage", records.len());
+            }
+            Err(e) => {
+                log::error!("Failed to save DNS records to storage: {}", e);
+            }
+        }
     }
 
     /// 处理来自 RingBuf 的事件

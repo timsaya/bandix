@@ -149,38 +149,8 @@ impl DnsApiHandler {
     /// 计算系统启动时的 Unix 时间戳（纳秒）
     /// 如果无法获取启动时间，返回错误
     fn calculate_boot_time_unix_ns() -> Result<u64, String> {
-
-        // 此方法 在 LXC 容器中，会被虚拟化，导致时间对不上
-        // // 方法一：读取 /proc/uptime
-        // if let Ok(content) = std::fs::read_to_string("/proc/uptime") {
-        //     if let Some(uptime_secs_str) = content.split_whitespace().next() {
-        //         if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
-        //             let uptime_ns = (uptime_secs * 1_000_000_000.0) as u64;
-        //             let now_unix_ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
-        //             // 启动时间 = 当前 Unix 时间 - 运行时间
-        //             let boot_time_unix_ns = now_unix_ns.saturating_sub(uptime_ns);
-        //             // 偏移量 = 启动时间，将加在单调时间戳上；单调时间在启动时为 0，故 offset = boot_time_unix_ns
-        //             return Ok(boot_time_unix_ns);
-        //         }
-        //     }
-        // }
-
-        // 方案二：读取 /proc/stat 的 btime 字段
-        if let Ok(content) = std::fs::read_to_string("/proc/stat") {
-            for line in content.lines() {
-                if line.starts_with("btime ") {
-                    if let Some(btime_str) = line.strip_prefix("btime ") {
-                        if let Ok(btime_secs) = btime_str.trim().parse::<u64>() {
-                            // btime 是秒，转换为纳秒
-                            return Ok(btime_secs * 1_000_000_000);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 如果两个文件都不可用，返回错误
-        Err("Failed to get system boot time from /proc/uptime or /proc/stat".to_string())
+        crate::utils::time_utils::get_boot_time_unix_ns()
+            .map_err(|e| e.to_string())
     }
 
     /// 将单调时间戳（纳秒）转换为 Unix 时间戳（毫秒）

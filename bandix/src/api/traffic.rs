@@ -728,7 +728,7 @@ impl TrafficApiHandler {
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
 
-        let start_ms = now_ms.saturating_sub(self.options.traffic_retention_seconds() as u64 * 1000);
+        let start_ms = now_ms.saturating_sub(self.options.traffic_realtime_window() as u64 * 1000);
 
         let end_ms = now_ms;
 
@@ -780,7 +780,7 @@ impl TrafficApiHandler {
                     .collect();
 
                 let response = MetricsResponse {
-                    retention_seconds: self.options.traffic_retention_seconds() as u64,
+                    retention_seconds: self.options.traffic_realtime_window() as u64,
                     mac: mac_label,
                     metrics,
                 };

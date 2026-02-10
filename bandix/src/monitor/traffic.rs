@@ -59,7 +59,7 @@ impl TrafficMonitor {
     ) -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
-        let persist_enabled = ctx.options.traffic_persist_history();
+        let persist_enabled = ctx.options.traffic_enable_storage();
 
         let ebpf_snapshot = ctx.ingress_ebpf.clone();
         if let Some(ebpf) = ebpf_snapshot {

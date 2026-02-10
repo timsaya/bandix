@@ -681,3 +681,43 @@ pub mod network_utils {
         }
     }
 }
+
+pub mod time_utils {
+    use anyhow::Result;
+
+    /// 获取系统启动时的 Unix 时间戳（纳秒）
+    /// 从 /proc/stat 读取 btime 字段
+    pub fn get_boot_time_unix_ns() -> Result<u64> {
+        if let Ok(content) = std::fs::read_to_string("/proc/stat") {
+            for line in content.lines() {
+                if line.starts_with("btime ") {
+                    if let Some(btime_str) = line.split_whitespace().nth(1) {
+                        if let Ok(btime_secs) = btime_str.parse::<u64>() {
+                            return Ok(btime_secs * 1_000_000_000);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("Failed to get boot time from /proc/stat"))
+    }
+
+    /// 将单调时间戳（纳秒）转换为 Unix 时间戳（纳秒）
+    pub fn monotonic_to_unix_ns(monotonic_ns: u64) -> u64 {
+        if let Ok(boot_time_ns) = get_boot_time_unix_ns() {
+            monotonic_ns.saturating_add(boot_time_ns)
+        } else {
+            monotonic_ns
+        }
+    }
+
+    /// 将 Unix 时间戳（纳秒）转换为单调时间戳（纳秒）
+    pub fn unix_to_monotonic_ns(unix_ns: u64) -> u64 {
+        if let Ok(boot_time_ns) = get_boot_time_unix_ns() {
+            unix_ns.saturating_sub(boot_time_ns)
+        } else {
+            unix_ns
+        }
+    }
+}

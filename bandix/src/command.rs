@@ -54,23 +54,23 @@ pub struct TrafficArgs {
     #[clap(
         long,
         default_value = "600",
-        help = "Retention duration (seconds), i.e., ring file capacity (one slot per second)"
+        help = "Realtime traffic window , Retention duration (seconds)."
     )]
-    pub traffic_retention_seconds: u32,
+    pub traffic_realtime_window: u32,
 
     #[clap(
         long,
         default_value = "600",
         help = "Traffic data checkpoint interval (seconds), how often to save accumulator checkpoints to disk. Long-term hourly data is saved immediately at each hour boundary."
     )]
-    pub traffic_persist_interval_seconds: u32,
+    pub traffic_flush_interval: u32,
 
     #[clap(
         long,
         default_value = "false",
         help = "Enable traffic history data persistence to disk (disabled by default, data only stored in memory)"
     )]
-    pub traffic_persist_history: bool,
+    pub traffic_enable_storage: bool,
 
     #[clap(
         long,
@@ -106,6 +106,20 @@ pub struct DnsArgs {
         help = "Maximum number of DNS records to keep in memory (default: 10000)"
     )]
     pub dns_max_records: usize,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable DNS persistent storage (default: false)"
+    )]
+    pub dns_enable_storage: bool,
+
+    #[clap(
+        long,
+        default_value = "900",
+        help = "DNS storage flush interval in seconds (default: 900 = 15 minutes)"
+    )]
+    pub dns_flush_interval: u64,
 }
 
 /// 连接模块参数
@@ -170,18 +184,18 @@ impl Options {
     }
 
     /// 从流量参数获取流量保留秒数
-    pub fn traffic_retention_seconds(&self) -> u32 {
-        self.traffic.traffic_retention_seconds
+    pub fn traffic_realtime_window(&self) -> u32 {
+        self.traffic.traffic_realtime_window
     }
 
     /// 从流量参数获取流量持久化间隔秒数
-    pub fn traffic_persist_interval_seconds(&self) -> u32 {
-        self.traffic.traffic_persist_interval_seconds
+    pub fn traffic_flush_interval(&self) -> u32 {
+        self.traffic.traffic_flush_interval
     }
 
     /// 从流量参数获取流量持久化历史
-    pub fn traffic_persist_history(&self) -> bool {
-        self.traffic.traffic_persist_history
+    pub fn traffic_enable_storage(&self) -> bool {
+        self.traffic.traffic_enable_storage
     }
 
     pub fn traffic_export_url(&self) -> &str {
@@ -204,6 +218,16 @@ impl Options {
     /// 从 DNS 参数获取 DNS 最大记录数
     pub fn dns_max_records(&self) -> usize {
         self.dns.dns_max_records
+    }
+
+    /// 从 DNS 参数获取是否启用持久化存储
+    pub fn dns_enable_storage(&self) -> bool {
+        self.dns.dns_enable_storage
+    }
+
+    /// 从 DNS 参数获取刷新间隔（秒）
+    pub fn dns_flush_interval(&self) -> u64 {
+        self.dns.dns_flush_interval
     }
 
     /// 从连接参数获取启用连接
@@ -278,12 +302,12 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
 
     // 仅在启用流量模块时验证流量特定参数
     if opt.enable_traffic() {
-        if opt.traffic_retention_seconds() == 0 {
-            return Err(anyhow::anyhow!("traffic_retention_seconds must be greater than 0"));
+        if opt.traffic_realtime_window() == 0 {
+            return Err(anyhow::anyhow!("traffic_realtime_window must be greater than 0"));
         }
 
-        if opt.traffic_persist_interval_seconds() == 0 {
-            return Err(anyhow::anyhow!("traffic_persist_interval_seconds must be greater than 0"));
+        if opt.traffic_flush_interval() == 0 {
+            return Err(anyhow::anyhow!("traffic_flush_interval must be greater than 0"));
         }
 
         // 验证额外子网的 CIDR 格式

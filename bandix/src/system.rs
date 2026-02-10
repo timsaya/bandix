@@ -152,7 +152,7 @@ pub fn log_startup_info(options: &Options) {
     info!("Listening port: {}", options.port());
     info!("Data directory: {}", options.data_dir());
     info!("Log level: {}", options.log_level());
-    info!("Retention seconds: {}", options.traffic_retention_seconds());
+    info!("Retention seconds: {}", options.traffic_realtime_window());
     info!("Interface: {} (IP: {}, Mask: {})", options.iface(), ip_str, mask_str);
 
     // Display enabled monitoring modules with their configurations
@@ -174,7 +174,7 @@ pub fn log_startup_info(options: &Options) {
         info!("Enabled monitoring modules ({}):", enabled_count);
 
         if options.enable_traffic() {
-            info!("  • Traffic monitoring (retention: {}s)", options.traffic_retention_seconds());
+            info!("  • Traffic monitoring (retention: {}s)", options.traffic_realtime_window());
         }
 
         if options.enable_dns() {
