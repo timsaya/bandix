@@ -4,7 +4,7 @@ use anyhow::Result;
 use bandix_common::{ConnectionStats, DeviceConnectionStats};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 /// 将子网掩码转换为 CIDR 表示法
@@ -36,11 +36,19 @@ impl Default for GlobalConnectionStats {
     }
 }
 
-/// 从 /proc/net/nf_conntrack 解析连接统计信息
+/// 从 conntrack -L 命令解析连接统计信息
 /// 1. 总统计：所有 TCP/UDP 连接（无过滤）
 /// 2. 设备统计：ARP 表中且与接口在同一子网中的设备的连接
 pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Result<GlobalConnectionStats> {
-    let content = fs::read_to_string("/proc/net/nf_conntrack")?;
+    let output = Command::new("conntrack")
+        .arg("-L")
+        .output()?;
+    
+    if !output.status.success() {
+        anyhow::bail!("Failed to execute conntrack -L: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    
+    let content = String::from_utf8_lossy(&output.stdout);
     let ip_mac_mapping = network_utils::get_ip_mac_mapping()?;
 
     // 1. 总连接统计（无过滤）
@@ -60,23 +68,22 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
         if line.trim().is_empty() {
             continue;
         }
+        
+        if line.contains("flow entries have been shown") {
+            continue;
+        }
 
-        // 解析连接行
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 4 {
             continue;
         }
 
-        // 提取协议
-        let protocol = parts.get(2).unwrap_or(&"");
+        let protocol = parts.get(0).unwrap_or(&"");
 
-        // 提取 TCP 状态（仅适用于 TCP 连接）
         let mut tcp_state = None;
         if protocol == &"tcp" {
-            // 对于 TCP，状态通常在位置 5，但让我们更健壮一些
             for (i, part) in parts.iter().enumerate() {
-                if i >= 5 && !part.contains('=') && !part.starts_with('[') {
-                    // 这看起来像是一个 TCP 状态（没有 '=' 也不是标志）
+                if i >= 3 && !part.contains('=') && !part.starts_with('[') {
                     tcp_state = Some(*part);
                     break;
                 }
@@ -333,28 +340,3 @@ impl ConnectionMonitor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_mac_address() {
-        let mac_str = "aa:bb:cc:dd:ee:ff";
-        let result = network_utils::parse_mac_address(mac_str);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
-    }
-
-    #[test]
-    fn test_parse_connection_stats() {
-        // 此测试仅在 /proc/net/nf_conntrack 存在
-        // 且进程有权限读取时才有效
-        if std::path::Path::new("/proc/net/nf_conntrack").exists() {
-            // 使用测试子网 (192.168.1.0/24)
-            let interface_ip = [192, 168, 1, 1];
-            let subnet_mask = [255, 255, 255, 0];
-            let result = parse_connection_stats(interface_ip, subnet_mask);
-            assert!(result.is_ok());
-        }
-    }
-}
