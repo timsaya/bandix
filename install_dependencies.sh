@@ -29,6 +29,7 @@ declare -A TOOLCHAINS=(
     ["powerpc64le-linux-musl-cross"]="powerpc64le-linux-musl-gcc"
     ["mips-linux-musl-cross"]="mips-linux-musl-gcc"
     ["mipsel-linux-musl-cross"]="mipsel-linux-musl-gcc"
+    ["x86_64-linux-musl-cross"]="x86_64-linux-musl-gcc"
 )
 
 # 选择包管理器
@@ -84,7 +85,7 @@ echo ""
 echo -e "${YELLOW}[2/4] 安装 Rust 工具链...${NC}"
 if ! command -v rustup &> /dev/null; then
     echo "安装 rustup..."
-    curl --proto '=https' --tlsv1.2 -f https://sh.rustup.rs | sh -s -- -y --profile minimal
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 fi
 
 if [ -f "$HOME/.cargo/env" ]; then
