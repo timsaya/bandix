@@ -17,7 +17,7 @@ env:
 jobs:
   build_bandix:
     name: Check Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@main

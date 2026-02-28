@@ -51,21 +51,10 @@ install_system_packages() {
     case "$PACKAGE_MANAGER" in
         apt)
             apt-get update
-            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file musl-tools
-            ;;
-        yum)
-            yum groupinstall -y "Development Tools"
-            yum install -y curl tar gzip xz pkgconfig gcc file musl-gcc musl-libc-static
-            ;;
-        dnf)
-            dnf groupinstall -y 'Development Tools'
-            dnf install -y curl tar gzip xz pkg-config gcc file musl-gcc musl-libc-static
-            ;;
-        pacman)
-            pacman -Sy --noconfirm base-devel curl tar gzip xz pkgconf gcc file musl
+            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file wget
             ;;
         *)
-            echo -e "${RED}错误: 未能识别的包管理器，请手动安装 gcc、make、curl、tar、gzip、xz、pkg-config、musl-tools${NC}"
+            echo -e "${RED}错误: 未能识别的包管理器，仅支持 Ubuntu/Debian 编译环境"
             exit 1
             ;;
     esac
@@ -94,17 +83,20 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
-echo "安装/更新 stable 工具链..."
-rustup toolchain install stable || true
+echo "安装 Rust 1.93.1 工具链..."
+rustup toolchain install 1.93.1-x86_64-unknown-linux-gnu
+
+echo "设置默认工具链为 1.93.1..."
+rustup default 1.93.1-x86_64-unknown-linux-gnu
 
 echo "安装/更新 nightly 工具链..."
-rustup toolchain install nightly
+rustup toolchain install nightly-2026-02-13
 
 echo "添加 rust-src 组件 (nightly)..."
-rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu || {
-    echo -e "${RED}安装 rust-src 失败，请检查 rustup 输出${NC}"
-    exit 1
-}
+rustup component add rust-src --toolchain nightly-2026-02-13-x86_64-unknown-linux-gnu
+
+echo "安装 bpf-linker (v0.10.1) ..."
+cargo install bpf-linker@0.10.1
 
 RUST_TARGETS=(
     "x86_64-unknown-linux-musl"
