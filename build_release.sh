@@ -3,69 +3,44 @@ set -e
 
 source ~/.cargo/env
 
-# Define version number (get from Cargo.toml or specify manually)
+# 定义版本号（从 Cargo.toml 获取或手动指定）
 VERSION=$(grep "^version" bandix/Cargo.toml | cut -d '"' -f2)
 echo "Build version: $VERSION"
 
-# Ensure target directory exists
+# 确保 release 目录存在
 RELEASE_DIR="release"
 mkdir -p $RELEASE_DIR
 
-# Ensure necessary tools are installed
-echo "Checking and installing necessary tools..."
 
-# Check and install bpf-linker
-if ! command -v bpf-linker &> /dev/null; then
-    echo "Installing bpf-linker..."
-    cargo install bpf-linker
-fi
-
-# Check and install nightly toolchain (required for eBPF builds and MIPS build-std)
-echo "Checking nightly toolchain..."
-if ! rustup toolchain list | grep -q "nightly"; then
-    echo "Installing nightly toolchain..."
-    rustup toolchain install nightly
-else
-    echo "✓ Nightly toolchain already installed"
-fi
-
-echo "Checking rust-src component for nightly (required for build-std)..."
-if ! rustup component list --toolchain nightly | grep -q "rust-src (installed)"; then
-    echo "Installing rust-src component for nightly..."
-    rustup component add rust-src --toolchain nightly
-else
-    echo "✓ rust-src already installed for nightly"
-fi
-
-# Build target platform lists
+# 构建目标平台列表
 DEFAULT_TARGETS=(
-  # x86_64 architecture
+  # x86_64 架构
   "x86_64-unknown-linux-musl"
   
-  # AArch64 (ARM64) architecture
+  # AArch64 (ARM64) 架构
   "aarch64-unknown-linux-musl"
   
-  # ARM 32-bit architecture
+  # ARM 32 位架构
   "armv7-unknown-linux-musleabihf"
   "armv7-unknown-linux-musleabi"
   "armv5te-unknown-linux-musleabi"
   "arm-unknown-linux-musleabi"
   "arm-unknown-linux-musleabihf"
   
-  # RISC-V architecture (emerging open source architecture)
+  # RISC-V 架构（新兴开源架构）
   "riscv64gc-unknown-linux-musl"
 
-  # PowerPC architecture (some high-end routers)
+  # PowerPC 架构（部分高端路由器）
   "powerpc64le-unknown-linux-musl"
 )
 
 MIPS_TARGETS=(
-  # MIPS 32-bit architectures (built with nightly + build-std)
+  # MIPS 32 位架构（使用 nightly + build-std 构建）
   "mips-unknown-linux-musl"
   "mipsel-unknown-linux-musl"
 )
 
-# Helper to package build artifacts
+# 打包构建产物的辅助函数
 package_target() {
   local TARGET="$1"
   local TARGET_DIR="$RELEASE_DIR/bandix-$VERSION-$TARGET"
@@ -92,7 +67,7 @@ package_target() {
   fi
 }
 
-# Build statistics
+# 构建统计
 SUCCESS_COUNT=0
 FAILED_COUNT=0
 FAILED_TARGETS=()
@@ -100,12 +75,12 @@ FAILED_TARGETS=()
 echo "Starting build for all target platforms..."
 echo "========================================"
 
-# Build for each default target platform
+# 为每个默认目标平台构建
 for TARGET in "${DEFAULT_TARGETS[@]}"; do
   echo ""
   echo "Starting build for $TARGET..."
   
-  # Build release version
+  # 构建 release 版本
   if cargo build -q --release --target "$TARGET"; then
     echo "✓ Build successful: $TARGET"
     package_target "$TARGET"
@@ -118,16 +93,16 @@ for TARGET in "${DEFAULT_TARGETS[@]}"; do
   echo "----------------------------------------"
 done
 
-# Build for each MIPS target platform (nightly + build-std)
+# 为每个 MIPS 目标平台构建（nightly + build-std）
 for TARGET in "${MIPS_TARGETS[@]}"; do
   echo ""
   echo "Starting build for $TARGET (nightly + build-std)..."
 
-  if cargo +nightly build -q -Z build-std --release --target "$TARGET"; then
+  if cargo +nightly-2026-02-13 build -q -Z build-std --release --target "$TARGET"; then
     echo "✓ Build successful (nightly build-std): $TARGET"
     package_target "$TARGET"
   else
-    echo "✗ cargo +nightly -Z build-std failed: $TARGET"
+    echo "✗ cargo +nightly-2026-02-13 -Z build-std failed: $TARGET"
     FAILED_COUNT=$((FAILED_COUNT + 1))
     FAILED_TARGETS+=("$TARGET")
   fi
@@ -154,7 +129,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
   ls -la $RELEASE_DIR/*.tar.gz 2>/dev/null | sed 's/^/  /' || echo "  No compressed packages generated"
 fi
 
-# Display disk usage
+# 显示磁盘使用情况
 echo "Disk usage:"
 du -sh $RELEASE_DIR 2>/dev/null | sed 's/^/  Total size: /'
 
