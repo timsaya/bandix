@@ -83,11 +83,11 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
-echo "安装 Rust 1.93.1 工具链..."
-rustup toolchain install 1.93.1-x86_64-unknown-linux-gnu
+echo "安装 Rust 1.91.1 工具链..."
+rustup toolchain install 1.91.1-x86_64-unknown-linux-gnu
 
-echo "设置默认工具链为 1.93.1..."
-rustup default 1.93.1-x86_64-unknown-linux-gnu
+echo "设置默认工具链为 1.91.1..."
+rustup default 1.91.1-x86_64-unknown-linux-gnu
 
 echo "安装/更新 nightly 工具链..."
 rustup toolchain install nightly-2026-02-13
