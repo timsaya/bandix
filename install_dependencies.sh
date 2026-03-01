@@ -90,10 +90,10 @@ echo "设置默认工具链为 1.91.1..."
 rustup default 1.91.1-x86_64-unknown-linux-gnu
 
 echo "安装/更新 nightly 工具链..."
-rustup toolchain install nightly-2026-02-13
+rustup toolchain install nightly
 
 echo "添加 rust-src 组件 (nightly)..."
-rustup component add rust-src --toolchain nightly-2026-02-13-x86_64-unknown-linux-gnu
+rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
 
 echo "安装 bpf-linker (v0.10.1) ..."
 cargo install bpf-linker@0.10.1

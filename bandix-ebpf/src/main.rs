@@ -12,7 +12,7 @@ use crate::utils::{is_dns_enabled, is_traffic_enabled};
 use modules::dns::{handle_dns_egress, handle_dns_ingress};
 use modules::traffic::{handle_traffic_egress, handle_traffic_ingress};
 
-#[inline(always)]
+#[inline(never)]
 fn process_module_result(result: Result<i32, ()>) -> Option<i32> {
     match result {
         Ok(TC_ACT_SHOT) => Some(TC_ACT_SHOT),

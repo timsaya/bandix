@@ -98,11 +98,11 @@ for TARGET in "${MIPS_TARGETS[@]}"; do
   echo ""
   echo "Starting build for $TARGET (nightly + build-std)..."
 
-  if cargo +nightly-2026-02-13 build -q -Z build-std --release --target "$TARGET"; then
+  if cargo +nightly build -q -Z build-std --release --target "$TARGET"; then
     echo "✓ Build successful (nightly build-std): $TARGET"
     package_target "$TARGET"
   else
-    echo "✗ cargo +nightly-2026-02-13 -Z build-std failed: $TARGET"
+    echo "✗ cargo +nightly -Z build-std failed: $TARGET"
     FAILED_COUNT=$((FAILED_COUNT + 1))
     FAILED_TARGETS+=("$TARGET")
   fi
