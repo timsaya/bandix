@@ -241,7 +241,11 @@ pub struct DeleteScheduledLimitRequest {
     pub id: String,
 }
 
-/// 流量 monitoring API handler
+#[derive(Serialize, Deserialize)]
+pub struct DeleteDeviceRequest {
+    pub mac: String,
+}
+
 #[derive(Clone)]
 pub struct TrafficApiHandler {
     scheduled_rate_limits: Arc<Mutex<Vec<ScheduledRateLimit>>>,
@@ -252,6 +256,8 @@ pub struct TrafficApiHandler {
     realtime_manager: Arc<RealtimeRingManager>,
     long_term_manager: Arc<LongTermRingManager>,
     device_manager: Arc<crate::device::DeviceManager>,
+    ingress_ebpf: Option<std::sync::Arc<aya::Ebpf>>,
+    last_ebpf_traffic: Arc<Mutex<std::collections::HashMap<[u8; 6], [u64; 4]>>>,
     options: Options,
 }
 
@@ -265,6 +271,8 @@ impl TrafficApiHandler {
         realtime_manager: Arc<RealtimeRingManager>,
         long_term_manager: Arc<LongTermRingManager>,
         device_manager: Arc<crate::device::DeviceManager>,
+        ingress_ebpf: Option<std::sync::Arc<aya::Ebpf>>,
+        last_ebpf_traffic: Arc<Mutex<std::collections::HashMap<[u8; 6], [u64; 4]>>>,
         options: Options,
     ) -> Self {
         Self {
@@ -276,6 +284,8 @@ impl TrafficApiHandler {
             realtime_manager,
             long_term_manager,
             device_manager,
+            ingress_ebpf,
+            last_ebpf_traffic,
             options,
         }
     }
@@ -298,13 +308,11 @@ impl TrafficApiHandler {
 
     pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         match request.path.as_str() {
-            "/api/traffic/devices" => {
-                if request.method == "GET" {
-                    self.handle_devices(request).await
-                } else {
-                    Ok(HttpResponse::error(405, "Method not allowed".to_string()))
-                }
-            }
+            "/api/traffic/devices" => match request.method.as_str() {
+                "GET" => self.handle_devices(request).await,
+                "DELETE" => self.handle_delete_device(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
             "/api/traffic/bindings" => match request.method.as_str() {
                 "GET" => self.handle_hostname_bindings().await,
                 "POST" => self.handle_set_hostname_binding(request).await,
@@ -719,7 +727,71 @@ impl TrafficApiHandler {
         Ok(HttpResponse::ok(body))
     }
 
-    /// 处理/api/traffic/metrics endpoint - 实时指标（仅内存，未持久化）
+    async fn handle_delete_device(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let body = request.body.as_ref().ok_or_else(|| anyhow::anyhow!("Missing request body"))?;
+        let req: DeleteDeviceRequest = serde_json::from_str(body)?;
+        let mac = crate::utils::network_utils::parse_mac_address(&req.mac)?;
+
+        if !self.device_manager.remove_device(&mac) {
+            return Ok(HttpResponse::error(404, "Device not found".to_string()));
+        }
+
+        self.realtime_manager.remove_device(&mac);
+        self.long_term_manager.remove_device(&mac)?;
+
+        {
+            let mut bindings = self.hostname_bindings.lock().unwrap();
+            bindings.remove(&mac);
+        }
+        traffic::upsert_hostname_binding(self.options.data_dir(), &mac, "")?;
+
+        {
+            let mut wl = self.rate_limit_whitelist.lock().unwrap();
+            wl.remove(&mac);
+        }
+        let enabled = self.rate_limit_whitelist_enabled.load(Ordering::Relaxed);
+        let default_limits = *self.default_wan_rate_limits.lock().unwrap();
+        let wl = self.rate_limit_whitelist.lock().unwrap().clone();
+        let policy = traffic::RateLimitPolicy {
+            enabled,
+            default_wan_limits: default_limits,
+            whitelist: wl,
+        };
+        traffic::save_rate_limit_policy(self.options.data_dir(), &policy)?;
+
+        {
+            let mut srl = self.scheduled_rate_limits.lock().unwrap();
+            srl.retain(|r| r.mac != mac);
+        }
+        traffic::delete_scheduled_limits_by_mac(self.options.data_dir(), &mac)?;
+
+        {
+            let mut last_ebpf = self.last_ebpf_traffic.lock().unwrap();
+            last_ebpf.remove(&mac);
+        }
+
+        if let Some(ingress_ebpf) = self.ingress_ebpf.as_ref() {
+            let ebpf_mut = unsafe {
+                let ptr = std::sync::Arc::as_ptr(ingress_ebpf) as *const aya::Ebpf as *mut aya::Ebpf;
+                &mut *ptr
+            };
+            if let Ok(mut mac_traffic) = aya::maps::HashMap::<_, [u8; 6], [u64; 4]>::try_from(ebpf_mut.map_mut("MAC_TRAFFIC").ok_or_else(|| anyhow::anyhow!("MAC_TRAFFIC map not found"))?) {
+                let _ = mac_traffic.remove(&mac);
+            }
+            if let Ok(mut mac_rate_limits) = aya::maps::HashMap::<_, [u8; 6], [u64; 2]>::try_from(ebpf_mut.map_mut("MAC_RATE_LIMITS").ok_or_else(|| anyhow::anyhow!("MAC_RATE_LIMITS map not found"))?) {
+                let _ = mac_rate_limits.remove(&mac);
+            }
+            if let Ok(mut rate_buckets) = aya::maps::HashMap::<_, [u8; 6], [u64; 3]>::try_from(ebpf_mut.map_mut("RATE_BUCKETS").ok_or_else(|| anyhow::anyhow!("RATE_BUCKETS map not found"))?) {
+                let _ = rate_buckets.remove(&mac);
+            }
+        }
+
+        log::info!("Device deleted: {}", format_mac(&mac));
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
     async fn handle_metrics(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
         let mac_opt = request.query_params.get("mac").cloned();
 

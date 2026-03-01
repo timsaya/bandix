@@ -222,9 +222,14 @@ impl ModuleType {
                     if !baselines_with_ts.is_empty() {
                         let mut restored_count = 0;
 
+                        let interface_mac = traffic_ctx.device_manager.get_interface_mac();
+                        let exclude_iface = traffic_ctx.options.traffic_exclude_iface_device();
                         for (mac, (ts_ms, wan_rx_bytes, wan_tx_bytes, lan_rx_bytes, lan_tx_bytes, last_online_ts)) in
                             baselines_with_ts.iter()
                         {
+                            if exclude_iface && *mac == interface_mac {
+                                continue;
+                            }
                             if let Err(e) = traffic_ctx.device_manager.update_device_traffic_stats(mac, |stats| {
                                 // 恢复WAN和LAN流量字节数作为基线
                                 stats.wan_rx_bytes = *wan_rx_bytes;
@@ -304,6 +309,8 @@ impl ModuleType {
                     Arc::clone(&traffic_ctx.realtime_manager),
                     Arc::clone(&traffic_ctx.long_term_manager),
                     Arc::clone(&traffic_ctx.device_manager),
+                    traffic_ctx.ingress_ebpf.as_ref().map(Arc::clone),
+                    Arc::clone(&traffic_ctx.last_ebpf_traffic),
                     traffic_ctx.options.clone(),
                 ));
 

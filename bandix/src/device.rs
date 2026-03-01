@@ -155,10 +155,16 @@ pub struct DeviceManager {
     neighbor_initialized: Arc<AtomicBool>,
     wifi_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
     wired_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
+    exclude_iface_device: bool,
 }
 
 impl DeviceManager {
-    pub fn new(iface: String, subnet_info: SubnetInfo, hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>) -> Self {
+    pub fn new(
+        iface: String,
+        subnet_info: SubnetInfo,
+        hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
+        exclude_iface_device: bool,
+    ) -> Self {
         Self {
             devices: Arc::new(Mutex::new(HashMap::new())),
             iface,
@@ -168,6 +174,7 @@ impl DeviceManager {
             neighbor_initialized: Arc::new(AtomicBool::new(false)),
             wifi_macs: Arc::new(Mutex::new(HashSet::new())),
             wired_macs: Arc::new(Mutex::new(HashSet::new())),
+            exclude_iface_device,
         }
     }
 
@@ -502,17 +509,17 @@ impl DeviceManager {
             }
         }
 
-        // 添加接口本身
-        let interface_mac = self.subnet_info.interface_mac;
-        let interface_ipv4 = self.subnet_info.interface_ip;
-        let interface_ipv6_addresses = devices_map
-            .get(&interface_mac)
-            .map(|(_, ipv6)| ipv6.clone())
-            .unwrap_or_default();
+        if !self.exclude_iface_device {
+            let interface_mac = self.subnet_info.interface_mac;
+            let interface_ipv4 = self.subnet_info.interface_ip;
+            let interface_ipv6_addresses = devices_map
+                .get(&interface_mac)
+                .map(|(_, ipv6)| ipv6.clone())
+                .unwrap_or_default();
 
-        devices_map.insert(interface_mac, (Some(interface_ipv4), interface_ipv6_addresses));
+            devices_map.insert(interface_mac, (Some(interface_ipv4), interface_ipv6_addresses));
+        }
 
-        // 转换为向量格式
         let devices: Vec<([u8; 6], Option<[u8; 4]>, Vec<[u8; 16]>)> =
             devices_map.into_iter().map(|(mac, (ipv4, ipv6))| (mac, ipv4, ipv6)).collect();
 
@@ -560,9 +567,20 @@ impl DeviceManager {
         self.subnet_info.interface_mac
     }
 
-    /// 添加离线设备（从 ring 文件恢复的设备）
-    /// 如果设备已存在，则只更新主机名和 IP；如果不存在，则创建新设备
+    pub fn remove_device(&self, mac: &[u8; 6]) -> bool {
+        let mut devices = self.devices.lock().unwrap();
+        let removed = devices.remove(mac).is_some();
+        if removed {
+            let mut neighbor = self.neighbor_ipv4_online.lock().unwrap();
+            neighbor.remove(mac);
+        }
+        removed
+    }
+
     pub fn add_offline_device(&self, mac: [u8; 6], ipv4: Option<[u8; 4]>) {
+        if self.exclude_iface_device && mac == self.subnet_info.interface_mac {
+            return;
+        }
         let hostname_bindings = self.hostname_bindings.lock().unwrap();
         let mut devices = self.devices.lock().unwrap();
 

@@ -92,6 +92,13 @@ pub struct TrafficArgs {
         help = "Additional local subnets (comma-separated CIDR notation, e.g. '192.168.2.0/24,10.0.0.0/8'). Empty = only interface subnet."
     )]
     pub traffic_additional_subnets: String,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Exclude iface interface device (router) from traffic statistics"
+    )]
+    pub traffic_exclude_iface_device: bool,
 }
 
 /// DNS 模块参数
@@ -208,6 +215,10 @@ impl Options {
 
     pub fn traffic_additional_subnets(&self) -> &str {
         &self.traffic.traffic_additional_subnets
+    }
+
+    pub fn traffic_exclude_iface_device(&self) -> bool {
+        self.traffic.traffic_exclude_iface_device
     }
 
     /// 从 DNS 参数获取启用 DNS
@@ -647,6 +658,7 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
         options.iface().to_string(),
         subnet_info.clone(),
         Arc::clone(&shared_hostname_bindings),
+        options.traffic_exclude_iface_device(),
     ));
 
     // 首次刷新邻居表，获取局域网设备

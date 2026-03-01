@@ -528,7 +528,11 @@ impl RealtimeRingManager {
         Ok(())
     }
 
-    /// 从内存环形缓冲区查询数据
+    pub fn remove_device(&self, mac: &[u8; 6]) {
+        let mut rings = self.rings.lock().unwrap();
+        rings.remove(mac);
+    }
+
     pub fn query_metrics_by_mac(&self, mac: &[u8; 6], start_ms: u64, end_ms: u64) -> Result<Vec<MetricsRow>, anyhow::Error> {
         let rings = self.rings.lock().unwrap();
 
@@ -1135,6 +1139,22 @@ impl LongTermRingManager {
         let path = ring_file_path(&self.base_dir, mac);
         let f = write_ring_file_v5(&path, ring.capacity, &ring.slots)?;
         f.sync_all()?;
+        Ok(())
+    }
+
+    pub fn remove_device(&self, mac: &[u8; 6]) -> Result<(), anyhow::Error> {
+        {
+            let mut rings = self.rings.lock().unwrap();
+            rings.remove(mac);
+        }
+        {
+            let mut accumulators = self.accumulators.lock().unwrap();
+            accumulators.remove(mac);
+        }
+        let path = ring_file_path(&self.base_dir, mac);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
         Ok(())
     }
 
@@ -2267,7 +2287,6 @@ fn load_all_scheduled_limits_raw(base_dir: &str) -> Result<Vec<ScheduledRateLimi
     Ok(out)
 }
 
-/// 按 ID 删除预定速率限制规则
 #[allow(dead_code)]
 pub fn delete_scheduled_limit_by_id(base_dir: &str, id: &str) -> Result<bool, anyhow::Error> {
     let mut rules = load_all_scheduled_limits_raw(base_dir)?;
@@ -2280,6 +2299,17 @@ pub fn delete_scheduled_limit_by_id(base_dir: &str, id: &str) -> Result<bool, an
 
     save_all_scheduled_limits(base_dir, &rules)?;
     Ok(true)
+}
+
+pub fn delete_scheduled_limits_by_mac(base_dir: &str, mac: &[u8; 6]) -> Result<usize, anyhow::Error> {
+    let mut rules = load_all_scheduled_limits_raw(base_dir)?;
+    let original_len = rules.len();
+    rules.retain(|r| r.mac != *mac);
+    let removed = original_len - rules.len();
+    if removed > 0 {
+        save_all_scheduled_limits(base_dir, &rules)?;
+    }
+    Ok(removed)
 }
 
 /// 根据预定规则计算 MAC 地址的当前有效速率限制
