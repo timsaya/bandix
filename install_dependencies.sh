@@ -74,7 +74,7 @@ echo ""
 echo -e "${YELLOW}[2/4] 安装 Rust 工具链...${NC}"
 if ! command -v rustup &> /dev/null; then
     echo "安装 rustup..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 fi
 
 if [ -f "$HOME/.cargo/env" ]; then
