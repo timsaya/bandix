@@ -99,6 +99,20 @@ pub struct TrafficArgs {
         help = "Exclude iface interface device (router) from traffic statistics"
     )]
     pub traffic_exclude_iface_device: bool,
+
+    #[clap(
+        long,
+        default_value = "false",
+        help = "Enable periodic neighbor table flush (ip neigh flush). Only takes effect when traffic module is enabled. Flushing affects all programs using the interface."
+    )]
+    pub traffic_neighbor_flush_enable: bool,
+
+    #[clap(
+        long,
+        default_value = "600",
+        help = "Traffic neighbor flush interval in seconds (default: 600). Only used when traffic-neighbor-flush-enable is true."
+    )]
+    pub traffic_neighbor_flush_interval: u32,
 }
 
 /// DNS 模块参数
@@ -221,6 +235,14 @@ impl Options {
         self.traffic.traffic_exclude_iface_device
     }
 
+    pub fn traffic_neighbor_flush_enable(&self) -> bool {
+        self.traffic.traffic_neighbor_flush_enable
+    }
+
+    pub fn traffic_neighbor_flush_interval(&self) -> u32 {
+        self.traffic.traffic_neighbor_flush_interval
+    }
+
     /// 从 DNS 参数获取启用 DNS
     pub fn enable_dns(&self) -> bool {
         self.dns.enable_dns
@@ -299,6 +321,30 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
     Ok((network_addr, subnet_mask))
 }
 
+pub fn build_allowed_ipv4_subnets(
+    subnet_info: &SubnetInfo,
+    additional_subnets: &str,
+) -> Vec<([u8; 4], [u8; 4])> {
+    let mut subnets = Vec::new();
+    let net: [u8; 4] = [
+        subnet_info.interface_ip[0] & subnet_info.subnet_mask[0],
+        subnet_info.interface_ip[1] & subnet_info.subnet_mask[1],
+        subnet_info.interface_ip[2] & subnet_info.subnet_mask[2],
+        subnet_info.interface_ip[3] & subnet_info.subnet_mask[3],
+    ];
+    subnets.push((net, subnet_info.subnet_mask));
+    for cidr in additional_subnets.split(',') {
+        let cidr = cidr.trim();
+        if cidr.is_empty() {
+            continue;
+        }
+        if let Ok((net, mask)) = parse_cidr(cidr) {
+            subnets.push((net, mask));
+        }
+    }
+    subnets
+}
+
 // 验证参数
 fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
     // 检查网络接口是否存在
@@ -332,6 +378,12 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
                 // 尝试解析以验证格式
                 parse_cidr(subnet_cidr).map_err(|e| anyhow::anyhow!("Invalid subnet CIDR '{}': {}", subnet_cidr, e))?;
             }
+        }
+
+        if opt.traffic_neighbor_flush_enable() && opt.traffic_neighbor_flush_interval() == 0 {
+            return Err(anyhow::anyhow!(
+                "traffic_neighbor_flush_interval must be greater than 0 when traffic_neighbor_flush_enable is true"
+            ));
         }
     }
 
@@ -633,6 +685,46 @@ fn start_hostname_refresh_task(
     })
 }
 
+fn start_neighbor_flush_task(
+    iface: String,
+    interval_secs: u64,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if std::process::Command::new("ip")
+                        .args(["-4", "neigh", "flush", "dev", &iface])
+                        .output()
+                        .map(|o| !o.status.success())
+                        .unwrap_or(true)
+                    {
+                        log::warn!("ip -4 neigh flush dev {} failed", iface);
+                    }
+                    if std::process::Command::new("ip")
+                        .args(["-6", "neigh", "flush", "dev", &iface])
+                        .output()
+                        .map(|o| !o.status.success())
+                        .unwrap_or(true)
+                    {
+                        log::warn!("ip -6 neigh flush dev {} failed", iface);
+                    }
+                    log::debug!("Neighbor table flushed for {}", iface);
+                }
+                _ = shutdown_notify.notified() => {
+                    log::info!("Neighbor flush task received shutdown signal, stopping...");
+                    break;
+                }
+            }
+        }
+    })
+}
+
 // 运行服务
 async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
@@ -654,9 +746,11 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let shared_hostname_bindings: Arc<Mutex<std::collections::HashMap<[u8; 6], String>>> =
         Arc::new(Mutex::new(hostname_bindings_vec.into_iter().collect()));
 
+    let allowed_ipv4_subnets = build_allowed_ipv4_subnets(&subnet_info, options.traffic_additional_subnets());
     let device_manager = Arc::new(DeviceManager::new(
         options.iface().to_string(),
         subnet_info.clone(),
+        allowed_ipv4_subnets,
         Arc::clone(&shared_hostname_bindings),
         options.traffic_exclude_iface_device(),
     ));
@@ -699,6 +793,15 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     tasks.push(web_task);
     tasks.push(hostname_refresh_task);
     tasks.push(device_refresh_task);
+
+    if options.enable_traffic() && options.traffic_neighbor_flush_enable() {
+        let neighbor_flush_task = start_neighbor_flush_task(
+            options.iface().to_string(),
+            options.traffic_neighbor_flush_interval() as u64,
+            shutdown_notify.clone(),
+        );
+        tasks.push(neighbor_flush_task);
+    }
 
     // 等待关闭信号
     shutdown_notify.notified().await;

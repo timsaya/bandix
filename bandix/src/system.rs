@@ -186,6 +186,10 @@ pub fn log_startup_info(options: &Options) {
         }
     }
 
+    if options.enable_traffic() && options.traffic_neighbor_flush_enable() {
+        info!("Traffic neighbor flush enabled (interval: {}s)", options.traffic_neighbor_flush_interval());
+    }
+
     if let Some(kvs) = parse_openwrt_from_os_release() {
         info!("OpenWrt identifiers (/etc/os-release):");
         for (k, v) in kvs {

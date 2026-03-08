@@ -79,24 +79,38 @@ impl ConnectionApiHandler {
 /// 设备连接信息，用于 API 响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConnectionInfo {
+    #[serde(rename = "mac")]
     pub mac_address: String,
+    #[serde(rename = "ip4")]
     pub ip_address: String,
+    #[serde(rename = "host")]
     pub hostname: String,
+    #[serde(rename = "tcp")]
     pub tcp_connections: u32,
+    #[serde(rename = "udp")]
     pub udp_connections: u32,
+    #[serde(rename = "tcp_est")]
     pub established_tcp: u32,
+    #[serde(rename = "tcp_tw")]
     pub time_wait_tcp: u32,
+    #[serde(rename = "tcp_cw")]
     pub close_wait_tcp: u32,
+    #[serde(rename = "total")]
     pub total_connections: u32,
+    #[serde(rename = "last")]
     pub last_updated: u64,
 }
 
 /// 设备连接统计响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConnectionStatsResponse {
+    #[serde(rename = "g")]
     pub global_stats: ConnectionStats,
+    #[serde(rename = "d")]
     pub devices: Vec<DeviceConnectionInfo>,
+    #[serde(rename = "cnt")]
     pub total_devices: usize,
+    #[serde(rename = "last")]
     pub last_updated: u64,
 }
 

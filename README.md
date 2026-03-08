@@ -96,30 +96,35 @@ Get real-time traffic statistics for all devices.
 {
   "status": "success",
   "data": {
-    "devices": [
+    "d": [
       {
-        "ip": "192.168.1.100",
+        "ip4": "192.168.1.100",
+        "ip6": [],
         "mac": "00:11:22:33:44:55",
-        "total_rx_bytes": 1024,
-        "total_tx_bytes": 2048,
-        "total_rx_rate": 100,
-        "total_tx_rate": 200,
-        "lan_rx_bytes": 512,
-        "lan_tx_bytes": 1024,
-        "lan_rx_rate": 50,
-        "lan_tx_rate": 100,
-        "wan_rx_bytes": 512,
-        "wan_tx_bytes": 1024,
-        "wan_rx_rate": 50,
-        "wan_tx_rate": 100,
-        "wan_rx_rate_limit": 0,
-        "wan_tx_rate_limit": 0,
-        "last_online_ts": 1640995200000
+        "host": "MyDevice",
+        "conn": "wifi",
+        "t_rx_b": 1024,
+        "t_tx_b": 2048,
+        "t_rx_r": 100,
+        "t_tx_r": 200,
+        "w_rx_l": 0,
+        "w_tx_l": 0,
+        "l_rx_b": 512,
+        "l_tx_b": 1024,
+        "l_rx_r": 50,
+        "l_tx_r": 100,
+        "w_rx_b": 512,
+        "w_tx_b": 1024,
+        "w_rx_r": 50,
+        "w_tx_r": 100,
+        "last": 1640995200000
       }
     ]
   }
 }
 ```
+
+**Fields:** `d`=devices; `ip4`=IPv4; `ip6`=IPv6 list; `host`=hostname; `conn`=connection type; `t_rx_b`/`t_tx_b`=total bytes; `t_rx_r`/`t_tx_r`=total rate; `w_rx_l`/`w_tx_l`=WAN limits; `l_*`=LAN; `w_*`=WAN; `last`=last online timestamp (ms).
 
 #### GET /api/traffic/limits/schedule
 Get all scheduled rate limits for devices.
@@ -275,6 +280,20 @@ Set or update hostname binding for a device. To remove a binding, send an empty 
 }
 ```
 
+#### GET /api/traffic/usage/ranking
+Get device traffic usage ranking.
+
+**Query Parameters:** `start_ms`, `end_ms`, `network_type` (wan/lan/all)
+
+**Response:** `start`, `end`, `net`, `t_b`, `t_rx_b`, `t_tx_b`, `cnt`, `r` (array with `mac`, `host`, `ip4`, `t_b`, `rx_b`, `tx_b`, `pct`, `r`).
+
+#### GET /api/traffic/usage/increments
+Get time-series traffic increments (hourly or daily).
+
+**Query Parameters:** `mac`, `start_ms`, `end_ms`, `aggregation` (hourly/daily), `network_type`
+
+**Response:** `start`, `end`, `agg`, `net`, `inc` (array of increments with `w_rx_avg`/`w_tx_b` etc.), `t_rx_b`, `t_tx_b`, `t_b`.
+
 ### Connection Statistics API
 
 #### GET /api/connection/devices
@@ -285,57 +304,42 @@ Get connection statistics for all devices.
 {
   "status": "success",
   "data": {
-    "global_stats": {
-      "total_connections": 150,
-      "tcp_connections": 120,
-      "udp_connections": 30,
-      "established_tcp": 80,
-      "time_wait_tcp": 40,
-      "close_wait_tcp": 0,
-      "last_updated": 1640995200
+    "g": {
+      "total": 150,
+      "tcp": 120,
+      "udp": 30,
+      "tcp_est": 80,
+      "tcp_tw": 40,
+      "tcp_cw": 0,
+      "last": 1640995200000
     },
-    "devices": [
+    "d": [
       {
-        "mac_address": "00:11:22:33:44:55",
-        "ip_address": "192.168.1.100",
-        "tcp_connections": 7,
-        "udp_connections": 3,
-        "established_tcp": 5,
-        "time_wait_tcp": 2,
-        "close_wait_tcp": 0,
-        "total_connections": 10,
-        "last_updated": 1640995200
+        "mac": "00:11:22:33:44:55",
+        "ip4": "192.168.1.100",
+        "host": "MyDevice",
+        "tcp": 7,
+        "udp": 3,
+        "tcp_est": 5,
+        "tcp_tw": 2,
+        "tcp_cw": 0,
+        "total": 10,
+        "last": 1640995200000
       }
     ],
-    "total_devices": 1,
-    "last_updated": 1640995200
+    "cnt": 1,
+    "last": 1640995200000
   }
 }
 ```
 
-**Field Descriptions:**
+**Fields:** `g`=global stats; `d`=devices; `cnt`=device count; `tcp_est`/`tcp_tw`/`tcp_cw`=TCP states; all timestamps in milliseconds.
 
-**Global Statistics:**
-- `total_connections`: Total number of TCP and UDP connections
-- `tcp_connections`: Total number of TCP connections
-- `udp_connections`: Total number of UDP connections
-- `established_tcp`: Number of active TCP connections (ESTABLISHED state)
-- `time_wait_tcp`: Number of TCP connections in TIME_WAIT and similar closing states
-- `close_wait_tcp`: Number of TCP connections in CLOSE_WAIT state
-- `last_updated`: Unix timestamp of last update
+**Global (g):** `total`, `tcp`, `udp`, `tcp_est`, `tcp_tw`, `tcp_cw`, `last` (ms).
 
-**Device Statistics:**
-- `mac_address`: Device MAC address
-- `ip_address`: Device IP address
-- `tcp_connections`: Total TCP connections initiated by this device
-- `udp_connections`: Total UDP connections initiated by this device
-- `established_tcp`: Active TCP connections (ESTABLISHED state)
-- `time_wait_tcp`: TCP connections in TIME_WAIT and similar closing states
-- `close_wait_tcp`: TCP connections in CLOSE_WAIT state
-- `total_connections`: Total connections for this device (tcp_connections + udp_connections)
-- `last_updated`: Unix timestamp of last update
+**Device (d):** `mac`, `ip4`, `host`, `tcp`, `udp`, `tcp_est`, `tcp_tw`, `tcp_cw`, `total`, `last` (ms).
 
-**Note:** Device statistics only count outgoing connections (where the device is the source). Only devices present in the ARP table and within the same subnet as the specified network interface are included.
+**Note:** Device statistics only count outgoing connections. Only devices in the ARP table within the interface subnet are included. All timestamps in milliseconds.
 
 ### DNS Monitoring API
 
@@ -540,36 +544,15 @@ Update DNS monitoring configuration (Not Yet Implemented).
 
 ## Field Descriptions
 
-### Traffic Statistics
-- `ip`: Device IP address
-- `mac`: Device MAC address
-- `total_rx_bytes`: Total bytes received by the device
-- `total_tx_bytes`: Total bytes sent by the device
-- `total_rx_rate`: Current total receiving rate of the device (bytes/second)
-- `total_tx_rate`: Current total sending rate of the device (bytes/second)
-- `lan_rx_bytes`: Local network receiving bytes
-- `lan_tx_bytes`: Local network sending bytes
-- `lan_rx_rate`: Local network receiving rate (bytes/second)
-- `lan_tx_rate`: Local network sending rate (bytes/second)
-- `wan_rx_bytes`: Wide network receiving bytes
-- `wan_tx_bytes`: Wide network sending bytes
-- `wan_rx_rate`: Wide network receiving rate (bytes/second)
-- `wan_tx_rate`: Wide network sending rate (bytes/second)
-- `wan_rx_rate_limit`: Wide network download limit (bytes/second)
-- `wan_tx_rate_limit`: Wide network upload limit (bytes/second)
-- `last_online_ts`: Last online timestamp (milliseconds since epoch)
+### Traffic Statistics (/api/traffic/devices response keys)
+- `ip4`: IPv4 address | `ip6`: IPv6 list | `mac`: MAC | `host`: hostname | `conn`: connection type
+- `t_rx_b`/`t_tx_b`: total bytes | `t_rx_r`/`t_tx_r`: total rate | `w_rx_l`/`w_tx_l`: WAN limits
+- `l_rx_b`/`l_tx_b`: LAN bytes | `l_rx_r`/`l_tx_r`: LAN rate | `w_rx_b`/`w_tx_b`: WAN bytes | `w_rx_r`/`w_tx_r`: WAN rate
+- `last`: last online timestamp (ms)
 
-### Connection Statistics
-- `total_connections`: Total number of connections
-- `tcp_connections`: Total number of TCP connections
-- `udp_connections`: Total number of UDP connections
-- `established_tcp`: Number of established TCP connections
-- `time_wait_tcp`: Number of TCP connections in TIME_WAIT state
-- `close_wait_tcp`: Number of TCP connections in CLOSE_WAIT state
-- `active_tcp`: Number of active TCP connections (ESTABLISHED state)
-- `active_udp`: Number of active UDP connections
-- `closed_tcp`: Number of closed TCP connections (TIME_WAIT, CLOSE_WAIT, etc.)
-- `last_updated`: Last update timestamp (seconds since epoch)
+### Connection Statistics (/api/connection/devices response keys)
+- `g`: global stats | `d`: device list | `cnt`: device count
+- `total`, `tcp`, `udp`, `tcp_est`, `tcp_tw`, `tcp_cw`, `last` (ms)
 
 ## License
 

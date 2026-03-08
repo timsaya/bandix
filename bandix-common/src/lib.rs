@@ -104,12 +104,19 @@ impl DeviceTrafficStats {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ConnectionStats {
+    #[cfg_attr(feature = "serde", serde(rename = "total"))]
     pub total_connections: u32,
+    #[cfg_attr(feature = "serde", serde(rename = "tcp"))]
     pub tcp_connections: u32,
+    #[cfg_attr(feature = "serde", serde(rename = "udp"))]
     pub udp_connections: u32,
+    #[cfg_attr(feature = "serde", serde(rename = "tcp_est"))]
     pub established_tcp: u32,
+    #[cfg_attr(feature = "serde", serde(rename = "tcp_tw"))]
     pub time_wait_tcp: u32,
+    #[cfg_attr(feature = "serde", serde(rename = "tcp_cw"))]
     pub close_wait_tcp: u32,
+    #[cfg_attr(feature = "serde", serde(rename = "last"))]
     pub last_updated: u64,
 }
 

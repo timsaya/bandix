@@ -56,11 +56,10 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
     // 2. 本地网络设备连接统计（基于 ARP 表）
     let mut device_stats = HashMap::new();
 
-    // 获取当前时间戳
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
+        .as_millis() as u64;
 
     total_stats.last_updated = timestamp;
 

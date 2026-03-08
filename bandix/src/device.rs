@@ -150,6 +150,7 @@ pub struct DeviceManager {
     devices: Arc<Mutex<HashMap<[u8; 6], UnifiedDevice>>>,
     iface: String,
     subnet_info: SubnetInfo,
+    allowed_ipv4_subnets: Vec<([u8; 4], [u8; 4])>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     neighbor_ipv4_online: Arc<Mutex<HashMap<[u8; 6], bool>>>,
     neighbor_initialized: Arc<AtomicBool>,
@@ -162,6 +163,7 @@ impl DeviceManager {
     pub fn new(
         iface: String,
         subnet_info: SubnetInfo,
+        allowed_ipv4_subnets: Vec<([u8; 4], [u8; 4])>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         exclude_iface_device: bool,
     ) -> Self {
@@ -169,6 +171,7 @@ impl DeviceManager {
             devices: Arc::new(Mutex::new(HashMap::new())),
             iface,
             subnet_info,
+            allowed_ipv4_subnets,
             hostname_bindings,
             neighbor_ipv4_online: Arc::new(Mutex::new(HashMap::new())),
             neighbor_initialized: Arc::new(AtomicBool::new(false)),
@@ -176,6 +179,12 @@ impl DeviceManager {
             wired_macs: Arc::new(Mutex::new(HashSet::new())),
             exclude_iface_device,
         }
+    }
+
+    fn ip_in_allowed_ipv4_subnets(&self, ip: [u8; 4]) -> bool {
+        self.allowed_ipv4_subnets.iter().any(|(net, mask)| {
+            ip[0] & mask[0] == net[0] && ip[1] & mask[1] == net[1] && ip[2] & mask[2] == net[2] && ip[3] & mask[3] == net[3]
+        })
     }
 
     pub fn start_background_task(
@@ -382,6 +391,14 @@ impl DeviceManager {
             let state = Self::extract_neighbor_state(&parts).unwrap_or("UNKNOWN");
             let online = matches!(state, "REACHABLE" | "STALE" | "DELAY" | "PROBE");
 
+            let ipv4 = match parts[0].parse::<std::net::Ipv4Addr>() {
+                Ok(ip) => ip,
+                Err(_) => continue,
+            };
+            if !self.ip_in_allowed_ipv4_subnets(ipv4.octets()) {
+                continue;
+            }
+
             if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
                 if lladdr_pos + 1 < parts.len() {
                     if let Ok(mac) = crate::utils::network_utils::parse_mac_address(parts[lladdr_pos + 1]) {
@@ -447,6 +464,10 @@ impl DeviceManager {
                     Ok(ip) => ip,
                     Err(_) => continue,
                 };
+                let ipv4_bytes = ipv4.octets();
+                if !self.ip_in_allowed_ipv4_subnets(ipv4_bytes) {
+                    continue;
+                }
 
                 // 查找 MAC 地址 (lladdr)
                 if let Some(lladdr_pos) = parts.iter().position(|&x| x == "lladdr") {
@@ -456,7 +477,7 @@ impl DeviceManager {
                                 continue;
                             }
 
-                            devices_map.entry(mac).or_insert_with(|| (None, Vec::new())).0 = Some(ipv4.octets());
+                            devices_map.entry(mac).or_insert_with(|| (None, Vec::new())).0 = Some(ipv4_bytes);
                         }
                     }
                 }
@@ -663,6 +684,14 @@ impl DeviceManager {
 
                 let state = Self::extract_neighbor_state(&parts).unwrap_or("UNKNOWN");
                 if !matches!(state, "REACHABLE" | "STALE" | "DELAY" | "PROBE") {
+                    continue;
+                }
+
+                let ipv4 = match parts[0].parse::<std::net::Ipv4Addr>() {
+                    Ok(ip) => ip,
+                    Err(_) => continue,
+                };
+                if !self.ip_in_allowed_ipv4_subnets(ipv4.octets()) {
                     continue;
                 }
 

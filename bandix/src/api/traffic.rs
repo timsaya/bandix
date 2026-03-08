@@ -13,36 +13,56 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 设备信息，用于 API 响应
 #[derive(Serialize, Deserialize)]
 pub struct DeviceInfo {
+    #[serde(rename = "ip4")]
     pub ip: String,
+    #[serde(rename = "ip6")]
     pub ipv6_addresses: Vec<String>,
     pub mac: String,
+    #[serde(rename = "host")]
     pub hostname: String,
+    #[serde(rename = "conn")]
     pub connection_type: String,
 
+    #[serde(rename = "t_rx_b")]
     pub total_rx_bytes: u64,
+    #[serde(rename = "t_tx_b")]
     pub total_tx_bytes: u64,
+    #[serde(rename = "t_rx_r")]
     pub total_rx_rate: u64,
+    #[serde(rename = "t_tx_r")]
     pub total_tx_rate: u64,
 
+    #[serde(rename = "w_rx_l")]
     pub wan_rx_rate_limit: u64,
+    #[serde(rename = "w_tx_l")]
     pub wan_tx_rate_limit: u64,
 
+    #[serde(rename = "l_rx_b")]
     pub lan_rx_bytes: u64,
+    #[serde(rename = "l_tx_b")]
     pub lan_tx_bytes: u64,
+    #[serde(rename = "l_rx_r")]
     pub lan_rx_rate: u64,
+    #[serde(rename = "l_tx_r")]
     pub lan_tx_rate: u64,
 
+    #[serde(rename = "w_rx_b")]
     pub wan_rx_bytes: u64,
+    #[serde(rename = "w_tx_b")]
     pub wan_tx_bytes: u64,
+    #[serde(rename = "w_rx_r")]
     pub wan_rx_rate: u64,
+    #[serde(rename = "w_tx_r")]
     pub wan_tx_rate: u64,
 
+    #[serde(rename = "last")]
     pub last_online_ts: u64,
 }
 
 /// 设备响应结构
 #[derive(Serialize, Deserialize)]
 pub struct DevicesResponse {
+    #[serde(rename = "d")]
     pub devices: Vec<DeviceInfo>,
 }
 
@@ -62,75 +82,128 @@ pub struct MetricsResponse {
 #[derive(Serialize, Deserialize)]
 pub struct DeviceUsageRanking {
     pub mac: String,
+    #[serde(rename = "host")]
     pub hostname: String,
+    #[serde(rename = "ip4")]
     pub ip: String,
-    pub total_bytes: u64, // 时间范围内总字节数（rx + tx）
-    pub rx_bytes: u64,    // 接收字节数
-    pub tx_bytes: u64,    // 发送字节数
-    pub percentage: f64,  // 总使用量的百分比
-    pub rank: usize,      // 排名位置（从1开始）
+    #[serde(rename = "t_b")]
+    pub total_bytes: u64,
+    #[serde(rename = "rx_b")]
+    pub rx_bytes: u64,
+    #[serde(rename = "tx_b")]
+    pub tx_bytes: u64,
+    #[serde(rename = "pct")]
+    pub percentage: f64,
+    #[serde(rename = "r")]
+    pub rank: usize,
 }
 
 /// 设备使用排名响应结构
 #[derive(Serialize, Deserialize)]
 pub struct DeviceUsageRankingResponse {
+    #[serde(rename = "start")]
     pub start_ms: u64,
+    #[serde(rename = "end")]
     pub end_ms: u64,
-    pub network_type: String, // "wan", "lan", 或 "all"
-    pub total_bytes: u64,     // 所有设备的总字节数
-    pub total_rx_bytes: u64,  // 所有设备的总接收字节数
-    pub total_tx_bytes: u64,  // 所有设备的总发送字节数
-    pub device_count: usize,  // 设备数量
+    #[serde(rename = "net")]
+    pub network_type: String,
+    #[serde(rename = "t_b")]
+    pub total_bytes: u64,
+    #[serde(rename = "t_rx_b")]
+    pub total_rx_bytes: u64,
+    #[serde(rename = "t_tx_b")]
+    pub total_tx_bytes: u64,
+    #[serde(rename = "cnt")]
+    pub device_count: usize,
+    #[serde(rename = "r")]
     pub rankings: Vec<DeviceUsageRanking>,
 }
 
 /// 时间序列增量条目（每小时或每日）
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimeSeriesIncrement {
+    #[serde(rename = "start")]
     pub start_ts_ms: u64,
+    #[serde(rename = "end")]
     pub end_ts_ms: u64,
+    #[serde(rename = "w_rx_avg")]
     pub wan_rx_rate_avg: u64,
+    #[serde(rename = "w_rx_max")]
     pub wan_rx_rate_max: u64,
+    #[serde(rename = "w_rx_min")]
     pub wan_rx_rate_min: u64,
+    #[serde(rename = "w_rx_p90")]
     pub wan_rx_rate_p90: u64,
+    #[serde(rename = "w_rx_p95")]
     pub wan_rx_rate_p95: u64,
+    #[serde(rename = "w_rx_p99")]
     pub wan_rx_rate_p99: u64,
+    #[serde(rename = "w_tx_avg")]
     pub wan_tx_rate_avg: u64,
+    #[serde(rename = "w_tx_max")]
     pub wan_tx_rate_max: u64,
+    #[serde(rename = "w_tx_min")]
     pub wan_tx_rate_min: u64,
+    #[serde(rename = "w_tx_p90")]
     pub wan_tx_rate_p90: u64,
+    #[serde(rename = "w_tx_p95")]
     pub wan_tx_rate_p95: u64,
+    #[serde(rename = "w_tx_p99")]
     pub wan_tx_rate_p99: u64,
+    #[serde(rename = "w_rx_b")]
     pub wan_rx_bytes_inc: u64,
+    #[serde(rename = "w_tx_b")]
     pub wan_tx_bytes_inc: u64,
+    #[serde(rename = "l_rx_avg")]
     pub lan_rx_rate_avg: u64,
+    #[serde(rename = "l_rx_max")]
     pub lan_rx_rate_max: u64,
+    #[serde(rename = "l_rx_min")]
     pub lan_rx_rate_min: u64,
+    #[serde(rename = "l_rx_p90")]
     pub lan_rx_rate_p90: u64,
+    #[serde(rename = "l_rx_p95")]
     pub lan_rx_rate_p95: u64,
+    #[serde(rename = "l_rx_p99")]
     pub lan_rx_rate_p99: u64,
+    #[serde(rename = "l_tx_avg")]
     pub lan_tx_rate_avg: u64,
+    #[serde(rename = "l_tx_max")]
     pub lan_tx_rate_max: u64,
+    #[serde(rename = "l_tx_min")]
     pub lan_tx_rate_min: u64,
+    #[serde(rename = "l_tx_p90")]
     pub lan_tx_rate_p90: u64,
+    #[serde(rename = "l_tx_p95")]
     pub lan_tx_rate_p95: u64,
+    #[serde(rename = "l_tx_p99")]
     pub lan_tx_rate_p99: u64,
+    #[serde(rename = "l_rx_b")]
     pub lan_rx_bytes_inc: u64,
+    #[serde(rename = "l_tx_b")]
     pub lan_tx_bytes_inc: u64,
 }
 
 /// 时间序列增量响应结构
 #[derive(Serialize, Deserialize)]
 pub struct TimeSeriesIncrementResponse {
+    #[serde(rename = "start")]
     pub start_ms: u64,
+    #[serde(rename = "end")]
     pub end_ms: u64,
-    pub aggregation: String,  // "hourly" 或 "daily"
-    pub mac: String,          // MAC 地址（或 "all" 表示聚合）
-    pub network_type: String, // "wan" 或 "lan"
+    #[serde(rename = "agg")]
+    pub aggregation: String,
+    pub mac: String,
+    #[serde(rename = "net")]
+    pub network_type: String,
+    #[serde(rename = "inc")]
     pub increments: Vec<TimeSeriesIncrement>,
-    pub total_rx_bytes: u64, // 范围内的总 RX 字节数
-    pub total_tx_bytes: u64, // 范围内的总 TX 字节数
-    pub total_bytes: u64,    // 范围内的总字节数
+    #[serde(rename = "t_rx_b")]
+    pub total_rx_bytes: u64,
+    #[serde(rename = "t_tx_b")]
+    pub total_tx_bytes: u64,
+    #[serde(rename = "t_b")]
+    pub total_bytes: u64,
 }
 
 /// 主机名绑定信息，用于 API 响应

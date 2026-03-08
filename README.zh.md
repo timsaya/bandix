@@ -96,30 +96,35 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 {
   "status": "success",
   "data": {
-    "devices": [
+    "d": [
       {
-        "ip": "192.168.1.100",
+        "ip4": "192.168.1.100",
+        "ip6": [],
         "mac": "00:11:22:33:44:55",
-        "total_rx_bytes": 1024,
-        "total_tx_bytes": 2048,
-        "total_rx_rate": 100,
-        "total_tx_rate": 200,
-        "lan_rx_bytes": 512,
-        "lan_tx_bytes": 1024,
-        "lan_rx_rate": 50,
-        "lan_tx_rate": 100,
-        "wan_rx_bytes": 512,
-        "wan_tx_bytes": 1024,
-        "wan_rx_rate": 50,
-        "wan_tx_rate": 100,
-        "wan_rx_rate_limit": 0,
-        "wan_tx_rate_limit": 0,
-        "last_online_ts": 1640995200000
+        "host": "我的设备",
+        "conn": "wifi",
+        "t_rx_b": 1024,
+        "t_tx_b": 2048,
+        "t_rx_r": 100,
+        "t_tx_r": 200,
+        "w_rx_l": 0,
+        "w_tx_l": 0,
+        "l_rx_b": 512,
+        "l_tx_b": 1024,
+        "l_rx_r": 50,
+        "l_tx_r": 100,
+        "w_rx_b": 512,
+        "w_tx_b": 1024,
+        "w_rx_r": 50,
+        "w_tx_r": 100,
+        "last": 1640995200000
       }
     ]
   }
 }
 ```
+
+**字段说明：** `d`=设备列表；`ip4`=IPv4；`ip6`=IPv6 地址列表；`host`=主机名；`conn`=连接类型(wifi/wired/router)；`t_rx_b`/`t_tx_b`=总收/发字节；`t_rx_r`/`t_tx_r`=总收/发速率；`w_rx_l`/`w_tx_l`=WAN 限速；`l_rx_b`/`l_tx_b`=LAN 字节；`l_rx_r`/`l_tx_r`=LAN 速率；`w_rx_b`/`w_tx_b`=WAN 字节；`w_rx_r`/`w_tx_r`=WAN 速率；`last`=最后在线时间戳(ms)。
 
 #### GET /api/traffic/limits/schedule
 获取所有设备的定时限速设置。
@@ -275,6 +280,107 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 }
 ```
 
+#### GET /api/traffic/usage/ranking
+获取设备流量使用排名。
+
+**查询参数：**
+- `start_ms`（可选）：开始时间戳（毫秒），默认 365 天前
+- `end_ms`（可选）：结束时间戳（毫秒），默认当前
+- `network_type`（可选）："wan"、"lan" 或 "all"，默认 "wan"
+
+**响应：**
+```json
+{
+  "status": "success",
+  "data": {
+    "start": 1710000000000,
+    "end": 1710086400000,
+    "net": "wan",
+    "t_b": 10737418240,
+    "t_rx_b": 5368709120,
+    "t_tx_b": 5368709120,
+    "cnt": 25,
+    "r": [
+      {
+        "mac": "00:11:22:33:44:55",
+        "host": "我的设备",
+        "ip4": "192.168.1.100",
+        "t_b": 1073741824,
+        "rx_b": 536870912,
+        "tx_b": 536870912,
+        "pct": 10.5,
+        "r": 1
+      }
+    ]
+  }
+}
+```
+
+**字段说明：** `start`/`end`=时间范围(ms)；`net`=网络类型；`t_b`=总字节；`t_rx_b`/`t_tx_b`=总收/发；`cnt`=设备数；`r`=排名列表；`rx_b`/`tx_b`=该设备收/发字节；`pct`=占比；`r`(条目内)=排名。
+
+#### GET /api/traffic/usage/increments
+获取时间序列流量增量（按小时或按日聚合）。
+
+**查询参数：**
+- `mac`（可选）：MAC 地址，省略或 "all" 表示聚合所有设备
+- `start_ms`（可选）：开始时间戳（毫秒）
+- `end_ms`（可选）：结束时间戳（毫秒）
+- `aggregation`（可选）："hourly" 或 "daily"，默认 "hourly"
+- `network_type`（可选）："wan"、"lan" 或 "all"
+
+**响应：**
+```json
+{
+  "status": "success",
+  "data": {
+    "start": 1710000000000,
+    "end": 1710086400000,
+    "agg": "hourly",
+    "mac": "all",
+    "net": "wan",
+    "inc": [
+      {
+        "start": 1710000000000,
+        "end": 1710003600000,
+        "w_rx_avg": 1024,
+        "w_rx_max": 2048,
+        "w_rx_min": 512,
+        "w_rx_p90": 1500,
+        "w_rx_p95": 1800,
+        "w_rx_p99": 2000,
+        "w_tx_avg": 512,
+        "w_tx_max": 1024,
+        "w_tx_min": 256,
+        "w_tx_p90": 800,
+        "w_tx_p95": 900,
+        "w_tx_p99": 950,
+        "w_rx_b": 536870912,
+        "w_tx_b": 268435456,
+        "l_rx_avg": 512,
+        "l_rx_max": 1024,
+        "l_rx_min": 256,
+        "l_rx_p90": 700,
+        "l_rx_p95": 800,
+        "l_rx_p99": 900,
+        "l_tx_avg": 256,
+        "l_tx_max": 512,
+        "l_tx_min": 128,
+        "l_tx_p90": 400,
+        "l_tx_p95": 450,
+        "l_tx_p99": 480,
+        "l_rx_b": 268435456,
+        "l_tx_b": 134217728
+      }
+    ],
+    "t_rx_b": 10737418240,
+    "t_tx_b": 5368709120,
+    "t_b": 16106127360
+  }
+}
+```
+
+**字段说明：** `agg`=聚合粒度；`inc`=增量列表；`w_*`/`l_*`=WAN/LAN；`_avg`/`_max`/`_min`/`_p90`/`_p95`/`_p99`=速率统计；`_b`=字节增量。
+
 ### 连接统计 API
 
 #### GET /api/connection/devices
@@ -285,57 +391,58 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 {
   "status": "success",
   "data": {
-    "global_stats": {
-      "total_connections": 150,
-      "tcp_connections": 120,
-      "udp_connections": 30,
-      "established_tcp": 80,
-      "time_wait_tcp": 40,
-      "close_wait_tcp": 0,
-      "last_updated": 1640995200
+    "g": {
+      "total": 150,
+      "tcp": 120,
+      "udp": 30,
+      "tcp_est": 80,
+      "tcp_tw": 40,
+      "tcp_cw": 0,
+      "last": 1640995200000
     },
-    "devices": [
+    "d": [
       {
-        "mac_address": "00:11:22:33:44:55",
-        "ip_address": "192.168.1.100",
-        "tcp_connections": 7,
-        "udp_connections": 3,
-        "established_tcp": 5,
-        "time_wait_tcp": 2,
-        "close_wait_tcp": 0,
-        "total_connections": 10,
-        "last_updated": 1640995200
+        "mac": "00:11:22:33:44:55",
+        "ip4": "192.168.1.100",
+        "host": "我的设备",
+        "tcp": 7,
+        "udp": 3,
+        "tcp_est": 5,
+        "tcp_tw": 2,
+        "tcp_cw": 0,
+        "total": 10,
+        "last": 1640995200000
       }
     ],
-    "total_devices": 1,
-    "last_updated": 1640995200
+    "cnt": 1,
+    "last": 1640995200000
   }
 }
 ```
 
 **字段说明：**
 
-**全局统计：**
-- `total_connections`: TCP 和 UDP 连接总数
-- `tcp_connections`: TCP 连接总数
-- `udp_connections`: UDP 连接总数
-- `established_tcp`: 活跃的 TCP 连接数（ESTABLISHED 状态）
-- `time_wait_tcp`: TIME_WAIT 及类似关闭状态的 TCP 连接数
-- `close_wait_tcp`: CLOSE_WAIT 状态的 TCP 连接数
-- `last_updated`: 最后更新时间（Unix 时间戳）
+**g（全局统计）：**
+- `total`: TCP 和 UDP 连接总数
+- `tcp`: TCP 连接总数
+- `udp`: UDP 连接总数
+- `tcp_est`: 活跃的 TCP 连接数（ESTABLISHED 状态）
+- `tcp_tw`: TIME_WAIT 及类似关闭状态的 TCP 连接数
+- `tcp_cw`: CLOSE_WAIT 状态的 TCP 连接数
+- `last`: 最后更新时间（Unix 毫秒时间戳）
 
-**设备统计：**
-- `mac_address`: 设备 MAC 地址
-- `ip_address`: 设备 IP 地址
-- `tcp_connections`: 该设备发起的 TCP 连接总数
-- `udp_connections`: 该设备发起的 UDP 连接总数
-- `established_tcp`: 活跃的 TCP 连接（ESTABLISHED 状态）
-- `time_wait_tcp`: TIME_WAIT 及类似关闭状态的 TCP 连接
-- `close_wait_tcp`: CLOSE_WAIT 状态的 TCP 连接
-- `total_connections`: 该设备的总连接数（tcp_connections + udp_connections）
-- `last_updated`: 最后更新时间（Unix 时间戳）
+**d（设备列表）每项：**
+- `mac`: 设备 MAC 地址
+- `ip4`: 设备 IPv4 地址
+- `host`: 主机名
+- `tcp`/`udp`: TCP/UDP 连接数
+- `tcp_est`/`tcp_tw`/`tcp_cw`: TCP 状态细分
+- `total`: 该设备总连接数
+- `last`: 最后更新时间（毫秒）
 
-**注意：** 设备统计只计算出站连接（设备作为源地址的连接）。只包含在 ARP 表中且与指定网络接口在同一子网内的设备。
+**顶层：** `cnt`=设备数；`last`=全局最后更新时间（毫秒）。
+
+**注意：** 设备统计只计算出站连接。只包含在 ARP 表中且与指定网络接口在同一子网内的设备。所有时间戳均为毫秒。
 
 ### DNS 监控 API
 
@@ -540,36 +647,37 @@ GET /api/dns/queries?domain=google&device=iPhone&page=1&page_size=100
 
 ## 字段说明
 
-### 流量统计
-- `ip`: 设备 IP 地址
-- `mac`: 设备 MAC 地址
-- `total_rx_bytes`: 设备接收的总字节数
-- `total_tx_bytes`: 设备发送的总字节数
-- `total_rx_rate`: 设备当前总接收速率（字节/秒）
-- `total_tx_rate`: 设备当前总发送速率（字节/秒）
-- `lan_rx_bytes`: 局域网接收字节数
-- `lan_tx_bytes`: 局域网发送字节数
-- `lan_rx_rate`: 局域网接收速率（字节/秒）
-- `lan_tx_rate`: 局域网发送速率（字节/秒）
-- `wan_rx_bytes`: 广域网接收字节数
-- `wan_tx_bytes`: 广域网发送字节数
-- `wan_rx_rate`: 广域网接收速率（字节/秒）
-- `wan_tx_rate`: 广域网发送速率（字节/秒）
-- `wan_rx_rate_limit`: 广域网下载限制（字节/秒）
-- `wan_tx_rate_limit`: 广域网上传限制（字节/秒）
-- `last_online_ts`: 最后在线时间戳（自纪元以来的毫秒数）
+### 流量统计（/api/traffic/devices 响应 key）
 
-### 连接统计
-- `total_connections`: 总连接数
-- `tcp_connections`: TCP 连接总数
-- `udp_connections`: UDP 连接总数
-- `established_tcp`: 已建立的 TCP 连接数
-- `time_wait_tcp`: TIME_WAIT 状态的 TCP 连接数
-- `close_wait_tcp`: CLOSE_WAIT 状态的 TCP 连接数
-- `active_tcp`: 活跃的 TCP 连接数（ESTABLISHED 状态）
-- `active_udp`: 活跃的 UDP 连接数
-- `closed_tcp`: 已关闭的 TCP 连接数（TIME_WAIT、CLOSE_WAIT 等）
-- `last_updated`: 最后更新时间戳（自纪元以来的秒数）
+| 新 key | 含义 |
+|--------|------|
+| `ip4` | IPv4 地址 |
+| `ip6` | IPv6 地址列表 |
+| `mac` | MAC 地址 |
+| `host` | 主机名 |
+| `conn` | 连接类型（wifi/wired/router）|
+| `t_rx_b`/`t_tx_b` | 总收/发字节 |
+| `t_rx_r`/`t_tx_r` | 总收/发速率（字节/秒）|
+| `w_rx_l`/`w_tx_l` | WAN 限速（字节/秒）|
+| `l_rx_b`/`l_tx_b` | LAN 收/发字节 |
+| `l_rx_r`/`l_tx_r` | LAN 收/发速率 |
+| `w_rx_b`/`w_tx_b` | WAN 收/发字节 |
+| `w_rx_r`/`w_tx_r` | WAN 收/发速率 |
+| `last` | 最后在线时间戳（毫秒）|
+
+### 连接统计（/api/connection/devices 响应 key）
+
+| 新 key | 含义 |
+|--------|------|
+| `g` | 全局统计对象 |
+| `d` | 设备列表 |
+| `cnt` | 设备数量 |
+| `total` | 总连接数 |
+| `tcp`/`udp` | TCP/UDP 连接数 |
+| `tcp_est` | ESTABLISHED 状态 TCP |
+| `tcp_tw` | TIME_WAIT 状态 TCP |
+| `tcp_cw` | CLOSE_WAIT 状态 TCP |
+| `last` | 最后更新时间戳（毫秒）|
 
 ## 许可证
 
