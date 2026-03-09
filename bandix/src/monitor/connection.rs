@@ -7,6 +7,126 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionFlowDetail {
+    pub protocol: String,
+    pub state: Option<String>,
+    pub orig_src: [u8; 4],
+    pub orig_dst: [u8; 4],
+    pub orig_sport: u16,
+    pub orig_dport: u16,
+    pub repl_src: [u8; 4],
+    pub repl_dst: [u8; 4],
+    pub repl_sport: u16,
+    pub repl_dport: u16,
+    pub orig_packets: u64,
+    pub orig_bytes: u64,
+    pub repl_packets: u64,
+    pub repl_bytes: u64,
+    pub flags: Vec<String>,
+}
+
+pub fn parse_connection_flows() -> Result<Vec<ConnectionFlowDetail>> {
+    let output = Command::new("conntrack").arg("-L").output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to execute conntrack -L: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let content = String::from_utf8_lossy(&output.stdout);
+    let mut flows = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.contains("flow entries have been shown") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let protocol = parts.get(0).unwrap_or(&"").to_string();
+        if protocol != "tcp" && protocol != "udp" {
+            continue;
+        }
+        let mut tcp_state: Option<String> = None;
+        if protocol == "tcp" {
+            for (i, part) in parts.iter().enumerate() {
+                if i >= 3 && !part.contains('=') && !part.starts_with('[') {
+                    tcp_state = Some((*part).to_string());
+                    break;
+                }
+            }
+            if tcp_state.is_none() && parts.iter().any(|p| p.contains("OFFLOAD")) {
+                tcp_state = Some("ESTABLISHED".to_string());
+            }
+        }
+        let mut srcs: Vec<[u8; 4]> = Vec::new();
+        let mut dsts: Vec<[u8; 4]> = Vec::new();
+        let mut sports: Vec<u16> = Vec::new();
+        let mut dports: Vec<u16> = Vec::new();
+        let mut packets_list: Vec<u64> = Vec::new();
+        let mut bytes_list: Vec<u64> = Vec::new();
+        let mut flags: Vec<String> = Vec::new();
+        for part in &parts {
+            if part.starts_with("src=") {
+                let s = &part[4..];
+                if let Ok(ip) = s.parse::<std::net::Ipv4Addr>() {
+                    srcs.push(ip.octets());
+                }
+            } else if part.starts_with("dst=") {
+                let s = &part[4..];
+                if let Ok(ip) = s.parse::<std::net::Ipv4Addr>() {
+                    dsts.push(ip.octets());
+                }
+            } else if part.starts_with("sport=") {
+                if let Ok(p) = (&part[6..]).parse::<u16>() {
+                    sports.push(p);
+                }
+            } else if part.starts_with("dport=") {
+                if let Ok(p) = (&part[6..]).parse::<u16>() {
+                    dports.push(p);
+                }
+            } else if part.starts_with("packets=") {
+                if let Ok(v) = (&part[8..]).parse::<u64>() {
+                    packets_list.push(v);
+                }
+            } else if part.starts_with("bytes=") {
+                if let Ok(v) = (&part[6..]).parse::<u64>() {
+                    bytes_list.push(v);
+                }
+            } else if part.starts_with('[') && part.ends_with(']') {
+                flags.push((*part).to_string());
+            }
+        }
+        if srcs.len() < 2 || dsts.len() < 2 || sports.len() < 2 || dports.len() < 2 {
+            continue;
+        }
+        let orig_packets = packets_list.get(0).copied().unwrap_or(0);
+        let orig_bytes = bytes_list.get(0).copied().unwrap_or(0);
+        let repl_packets = packets_list.get(1).copied().unwrap_or(0);
+        let repl_bytes = bytes_list.get(1).copied().unwrap_or(0);
+        flows.push(ConnectionFlowDetail {
+            protocol,
+            state: tcp_state,
+            orig_src: srcs[0],
+            orig_dst: dsts[0],
+            orig_sport: sports[0],
+            orig_dport: dports[0],
+            repl_src: srcs[1],
+            repl_dst: dsts[1],
+            repl_sport: sports[1],
+            repl_dport: dports[1],
+            orig_packets,
+            orig_bytes,
+            repl_packets,
+            repl_bytes,
+            flags,
+        });
+    }
+    Ok(flows)
+}
+
 /// 将子网掩码转换为 CIDR 表示法
 fn subnet_mask_to_cidr(mask: [u8; 4]) -> u8 {
     let mut cidr = 0;
@@ -79,13 +199,16 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
 
         let protocol = parts.get(0).unwrap_or(&"");
 
-        let mut tcp_state = None;
+        let mut tcp_state: Option<&str> = None;
         if protocol == &"tcp" {
             for (i, part) in parts.iter().enumerate() {
                 if i >= 3 && !part.contains('=') && !part.starts_with('[') {
-                    tcp_state = Some(*part);
+                    tcp_state = Some(part);
                     break;
                 }
+            }
+            if tcp_state.is_none() && parts.iter().any(|p| p.contains("OFFLOAD")) {
+                tcp_state = Some("ESTABLISHED");
             }
         }
 
@@ -131,17 +254,13 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
                         }
                         "FIN_WAIT_1" | "FIN_WAIT_2" | "CLOSING" | "LAST_ACK" => {
                             total_stats.tcp_connections += 1;
-                            total_stats.time_wait_tcp += 1; // 分类为 TIME_WAIT
+                            total_stats.time_wait_tcp += 1;
                             total_connection_counted = true;
                         }
                         _ => {
-                            // 其他 TCP 状态：跳过计数
                             log::debug!("Unknown TCP state '{}' skipped in global statistics", state);
                         }
                     }
-                } else {
-                    // 没有状态的 TCP 连接：跳过计数
-                    log::debug!("TCP connection without state skipped in global statistics");
                 }
             }
             &"udp" => {
@@ -157,28 +276,17 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
             total_stats.total_connections += 1;
         }
 
-        // ===== 2. 本地网络设备连接统计（需要 ARP 表和相同子网）=====
-        // 查找 ARP 表中且在相同子网中的所有 IP 地址
-        let mut valid_device_ips = Vec::new();
-
-        if let Some(ip) = src_ip {
+        // ===== 2. 本地网络设备连接统计（以设备为 src 的视角）=====
+        // 仅当 src 是 ARP 表中且在相同子网的 LAN 设备时计入该设备
+        let valid_device_ip = src_ip.and_then(|ip| {
             if ip_mac_mapping.contains_key(&ip) && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
-                valid_device_ips.push(ip);
+                Some(ip)
+            } else {
+                None
             }
-        }
-        if let Some(ip) = dst_ip {
-            if ip_mac_mapping.contains_key(&ip) && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
-                valid_device_ips.push(ip);
-            }
-        }
+        });
 
-        // Skip device statistics if no valid device IPs found
-        if valid_device_ips.is_empty() {
-            continue;
-        }
-
-        // Count connections for each valid device IP
-        for ip in valid_device_ips {
+        if let Some(ip) = valid_device_ip {
             let &mac = ip_mac_mapping.get(&ip).unwrap();
 
             // Update device statistics
@@ -218,17 +326,13 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
                             }
                             "FIN_WAIT_1" | "FIN_WAIT_2" | "CLOSING" | "LAST_ACK" => {
                                 device_stat.tcp_connections += 1;
-                                device_stat.time_wait_tcp += 1; // Categorized as TIME_WAIT
+                                device_stat.time_wait_tcp += 1;
                                 device_connection_counted = true;
                             }
                             _ => {
-                                // 其他 TCP 状态：跳过计数
                                 log::debug!("Unknown TCP state '{}' skipped for device", state);
                             }
                         }
-                    } else {
-                        // 没有状态的 TCP 连接：跳过计数
-                        log::debug!("TCP connection without state skipped for device");
                     }
                 }
                 &"udp" => {

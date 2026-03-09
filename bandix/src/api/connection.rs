@@ -1,5 +1,5 @@
 use crate::api::{ApiResponse, HttpRequest, HttpResponse};
-use crate::monitor::connection::GlobalConnectionStats;
+use crate::monitor::connection::{parse_connection_flows, ConnectionFlowDetail, GlobalConnectionStats};
 use anyhow::Result;
 use bandix_common::ConnectionStats;
 use serde::{Deserialize, Serialize};
@@ -133,11 +133,90 @@ fn parse_ip_to_u32(ip_str: &str) -> u32 {
         let octets = ip.octets();
         ((octets[0] as u32) << 24) | ((octets[1] as u32) << 16) | ((octets[2] as u32) << 8) | (octets[3] as u32)
     } else {
-        0 // Default to 0 for invalid IP addresses
+        0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionFlowResponse {
+    pub protocol: String,
+    pub state: Option<String>,
+    pub orig: FlowEndpoint,
+    pub repl: FlowEndpoint,
+    pub orig_packets: u64,
+    pub orig_bytes: u64,
+    pub repl_packets: u64,
+    pub repl_bytes: u64,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowEndpoint {
+    pub src: String,
+    pub dst: String,
+    pub sport: u16,
+    pub dport: u16,
+}
+
+fn flow_to_response(f: &ConnectionFlowDetail) -> ConnectionFlowResponse {
+    ConnectionFlowResponse {
+        protocol: f.protocol.clone(),
+        state: f.state.clone(),
+        orig: FlowEndpoint {
+            src: format_ip(&f.orig_src),
+            dst: format_ip(&f.orig_dst),
+            sport: f.orig_sport,
+            dport: f.orig_dport,
+        },
+        repl: FlowEndpoint {
+            src: format_ip(&f.repl_src),
+            dst: format_ip(&f.repl_dst),
+            sport: f.repl_sport,
+            dport: f.repl_dport,
+        },
+        orig_packets: f.orig_packets,
+        orig_bytes: f.orig_bytes,
+        repl_packets: f.repl_packets,
+        repl_bytes: f.repl_bytes,
+        flags: f.flags.clone(),
     }
 }
 
 impl ConnectionApiHandler {
+    fn get_connection_flows(
+        &self,
+        filter_ip: Option<&str>,
+        filter_protocol: Option<&str>,
+        filter_state: Option<&str>,
+    ) -> Result<Vec<ConnectionFlowResponse>> {
+        let flows = parse_connection_flows()?;
+        let mut result: Vec<ConnectionFlowResponse> = flows
+            .iter()
+            .filter(|f| {
+                filter_ip.map_or(true, |ip| {
+                    if let Ok(filter) = ip.parse::<std::net::Ipv4Addr>() {
+                        f.orig_src == filter.octets()
+                    } else {
+                        true
+                    }
+                })
+                    && filter_protocol.map_or(true, |p| f.protocol.eq_ignore_ascii_case(p))
+                    && filter_state.map_or(true, |s| {
+                        f.state.as_ref().map_or(false, |st| st.eq_ignore_ascii_case(s))
+                    })
+            })
+            .map(flow_to_response)
+            .collect();
+        result.sort_by(|a, b| {
+            let ip_cmp = a.orig.src.cmp(&b.orig.src);
+            if ip_cmp != std::cmp::Ordering::Equal {
+                return ip_cmp;
+            }
+            a.orig.dst.cmp(&b.orig.dst).then_with(|| a.orig.sport.cmp(&b.orig.sport))
+        });
+        Ok(result)
+    }
+
     /// 处理HTTP requests for connection statistics
     pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse> {
         match (request.method.as_str(), request.path.as_str()) {
@@ -155,12 +234,31 @@ impl ConnectionApiHandler {
                     ))
                 }
             },
+            ("GET", "/api/connection/flows") => {
+                let filter_ip = request.query_params.get("ip").map(|s| s.as_str());
+                let filter_protocol = request.query_params.get("protocol").map(|s| s.as_str());
+                let filter_state = request.query_params.get("state").map(|s| s.as_str());
+                match self.get_connection_flows(filter_ip, filter_protocol, filter_state) {
+                    Ok(flows) => {
+                        let api_response = ApiResponse::success(flows);
+                        let body = serde_json::to_string(&api_response)?;
+                        Ok(HttpResponse::ok(body))
+                    }
+                    Err(e) => {
+                        log::error!("Failed to get connection flows: {}", e);
+                        Ok(HttpResponse::error(
+                            500,
+                            format!("Failed to get connection flows: {}", e),
+                        ))
+                    }
+                }
+            }
             _ => Ok(HttpResponse::error(404, "Not Found".to_string())),
         }
     }
 
     /// 获取supported routes for this handler
     pub fn supported_routes(&self) -> Vec<&'static str> {
-        vec!["/api/connection/devices"]
+        vec!["/api/connection/devices", "/api/connection/flows"]
     }
 }
