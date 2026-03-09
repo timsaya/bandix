@@ -44,3 +44,7 @@ bandix-ebpf = { path = "../bandix-ebpf" }
 [[bin]]
 name = "bandix"
 path = "src/main.rs"
+
+[[bin]]
+name = "read_ring"
+path = "src/bin/read_ring.rs"
