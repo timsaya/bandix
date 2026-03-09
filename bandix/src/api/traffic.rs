@@ -22,6 +22,10 @@ pub struct DeviceInfo {
     pub hostname: String,
     #[serde(rename = "conn")]
     pub connection_type: String,
+    #[serde(rename = "uplink")]
+    pub uplink: String,
+    #[serde(rename = "w_ch")]
+    pub wifi_channel: u32,
 
     #[serde(rename = "t_rx_b")]
     pub total_rx_bytes: u64,
@@ -598,9 +602,8 @@ impl TrafficApiHandler {
         let current_hour_end = current_hour_start + (3600 * 1000);
 
         let bindings_map = self.hostname_bindings.lock().unwrap();
-        let wifi_set = self.device_manager.get_wifi_macs_snapshot();
-        let wired_set = self.device_manager.get_wired_macs_snapshot();
-        let interface_mac = self.device_manager.get_interface_mac();
+        let bridge_port_map = self.device_manager.get_bridge_port_map_snapshot();
+        let wifi_channel_map = self.device_manager.get_wifi_channel_map_snapshot();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
         let all_devices = self.device_manager.get_all_devices_with_mac();
@@ -635,14 +638,13 @@ impl TrafficApiHandler {
                     bindings_map.get(&mac).cloned().unwrap_or_default()
                 };
 
-                let connection_type = if mac == interface_mac {
-                    "router".to_string()
-                } else if wifi_set.contains(&mac) {
-                    "wifi".to_string()
-                } else if wired_set.contains(&mac) {
-                    "wired".to_string()
+                let connection_type = self.device_manager.resolve_connection_type(&mac);
+
+                let uplink = bridge_port_map.get(&mac).cloned().unwrap_or_default();
+                let wifi_channel = if connection_type == "wifi" {
+                    wifi_channel_map.get(&uplink).copied().unwrap_or(0)
                 } else {
-                    "".to_string()
+                    0
                 };
 
                 // 计算指定时间段的流量
@@ -753,6 +755,8 @@ impl TrafficApiHandler {
                     mac: mac_str,
                     hostname,
                     connection_type,
+                    uplink,
+                    wifi_channel,
                     total_rx_bytes: final_total_rx_bytes,
                     total_tx_bytes: final_total_tx_bytes,
                     total_rx_rate: device.total_rx_rate(),

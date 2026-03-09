@@ -156,6 +156,8 @@ pub struct DeviceManager {
     neighbor_initialized: Arc<AtomicBool>,
     wifi_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
     wired_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
+    bridge_port_map: Arc<Mutex<HashMap<[u8; 6], String>>>,
+    wifi_channel_map: Arc<Mutex<HashMap<String, u32>>>,
     exclude_iface_device: bool,
 }
 
@@ -177,6 +179,8 @@ impl DeviceManager {
             neighbor_initialized: Arc::new(AtomicBool::new(false)),
             wifi_macs: Arc::new(Mutex::new(HashSet::new())),
             wired_macs: Arc::new(Mutex::new(HashSet::new())),
+            bridge_port_map: Arc::new(Mutex::new(HashMap::new())),
+            wifi_channel_map: Arc::new(Mutex::new(HashMap::new())),
             exclude_iface_device,
         }
     }
@@ -327,24 +331,13 @@ impl DeviceManager {
             return Ok(Vec::new());
         }
 
-        let wifi_set = self.get_wifi_macs_snapshot();
-        let wired_set = self.get_wired_macs_snapshot();
-        let interface_mac = self.get_interface_mac();
         let mut out = Vec::new();
 
         for (mac, now_online) in new_ipv4_online.iter() {
             let prev_online = old_ipv4_online.get(mac).copied().unwrap_or(false);
             if prev_online != *now_online {
                 let event = if *now_online { "online" } else { "offline" };
-                let ct = if *mac == interface_mac {
-                    "router".to_string()
-                } else if wifi_set.contains(mac) {
-                    "wifi".to_string()
-                } else if wired_set.contains(mac) {
-                    "wired".to_string()
-                } else {
-                    "".to_string()
-                };
+                let ct = self.resolve_connection_type(mac);
                 if let Some(p) = self.build_neighbor_event_payload(mac, event, now_ms, ct) {
                     out.push(p);
                 }
@@ -355,15 +348,7 @@ impl DeviceManager {
             if !new_ipv4_online.contains_key(mac) {
                 let prev_online = old_ipv4_online.get(mac).copied().unwrap_or(false);
                 if prev_online {
-                    let ct = if *mac == interface_mac {
-                        "router".to_string()
-                    } else if wifi_set.contains(mac) {
-                        "wifi".to_string()
-                    } else if wired_set.contains(mac) {
-                        "wired".to_string()
-                    } else {
-                        "".to_string()
-                    };
+                    let ct = self.resolve_connection_type(mac);
                     if let Some(p) = self.build_neighbor_event_payload(mac, "offline", now_ms, ct) {
                         out.push(p);
                     }
@@ -575,17 +560,50 @@ impl DeviceManager {
         devices.iter().map(|(mac, device)| (*mac, device.clone())).collect()
     }
 
-    pub fn get_wifi_macs_snapshot(&self) -> HashSet<[u8; 6]> {
-        self.wifi_macs.lock().unwrap().clone()
-    }
-
     #[allow(dead_code)]
     pub fn get_wired_macs_snapshot(&self) -> HashSet<[u8; 6]> {
         self.wired_macs.lock().unwrap().clone()
     }
 
+    pub fn get_bridge_port_map_snapshot(&self) -> HashMap<[u8; 6], String> {
+        self.bridge_port_map.lock().unwrap().clone()
+    }
+
+    pub fn get_wifi_channel_map_snapshot(&self) -> HashMap<String, u32> {
+        self.wifi_channel_map.lock().unwrap().clone()
+    }
+
     pub fn get_interface_mac(&self) -> [u8; 6] {
         self.subnet_info.interface_mac
+    }
+
+    pub fn resolve_connection_type(&self, mac: &[u8; 6]) -> String {
+        if *mac == self.subnet_info.interface_mac {
+            return "router".to_string();
+        }
+
+        let bridge_map = self.bridge_port_map.lock().unwrap();
+        if let Some(iface_name) = bridge_map.get(mac) {
+            return if iface_name.contains("phy") || iface_name.contains("wlan") {
+                "wifi".to_string()
+            } else {
+                "wired".to_string()
+            };
+        }
+        drop(bridge_map);
+
+        let wifi = self.wifi_macs.lock().unwrap();
+        if wifi.contains(mac) {
+            return "wifi".to_string();
+        }
+        drop(wifi);
+
+        let wired = self.wired_macs.lock().unwrap();
+        if wired.contains(mac) {
+            return "wired".to_string();
+        }
+
+        String::new()
     }
 
     pub fn remove_device(&self, mac: &[u8; 6]) -> bool {
@@ -666,6 +684,107 @@ impl DeviceManager {
             let mut guard = self.wired_macs.lock().unwrap();
             *guard = wired_set;
         }
+
+        self.refresh_bridge_port_map();
+        self.refresh_wifi_channel_map();
+    }
+
+    fn refresh_bridge_port_map(&self) {
+        let brif_path = format!("/sys/class/net/{}/brif", self.iface);
+        let members = match std::fs::read_dir(&brif_path) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<String>>(),
+            Err(_) => return,
+        };
+
+        let mut port_to_iface: HashMap<u32, String> = HashMap::new();
+        for member in &members {
+            let port_no_path = format!("/sys/class/net/{}/brport/port_no", member);
+            if let Ok(content) = std::fs::read_to_string(&port_no_path) {
+                let trimmed = content.trim();
+                let port_no = if let Some(hex) = trimmed.strip_prefix("0x") {
+                    u32::from_str_radix(hex, 16).unwrap_or(0)
+                } else {
+                    trimmed.parse::<u32>().unwrap_or(0)
+                };
+                if port_no > 0 {
+                    port_to_iface.insert(port_no, member.clone());
+                }
+            }
+        }
+
+        let output = match std::process::Command::new("brctl").args(["showmacs", &self.iface]).output() {
+            Ok(o) if o.status.success() => o,
+            _ => return,
+        };
+
+        let mut new_map: HashMap<[u8; 6], String> = HashMap::new();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let is_local = parts.get(2).map(|s| *s == "yes").unwrap_or(false);
+            if is_local {
+                continue;
+            }
+            let port_no = match parts[0].parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let mac = match crate::utils::network_utils::parse_mac_address(parts[1]) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if let Some(iface_name) = port_to_iface.get(&port_no) {
+                new_map.insert(mac, iface_name.clone());
+            }
+        }
+
+        let mut guard = self.bridge_port_map.lock().unwrap();
+        *guard = new_map;
+    }
+
+    fn refresh_wifi_channel_map(&self) {
+        let brif_path = format!("/sys/class/net/{}/brif", self.iface);
+        let members = match std::fs::read_dir(&brif_path) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<String>>(),
+            Err(_) => return,
+        };
+
+        let mut new_map: HashMap<String, u32> = HashMap::new();
+        for member in members {
+            if !member.contains("phy") && !member.contains("wlan") {
+                continue;
+            }
+            if let Ok(output) = std::process::Command::new("iw").args(["dev", &member, "info"]).output() {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("channel ") {
+                            if let Some(ch_str) = trimmed.strip_prefix("channel ") {
+                                if let Some(ch_num) = ch_str.split_whitespace().next() {
+                                    if let Ok(ch) = ch_num.parse::<u32>() {
+                                        new_map.insert(member.clone(), ch);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut guard = self.wifi_channel_map.lock().unwrap();
+        *guard = new_map;
     }
 
     fn read_all_neighbor_macs(&self) -> HashSet<[u8; 6]> {
