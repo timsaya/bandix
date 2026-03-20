@@ -811,13 +811,7 @@ impl DnsMonitor {
                         _ => {
                             // 处理其他记录类型（含 HTTPS、SVCB 及未知类型）
                             // 格式：RecordType:<hex data> 便于查看
-                            let rdata_str = format!("{:?}", rdata);
-                            // 限制长度避免过长
-                            let rdata_display = if rdata_str.len() > 100 {
-                                format!("{}...", &rdata_str[..100])
-                            } else {
-                                rdata_str
-                            };
+                            let rdata_display = format!("{:?}", rdata);
                             response_records.push(format!("{}:{}", record_type, rdata_display));
 
                             // 调试用，便于排查 HTTPS 等特殊记录类型

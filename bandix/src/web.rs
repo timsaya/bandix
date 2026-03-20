@@ -87,14 +87,9 @@ async fn handle_connection(mut stream: TcpStream, api_router: ApiRouter) -> Resu
 
     // Log web response (always at DEBUG level, controlled by log_level parameter)
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    let response_body_preview = if response.body.len() > 200 {
-        format!("{}...", &response.body[..200])
-    } else {
-        response.body.clone()
-    };
     debug!(
         "[{}] Response: {} | Body: {}",
-        timestamp, response.status, response_body_preview
+        timestamp, response.status, response.body
     );
 
     // Send response
