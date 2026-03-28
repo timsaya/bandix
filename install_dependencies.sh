@@ -36,10 +36,10 @@ declare -A TOOLCHAINS=(
 detect_package_manager() {
     if command -v apt-get &> /dev/null; then
         PACKAGE_MANAGER="apt"
-    elif command -v yum &> /dev/null; then
-        PACKAGE_MANAGER="yum"
     elif command -v dnf &> /dev/null; then
         PACKAGE_MANAGER="dnf"
+    elif command -v yum &> /dev/null; then
+        PACKAGE_MANAGER="yum"
     elif command -v pacman &> /dev/null; then
         PACKAGE_MANAGER="pacman"
     else
@@ -53,8 +53,11 @@ install_system_packages() {
             apt-get update
             apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file wget
             ;;
+        dnf|yum)
+            $PACKAGE_MANAGER install -y gcc gcc-c++ make curl tar gzip xz pkgconf-pkg-config file wget
+            ;;
         *)
-            echo -e "${RED}错误: 未能识别的包管理器，仅支持 Ubuntu/Debian 编译环境"
+            echo -e "${RED}错误: 未能识别的包管理器，仅支持 apt (Debian/Ubuntu) 或 dnf/yum (Fedora/RHEL 等)"
             exit 1
             ;;
     esac

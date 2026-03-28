@@ -2,6 +2,7 @@
 name = "bandix"
 version = "0.12.7"
 edition = "2021"
+default-run = "bandix"
 
 license = { workspace = true }
 
