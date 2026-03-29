@@ -98,8 +98,8 @@ rustup toolchain install nightly
 echo "添加 rust-src 组件 (nightly)..."
 rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
 
-echo "安装 bpf-linker (v0.10.1) ..."
-cargo install bpf-linker@0.10.1
+echo "安装 bpf-linker (v0.10.2) ..." # bpf-linker 版本需要和 LLVM 版本对应 。  v0.10.2 对应 LLVM 21.1.2
+cargo install bpf-linker@0.10.2
 
 RUST_TARGETS=(
     "x86_64-unknown-linux-musl"

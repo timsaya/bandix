@@ -380,6 +380,7 @@ impl TrafficApiHandler {
             "/api/traffic/rate_limit/whitelist",
             "/api/traffic/rate_limit/whitelist/enabled",
             "/api/traffic/rate_limit/default",
+            "/api/traffic/persist",
         ]
     }
 
@@ -436,6 +437,10 @@ impl TrafficApiHandler {
             },
             "/api/traffic/rate_limit/default" => match request.method.as_str() {
                 "POST" => self.handle_rate_limit_set_default_limits(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
+            "/api/traffic/persist" => match request.method.as_str() {
+                "POST" => self.handle_persist().await,
                 _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
             },
             _ => Ok(HttpResponse::not_found()),
@@ -558,6 +563,19 @@ impl TrafficApiHandler {
         };
         crate::storage::traffic::save_rate_limit_policy(self.options.data_dir(), &policy)?;
 
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    async fn handle_persist(&self) -> Result<HttpResponse, anyhow::Error> {
+        if !self.options.traffic_enable_storage() {
+            return Ok(HttpResponse::error(
+                400,
+                "Traffic storage is not enabled (use --traffic-enable-storage)".to_string(),
+            ));
+        }
+        self.long_term_manager.flush_dirty_rings().await?;
         let api_response = ApiResponse::success(());
         let body = serde_json::to_string(&api_response)?;
         Ok(HttpResponse::ok(body))

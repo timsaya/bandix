@@ -1,6 +1,7 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::monitor::DnsQueryRecord;
+use crate::storage::dns;
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -184,7 +185,7 @@ impl DnsApiHandler {
 
 impl DnsApiHandler {
     pub fn supported_routes(&self) -> Vec<&'static str> {
-        vec!["/api/dns/queries", "/api/dns/stats", "/api/dns/config"]
+        vec!["/api/dns/queries", "/api/dns/stats", "/api/dns/config", "/api/dns/persist"]
     }
 
     pub async fn handle_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
@@ -206,6 +207,10 @@ impl DnsApiHandler {
             "/api/dns/config" => match request.method.as_str() {
                 "GET" => self.handle_get_config().await,
                 "POST" => self.handle_set_config(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
+            "/api/dns/persist" => match request.method.as_str() {
+                "POST" => self.handle_persist().await,
                 _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
             },
             _ => Ok(HttpResponse::not_found()),
@@ -865,5 +870,23 @@ impl DnsApiHandler {
             501,
             "DNS configuration update not yet implemented".to_string(),
         ))
+    }
+
+    async fn handle_persist(&self) -> Result<HttpResponse, anyhow::Error> {
+        if !self.options.dns_enable_storage() {
+            return Ok(HttpResponse::error(
+                400,
+                "DNS storage is not enabled (use --dns-enable-storage)".to_string(),
+            ));
+        }
+        let records = self
+            .dns_queries
+            .lock()
+            .map_err(|e| anyhow::anyhow!("dns_queries lock poisoned: {}", e))?
+            .clone();
+        dns::save_dns_queries(self.options.data_dir(), &records, self.options.dns_max_records())?;
+        let api_response = ApiResponse::success(());
+        let body = serde_json::to_string(&api_response)?;
+        Ok(HttpResponse::ok(body))
     }
 }
