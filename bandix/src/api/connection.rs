@@ -158,6 +158,15 @@ pub struct FlowEndpoint {
     pub dport: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PagedConnectionFlowsResponse {
+    pub items: Vec<ConnectionFlowResponse>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub total_pages: usize,
+}
+
 fn flow_to_response(f: &ConnectionFlowDetail) -> ConnectionFlowResponse {
     ConnectionFlowResponse {
         protocol: f.protocol.clone(),
@@ -179,6 +188,27 @@ fn flow_to_response(f: &ConnectionFlowDetail) -> ConnectionFlowResponse {
         repl_packets: f.repl_packets,
         repl_bytes: f.repl_bytes,
         flags: f.flags.clone(),
+    }
+}
+
+fn paginate_flows(flows: Vec<ConnectionFlowResponse>, page: usize, page_size: usize) -> PagedConnectionFlowsResponse {
+    let total = flows.len();
+    let total_pages = if total == 0 { 1 } else { (total + page_size - 1) / page_size };
+    let current_page = page.max(1).min(total_pages);
+    let start = (current_page - 1).saturating_mul(page_size);
+    let end = (start + page_size).min(total);
+    let items = if start < total {
+        flows[start..end].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    PagedConnectionFlowsResponse {
+        items,
+        total,
+        page: current_page,
+        page_size,
+        total_pages,
     }
 }
 
@@ -238,10 +268,33 @@ impl ConnectionApiHandler {
                 let filter_ip = request.query_params.get("ip").map(|s| s.as_str());
                 let filter_protocol = request.query_params.get("protocol").map(|s| s.as_str());
                 let filter_state = request.query_params.get("state").map(|s| s.as_str());
+                let has_pagination = request.query_params.contains_key("page")
+                    || request.query_params.contains_key("page_size")
+                    || request.query_params.contains_key("limit");
+
+                let page = request
+                    .query_params
+                    .get("page")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+
+                let page_size = request
+                    .query_params
+                    .get("page_size")
+                    .or(request.query_params.get("limit"))
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(200)
+                    .clamp(1, 1000);
                 match self.get_connection_flows(filter_ip, filter_protocol, filter_state) {
                     Ok(flows) => {
-                        let api_response = ApiResponse::success(flows);
-                        let body = serde_json::to_string(&api_response)?;
+                        let body = if has_pagination {
+                            let api_response = ApiResponse::success(paginate_flows(flows, page, page_size));
+                            serde_json::to_string(&api_response)?
+                        } else {
+                            let api_response = ApiResponse::success(flows);
+                            serde_json::to_string(&api_response)?
+                        };
                         Ok(HttpResponse::ok(body))
                     }
                     Err(e) => {
