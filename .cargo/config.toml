@@ -1,57 +1,53 @@
 # x86_64 架构配置
 
 [target.x86_64-unknown-linux-musl]
-linker = "/opt/musl-cross/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc"
+linker = "x86_64-linux-musl-gcc"
 
 
 # ARM 架构配置
 
 [target.aarch64-unknown-linux-musl]
-linker = "/opt/musl-cross/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc"
+linker = "aarch64-linux-musl-gcc"
 
 [target.armv7-unknown-linux-musleabihf]
-linker = "/opt/musl-cross/arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-gcc"
+linker = "arm-linux-musleabihf-gcc"
 
 [target.armv7-unknown-linux-musleabi]
-linker = "/opt/musl-cross/arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
+linker = "arm-linux-musleabi-gcc"
 
 [target.armv5te-unknown-linux-musleabi]
-linker = "/opt/musl-cross/arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
+linker = "arm-linux-musleabi-gcc"
 
 [target.arm-unknown-linux-musleabi]
-linker = "/opt/musl-cross/arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
+linker = "arm-linux-musleabi-gcc"
 
 [target.arm-unknown-linux-musleabihf]
-linker = "/opt/musl-cross/arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-gcc"
+linker = "arm-linux-musleabihf-gcc"
 
 
 # RISC-V 架构配置
 
 [target.riscv64gc-unknown-linux-musl]
-linker = "/opt/musl-cross/riscv64-linux-musl-cross/bin/riscv64-linux-musl-gcc"
+linker = "riscv64-linux-musl-gcc"
 rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
 
 # PowerPC64 架构配置
 
 [target.powerpc64le-unknown-linux-musl]
-linker = "/opt/musl-cross/powerpc64le-linux-musl-cross/bin/powerpc64le-linux-musl-gcc"
+linker = "powerpc64le-linux-musl-gcc"
 rustflags = ["-C", "link-args=-lm", "-C", "panic=unwind"]
 
 
 # MIPS 架构配置
 
 [target.mips-unknown-linux-musl]
-linker = "/opt/musl-cross/mips-linux-musl-cross/bin/mips-linux-musl-gcc"
+linker = "mips-linux-musl-gcc"
 rustflags = [
     "-C",
     "target-feature=-crt-static",
     "-C",
     "link-arg=-dynamic",
-    "-L",
-    "/opt/musl-cross/mips-linux-musl-cross/mips-linux-musl/lib",
-    "-L",
-    "/opt/musl-cross/mips-linux-musl-cross/lib/gcc/mips-linux-musl/11.2.1",
     "-C",
     "link-arg=-Wl,--dynamic-linker=/lib/ld-musl-mips-sf.so.1",
     "-C",
@@ -59,16 +55,12 @@ rustflags = [
 ]
 
 [target.mipsel-unknown-linux-musl]
-linker = "/opt/musl-cross/mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
+linker = "mipsel-linux-musl-gcc"
 rustflags = [
     "-C",
     "target-feature=-crt-static",
     "-C",
     "link-arg=-dynamic",
-    "-L",
-    "/opt/musl-cross/mipsel-linux-musl-cross/mipsel-linux-musl/lib",
-    "-L",
-    "/opt/musl-cross/mipsel-linux-musl-cross/lib/gcc/mipsel-linux-musl/11.2.1",
     "-C",
     "link-arg=-Wl,--dynamic-linker=/lib/ld-musl-mipsel-sf.so.1",
     "-C",

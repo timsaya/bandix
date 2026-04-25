@@ -4,9 +4,18 @@
 
 set -e
 
-INSTALL_BASE="/opt/musl-cross"
+INSTALL_BASE="${HOME}/musl-cross"
 MUSL_CC_BASE="https://github.com/timsaya/musl-cc/releases/download/v0.1.0/"
 PACKAGE_MANAGER=""
+
+# 安装系统包时需 root：已是 root 则直接执行，否则用 sudo
+root_exec() {
+    if [ "${EUID:-0}" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
 
 # 颜色输出
 RED='\033[0;31m'
@@ -50,11 +59,11 @@ detect_package_manager() {
 install_system_packages() {
     case "$PACKAGE_MANAGER" in
         apt)
-            apt-get update
-            apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file wget
+            root_exec apt-get update
+            root_exec apt-get install -y build-essential curl tar gzip xz-utils pkg-config gcc file wget
             ;;
         dnf|yum)
-            $PACKAGE_MANAGER install -y gcc gcc-c++ make curl tar gzip xz pkgconf-pkg-config file wget
+            root_exec "$PACKAGE_MANAGER" install -y gcc gcc-c++ make curl tar gzip xz pkgconf-pkg-config file wget
             ;;
         *)
             echo -e "${RED}错误: 未能识别的包管理器，仅支持 apt (Debian/Ubuntu) 或 dnf/yum (Fedora/RHEL 等)"
@@ -70,7 +79,6 @@ install_system_packages
 
 # 创建安装目录
 mkdir -p "$INSTALL_BASE"
-chown "$(whoami)":"$(whoami)" "$INSTALL_BASE" 2>/dev/null || true
 
 # 安装 Rust 工具链
 echo ""

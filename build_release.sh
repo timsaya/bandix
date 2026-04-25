@@ -3,6 +3,34 @@ set -e
 
 source ~/.cargo/env
 
+# 强制使用指定目录下的交叉编译器，避免误用系统 linker
+MUSL_CROSS_DIR="${MUSL_CROSS_DIR:-$HOME/musl-cross}"
+set_linker_env() {
+  local var_name="$1"
+  local rel_path="$2"
+  local linker_path="$MUSL_CROSS_DIR/$rel_path"
+
+  if [ ! -x "$linker_path" ]; then
+    echo "✗ Missing linker: $linker_path"
+    echo "  Please set MUSL_CROSS_DIR correctly or install toolchains first."
+    exit 1
+  fi
+
+  export "$var_name=$linker_path"
+}
+
+set_linker_env "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER" "x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc"
+set_linker_env "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER" "aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc"
+set_linker_env "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER" "arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-gcc"
+set_linker_env "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABI_LINKER" "arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
+set_linker_env "CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_LINKER" "arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
+set_linker_env "CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABI_LINKER" "arm-linux-musleabi-cross/bin/arm-linux-musleabi-gcc"
+set_linker_env "CARGO_TARGET_ARM_UNKNOWN_LINUX_MUSLEABIHF_LINKER" "arm-linux-musleabihf-cross/bin/arm-linux-musleabihf-gcc"
+set_linker_env "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_LINKER" "riscv64-linux-musl-cross/bin/riscv64-linux-musl-gcc"
+set_linker_env "CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_MUSL_LINKER" "powerpc64le-linux-musl-cross/bin/powerpc64le-linux-musl-gcc"
+set_linker_env "CARGO_TARGET_MIPS_UNKNOWN_LINUX_MUSL_LINKER" "mips-linux-musl-cross/bin/mips-linux-musl-gcc"
+set_linker_env "CARGO_TARGET_MIPSEL_UNKNOWN_LINUX_MUSL_LINKER" "mipsel-linux-musl-cross/bin/mipsel-linux-musl-gcc"
+
 # 定义版本号（从 Cargo.toml 获取或手动指定）
 VERSION=$(grep "^version" bandix/Cargo.toml | cut -d '"' -f2)
 echo "Build version: $VERSION"
@@ -39,6 +67,19 @@ MIPS_TARGETS=(
   "mips-unknown-linux-musl"
   "mipsel-unknown-linux-musl"
 )
+
+print_linker_for_target() {
+  local target="$1"
+  local env_key="CARGO_TARGET_${target//-/_}_LINKER"
+  env_key="${env_key^^}"
+  local linker="${!env_key:-}"
+
+  if [ -n "$linker" ]; then
+    echo "Linker for $target: $linker"
+  else
+    echo "⚠ Linker env not set for $target ($env_key)"
+  fi
+}
 
 # 打包构建产物的辅助函数
 package_target() {
@@ -79,6 +120,7 @@ echo "========================================"
 for TARGET in "${DEFAULT_TARGETS[@]}"; do
   echo ""
   echo "Starting build for $TARGET..."
+  print_linker_for_target "$TARGET"
   
   # 构建 release 版本
   if cargo build -q --release --target "$TARGET"; then
@@ -97,6 +139,7 @@ done
 for TARGET in "${MIPS_TARGETS[@]}"; do
   echo ""
   echo "Starting build for $TARGET (nightly + build-std)..."
+  print_linker_for_target "$TARGET"
 
   if cargo +nightly build -q -Z build-std --release --target "$TARGET"; then
     echo "✓ Build successful (nightly build-std): $TARGET"
