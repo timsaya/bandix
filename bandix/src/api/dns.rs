@@ -363,7 +363,8 @@ impl DnsApiHandler {
     ///
     /// 查询参数：
     /// - domain: 按域名过滤（子串匹配）
-    /// - device: 按设备 MAC 或主机名过滤（子串匹配）
+    /// - device: 按设备 MAC、主机名或 IP 地址过滤（子串匹配）
+    ///           设备 IP 在查询记录中为 source_ip，在响应记录中为 destination_ip
     /// - is_query: 按查询类型过滤（true=查询，false=响应）
     /// - query_type: 按 DNS 记录类型过滤（例如：A, AAAA, CNAME, MX, TXT, NS, SOA, PTR）
     /// - dns_server: 按 DNS 服务器 IP 地址过滤（查询时为 destination_ip，响应时为 source_ip）
@@ -414,11 +415,14 @@ impl DnsApiHandler {
                     }
                 }
 
-                // 按设备过滤（MAC 或主机名，大小写不敏感的子串匹配）
+                // 按设备过滤（MAC、主机名或 IP 地址，大小写不敏感的子串匹配）
+                // 设备 IP：查询记录中为 source_ip，响应记录中为 destination_ip
                 if let Some(ref device) = device_filter {
                     let mac_match = q.device_mac.to_lowercase().contains(device);
                     let name_match = q.device_name.to_lowercase().contains(device);
-                    if !mac_match && !name_match {
+                    let device_ip = if q.is_query { &q.source_ip } else { &q.destination_ip };
+                    let ip_match = device_ip.contains(device);
+                    if !mac_match && !name_match && !ip_match {
                         return false;
                     }
                 }

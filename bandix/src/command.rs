@@ -13,6 +13,46 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcOrder {
+    First,
+    Default,
+    Last,
+    Before,
+    After,
+}
+
+impl TcOrder {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "first" => Some(Self::First),
+            "default" => Some(Self::Default),
+            "last" => Some(Self::Last),
+            "before" => Some(Self::Before),
+            "after" => Some(Self::After),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcBackend {
+    Auto,
+    Tcx,
+    Netlink,
+}
+
+impl TcBackend {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "tcx" => Some(Self::Tcx),
+            "netlink" => Some(Self::Netlink),
+            _ => None,
+        }
+    }
+}
+
 /// 所有命令共享的通用参数
 #[derive(Debug, Args, Clone)]
 pub struct CommonArgs {
@@ -38,10 +78,35 @@ pub struct CommonArgs {
 
     #[clap(
         long,
-        default_value = "0",
-        help = "TC filter priority (lower number = higher priority, 0 = kernel auto-assign). Use this to control execution order when running alongside other eBPF TC programs."
+        default_value = "default",
+        help = "TC order: first, default, last, before, after"
     )]
-    pub tc_priority: u16,
+    pub tc_order: String,
+
+    #[clap(
+        long,
+        default_value = "auto",
+        help = "TC attach backend: auto, tcx, netlink (default: auto)"
+    )]
+    pub tc_backend: String,
+
+    #[clap(
+        long = "netlink-priority",
+        help = "Netlink priority (0..65535, 0 means default). Only used when netlink backend is active"
+    )]
+    pub netlink_priority: Option<u16>,
+
+    #[clap(
+        long = "tcx-anchor-ingress-id",
+        help = "TCX ingress anchor program id. Used when tc-order is before/after"
+    )]
+    pub tcx_anchor_ingress_id: Option<u32>,
+
+    #[clap(
+        long = "tcx-anchor-egress-id",
+        help = "TCX egress anchor program id. Used when tc-order is before/after"
+    )]
+    pub tcx_anchor_egress_id: Option<u32>,
 }
 
 /// 流量模块参数
@@ -194,9 +259,26 @@ impl Options {
         &self.common.log_level
     }
 
-    /// 从通用参数获取 TC 优先级
-    pub fn tc_priority(&self) -> u16 {
-        self.common.tc_priority
+    /// 从通用参数获取 TC 顺序
+    pub fn tc_order(&self) -> TcOrder {
+        TcOrder::parse(&self.common.tc_order).expect("tc_order must be validated before use")
+    }
+
+    /// 从通用参数获取 TC 后端
+    pub fn tc_backend(&self) -> TcBackend {
+        TcBackend::parse(&self.common.tc_backend).expect("tc_backend must be validated before use")
+    }
+
+    pub fn netlink_priority(&self) -> Option<u16> {
+        self.common.netlink_priority
+    }
+
+    pub fn tcx_anchor_ingress_id(&self) -> Option<u32> {
+        self.common.tcx_anchor_ingress_id
+    }
+
+    pub fn tcx_anchor_egress_id(&self) -> Option<u32> {
+        self.common.tcx_anchor_egress_id
     }
 
     /// 从流量参数获取启用流量
@@ -357,6 +439,39 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
         return Err(anyhow::anyhow!("Port number cannot be 0"));
     }
 
+    let tc_order = TcOrder::parse(&opt.common.tc_order).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid tc-order: {}. Valid: first, default, last, before, after",
+            opt.common.tc_order
+        )
+    })?;
+    let tc_backend = TcBackend::parse(&opt.common.tc_backend)
+        .ok_or_else(|| anyhow::anyhow!("Invalid tc-backend: {}. Valid: auto, tcx, netlink", opt.common.tc_backend))?;
+    if opt.netlink_priority().is_some() && tc_backend == TcBackend::Tcx {
+        anyhow::bail!("--netlink-priority cannot be used with --tc-backend=tcx");
+    }
+    match tc_order {
+        TcOrder::Before | TcOrder::After => {
+            let has_ingress = opt.tcx_anchor_ingress_id().is_some();
+            let has_egress = opt.tcx_anchor_egress_id().is_some();
+            if !has_ingress && !has_egress {
+                anyhow::bail!(
+                    "anchor program id is required when --tc-order is before/after; use --tcx-anchor-ingress-id/--tcx-anchor-egress-id"
+                );
+            }
+            if tc_backend == TcBackend::Netlink {
+                anyhow::bail!("--tc-order=before/after is only supported with tcx backend");
+            }
+        }
+        _ => {
+            if opt.tcx_anchor_ingress_id().is_some() || opt.tcx_anchor_egress_id().is_some() {
+                anyhow::bail!(
+                    "--tcx-anchor-ingress-id and --tcx-anchor-egress-id can only be used when --tc-order is before/after"
+                );
+            }
+        }
+    }
+
     // 仅在启用流量模块时验证流量特定参数
     if opt.enable_traffic() {
         if opt.traffic_realtime_window() == 0 {
@@ -392,7 +507,15 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
 
 // 初始化共享的 eBPF 程序（被流量和 DNS 模块共同使用）
 async fn init_shared_ebpf(options: &Options) -> Result<aya::Ebpf, anyhow::Error> {
-    load_shared(options.iface().to_string(), options.tc_priority()).await
+    load_shared(
+        options.iface().to_string(),
+        options.tc_order(),
+        options.tc_backend(),
+        options.netlink_priority(),
+        options.tcx_anchor_ingress_id(),
+        options.tcx_anchor_egress_id(),
+    )
+    .await
 }
 
 // 子网信息结构体（跨模块共享）
