@@ -4,7 +4,7 @@
 pub mod maps;
 
 use aya_ebpf::{
-    bindings::{TC_ACT_PIPE, TC_ACT_SHOT},
+    bindings::{TC_ACT_SHOT, TC_ACT_UNSPEC},
     programs::TcContext,
 };
 use network_types::eth::EthHdr;
@@ -25,7 +25,7 @@ pub fn handle_traffic_ingress(ctx: &TcContext) -> Result<i32, ()> {
     match ethhdr_type {
         network_types::eth::EtherType::Ipv4 => handle_ipv4(ctx, true),
         network_types::eth::EtherType::Ipv6 => handle_ipv6(ctx, true),
-        _ => Ok(TC_ACT_PIPE),
+        _ => Ok(TC_ACT_UNSPEC),
     }
 }
 
@@ -37,7 +37,7 @@ pub fn handle_traffic_egress(ctx: &TcContext) -> Result<i32, ()> {
     match ethhdr_type {
         network_types::eth::EtherType::Ipv4 => handle_ipv4(ctx, false),
         network_types::eth::EtherType::Ipv6 => handle_ipv6(ctx, false),
-        _ => Ok(TC_ACT_PIPE),
+        _ => Ok(TC_ACT_UNSPEC),
     }
 }
 
@@ -61,7 +61,7 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
 
     // Check subnet configuration
     if !is_subnet_configured() {
-        return Ok(TC_ACT_PIPE);
+        return Ok(TC_ACT_UNSPEC);
     }
 
     // 检查是否addresses are in local subnet
@@ -96,7 +96,7 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     // Monitor traffic stats
     monitor_traffic(&src_mac, &dst_mac, data_len, &src_ip, &dst_ip);
 
-    Ok(TC_ACT_PIPE)
+    Ok(TC_ACT_UNSPEC)
 }
 
 #[inline(always)]
@@ -165,7 +165,7 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     // Monitor traffic stats
     monitor_traffic_v6(&src_mac, &dst_mac, data_len, &src_ip, &dst_ip);
 
-    Ok(TC_ACT_PIPE)
+    Ok(TC_ACT_UNSPEC)
 }
 
 // ============================================================================

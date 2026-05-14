@@ -3,7 +3,7 @@
 
 pub mod maps;
 
-use aya_ebpf::{bindings::TC_ACT_PIPE, helpers::bpf_ktime_get_ns, programs::TcContext};
+use aya_ebpf::{bindings::TC_ACT_UNSPEC, helpers::bpf_ktime_get_ns, programs::TcContext};
 use bandix_common::PacketHeader;
 use core::cmp;
 
@@ -74,13 +74,13 @@ fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
     // 获取packet length
     let len = ctx.len();
     if len == 0 {
-        return Ok(TC_ACT_PIPE);
+        return Ok(TC_ACT_UNSPEC);
     }
 
     // 过滤DNS packets in kernel space, only process DNS traffic
     if !is_dns_packet(&ctx, len as usize) {
         // Not a DNS packet, pass through without processing
-        return Ok(TC_ACT_PIPE);
+        return Ok(TC_ACT_UNSPEC);
     }
 
     // 计算data length to copy (not exceeding MAX_PAYLOAD)
@@ -91,7 +91,7 @@ fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
         Some(entry) => entry,
         None => {
             // Ringbuf is full, skip this packet
-            return Ok(TC_ACT_PIPE);
+            return Ok(TC_ACT_UNSPEC);
         }
     };
 
@@ -131,7 +131,7 @@ fn try_handle_dns(ctx: &TcContext, direction: u32) -> Result<i32, ()> {
     // Submit data to userspace
     entry.submit(0);
 
-    Ok(TC_ACT_PIPE)
+    Ok(TC_ACT_UNSPEC)
 }
 
 /// 验证DNS header format
