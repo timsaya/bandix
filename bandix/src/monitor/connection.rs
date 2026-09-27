@@ -4,6 +4,7 @@ use anyhow::Result;
 use bandix_common::{ConnectionStats, DeviceConnectionStats};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -11,12 +12,12 @@ use std::sync::{Arc, Mutex};
 pub struct ConnectionFlowDetail {
     pub protocol: String,
     pub state: Option<String>,
-    pub orig_src: [u8; 4],
-    pub orig_dst: [u8; 4],
+    pub orig_src: IpAddr,
+    pub orig_dst: IpAddr,
     pub orig_sport: u16,
     pub orig_dport: u16,
-    pub repl_src: [u8; 4],
-    pub repl_dst: [u8; 4],
+    pub repl_src: IpAddr,
+    pub repl_dst: IpAddr,
     pub repl_sport: u16,
     pub repl_dport: u16,
     pub orig_packets: u64,
@@ -26,15 +27,34 @@ pub struct ConnectionFlowDetail {
     pub flags: Vec<String>,
 }
 
-pub fn parse_connection_flows() -> Result<Vec<ConnectionFlowDetail>> {
-    let output = Command::new("conntrack").arg("-L").output()?;
+/// 执行 `conntrack -L -f <family>` 并返回标准输出
+fn run_conntrack(family: &str) -> Result<String> {
+    let output = Command::new("conntrack").arg("-L").arg("-f").arg(family).output()?;
     if !output.status.success() {
         anyhow::bail!(
-            "Failed to execute conntrack -L: {}",
+            "Failed to execute conntrack -L -f {}: {}",
+            family,
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let content = String::from_utf8_lossy(&output.stdout);
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// 同时取回 IPv4 和 IPv6 的 conntrack 表。
+/// `conntrack -L` 不带 `-f` 时 family 缺省为 AF_INET，只会 dump IPv4 表项，
+/// 所以 IPv6 必须单独取一次。两个协议族的输出格式一致，拼接后共用同一套解析逻辑。
+fn dump_conntrack() -> Result<String> {
+    let mut content = run_conntrack("ipv4")?;
+    // 内核未启用 IPv6 conntrack 时这里会失败，不影响 IPv4 的统计
+    match run_conntrack("ipv6") {
+        Ok(ipv6) => content.push_str(&ipv6),
+        Err(e) => log::debug!("IPv6 conntrack unavailable: {}", e),
+    }
+    Ok(content)
+}
+
+pub fn parse_connection_flows() -> Result<Vec<ConnectionFlowDetail>> {
+    let content = dump_conntrack()?;
     let mut flows = Vec::new();
     for line in content.lines() {
         let line = line.trim();
@@ -61,8 +81,8 @@ pub fn parse_connection_flows() -> Result<Vec<ConnectionFlowDetail>> {
                 tcp_state = Some("ESTABLISHED".to_string());
             }
         }
-        let mut srcs: Vec<[u8; 4]> = Vec::new();
-        let mut dsts: Vec<[u8; 4]> = Vec::new();
+        let mut srcs: Vec<IpAddr> = Vec::new();
+        let mut dsts: Vec<IpAddr> = Vec::new();
         let mut sports: Vec<u16> = Vec::new();
         let mut dports: Vec<u16> = Vec::new();
         let mut packets_list: Vec<u64> = Vec::new();
@@ -71,13 +91,13 @@ pub fn parse_connection_flows() -> Result<Vec<ConnectionFlowDetail>> {
         for part in &parts {
             if part.starts_with("src=") {
                 let s = &part[4..];
-                if let Ok(ip) = s.parse::<std::net::Ipv4Addr>() {
-                    srcs.push(ip.octets());
+                if let Ok(ip) = s.parse::<IpAddr>() {
+                    srcs.push(ip);
                 }
             } else if part.starts_with("dst=") {
                 let s = &part[4..];
-                if let Ok(ip) = s.parse::<std::net::Ipv4Addr>() {
-                    dsts.push(ip.octets());
+                if let Ok(ip) = s.parse::<IpAddr>() {
+                    dsts.push(ip);
                 }
             } else if part.starts_with("sport=") {
                 if let Ok(p) = (&part[6..]).parse::<u16>() {
@@ -156,20 +176,65 @@ impl Default for GlobalConnectionStats {
     }
 }
 
-/// 从 conntrack -L 命令解析连接统计信息
-/// 1. 总统计：所有 TCP/UDP 连接（无过滤）
-/// 2. 设备统计：ARP 表中且与接口在同一子网中的设备的连接
-pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Result<GlobalConnectionStats> {
-    let output = Command::new("conntrack")
-        .arg("-L")
-        .output()?;
-    
-    if !output.status.success() {
-        anyhow::bail!("Failed to execute conntrack -L: {}", String::from_utf8_lossy(&output.stderr));
+/// 构建 LAN 设备地址 → MAC 的查表，并给出每台设备用于展示的 IPv4 地址。
+///
+/// IPv4 沿用 ARP 表 + 接口子网判定；IPv6 用邻居表，但 `ip -6 neigh` 是全接口的，
+/// 必须再用被监控接口自身的前缀过滤掉 WAN 侧邻居。link-local 前缀（fe80::/10）
+/// 所有接口共用，区分不了 LAN/WAN，所以只取 GUA 和 ULA 前缀。
+fn build_local_device_lookup(
+    interface: &str,
+    interface_ip: [u8; 4],
+    subnet_mask: [u8; 4],
+) -> Result<(HashMap<IpAddr, [u8; 6]>, HashMap<[u8; 6], [u8; 4]>)> {
+    use crate::utils::network_utils::Ipv6AddressType;
+
+    let mut lookup: HashMap<IpAddr, [u8; 6]> = HashMap::new();
+    let mut device_ipv4: HashMap<[u8; 6], [u8; 4]> = HashMap::new();
+
+    for (ip, mac) in network_utils::get_ip_mac_mapping()? {
+        if network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
+            lookup.insert(IpAddr::from(ip), mac);
+            device_ipv4.entry(mac).or_insert(ip);
+        }
     }
-    
-    let content = String::from_utf8_lossy(&output.stdout);
-    let ip_mac_mapping = network_utils::get_ip_mac_mapping()?;
+
+    let prefixes: Vec<([u8; 16], u8)> = network_utils::get_interface_ipv6_info(interface)
+        .into_iter()
+        .filter(|(addr, _)| {
+            matches!(
+                network_utils::classify_ipv6_address(addr),
+                Ipv6AddressType::GlobalUnicast | Ipv6AddressType::UniqueLocal
+            )
+        })
+        .collect();
+
+    if !prefixes.is_empty() {
+        match network_utils::get_ipv6_neighbors() {
+            Ok(neighbors) => {
+                for (mac, addresses) in neighbors {
+                    for addr in addresses {
+                        if prefixes
+                            .iter()
+                            .any(|(prefix, prefix_len)| network_utils::is_ipv6_in_prefix(&addr, prefix, *prefix_len))
+                        {
+                            lookup.insert(IpAddr::from(addr), mac);
+                        }
+                    }
+                }
+            }
+            Err(e) => log::debug!("Failed to read IPv6 neighbor table: {}", e),
+        }
+    }
+
+    Ok((lookup, device_ipv4))
+}
+
+/// 从 conntrack 表解析连接统计信息（IPv4 + IPv6）
+/// 1. 总统计：所有 TCP/UDP 连接（无过滤）
+/// 2. 设备统计：源地址能归属到 LAN 设备的连接，IPv4 看 ARP 表 + 子网，IPv6 看邻居表 + 接口前缀
+pub fn parse_connection_stats(interface: &str, interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Result<GlobalConnectionStats> {
+    let content = dump_conntrack()?;
+    let (device_lookup, device_ipv4) = build_local_device_lookup(interface, interface_ip, subnet_mask)?;
 
     // 1. 总连接统计（无过滤）
     let mut total_stats = ConnectionStats::default();
@@ -213,19 +278,19 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
         }
 
         // 提取源和目的 IP 地址（仅使用第一次出现）
-        let mut src_ip = None;
-        let mut dst_ip = None;
+        let mut src_ip: Option<IpAddr> = None;
+        let mut dst_ip: Option<IpAddr> = None;
 
         for part in &parts {
             if part.starts_with("src=") && src_ip.is_none() {
                 let ip_str = &part[4..]; // Remove "src=" prefix
-                if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
-                    src_ip = Some(ip.octets());
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    src_ip = Some(ip);
                 }
             } else if part.starts_with("dst=") && dst_ip.is_none() {
                 let ip_str = &part[4..]; // Remove "dst=" prefix
-                if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
-                    dst_ip = Some(ip.octets());
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    dst_ip = Some(ip);
                 }
             }
         }
@@ -277,22 +342,17 @@ pub fn parse_connection_stats(interface_ip: [u8; 4], subnet_mask: [u8; 4]) -> Re
         }
 
         // ===== 2. 本地网络设备连接统计（以设备为 src 的视角）=====
-        // 仅当 src 是 ARP 表中且在相同子网的 LAN 设备时计入该设备
-        let valid_device_ip = src_ip.and_then(|ip| {
-            if ip_mac_mapping.contains_key(&ip) && network_utils::is_ip_in_subnet(ip, interface_ip, subnet_mask) {
-                Some(ip)
-            } else {
-                None
-            }
-        });
+        // 仅当 src 能归属到一台 LAN 设备时计入该设备（IPv4 走 ARP 表，IPv6 走邻居表）
+        let device_mac = src_ip.and_then(|ip| device_lookup.get(&ip).copied());
 
-        if let Some(ip) = valid_device_ip {
-            let &mac = ip_mac_mapping.get(&ip).unwrap();
+        if let Some(mac) = device_mac {
+            // 设备级统计按 MAC 聚合，展示用的 IPv4 地址取自 ARP 表（纯 IPv6 设备为 0.0.0.0）
+            let ip_address = device_ipv4.get(&mac).copied().unwrap_or([0, 0, 0, 0]);
 
             // Update device statistics
             let device_stat = device_stats.entry(mac).or_insert_with(|| DeviceConnectionStats {
                 mac_address: mac,
-                ip_address: ip,
+                ip_address,
                 tcp_connections: 0,
                 udp_connections: 0,
                 established_tcp: 0,
@@ -364,12 +424,13 @@ pub struct ConnectionModuleContext {
     pub hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
     pub interface_ip: [u8; 4],
     pub subnet_mask: [u8; 4],
+    pub interface: String,
 }
 
 impl ConnectionModuleContext {
     /// 创建带有共享主机名绑定和子网信息的连接模块上下文
     pub fn new(
-        _options: Options,
+        options: Options,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
         interface_ip: [u8; 4],
         subnet_mask: [u8; 4],
@@ -379,6 +440,7 @@ impl ConnectionModuleContext {
             hostname_bindings, // 使用共享的主机名绑定
             interface_ip,
             subnet_mask,
+            interface: options.iface().to_string(),
         }
     }
 }
@@ -409,7 +471,7 @@ impl ConnectionMonitor {
             tokio::select! {
                 _ = interval.tick() => {
                     // 解析连接统计信息
-                    match parse_connection_stats(ctx.interface_ip, ctx.subnet_mask) {
+                    match parse_connection_stats(&ctx.interface, ctx.interface_ip, ctx.subnet_mask) {
                         Ok(new_stats) => {
                             // Update the shared connection statistics
                             {

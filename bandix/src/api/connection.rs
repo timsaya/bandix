@@ -1,9 +1,11 @@
 use crate::api::{ApiResponse, HttpRequest, HttpResponse};
 use crate::monitor::connection::{parse_connection_flows, ConnectionFlowDetail, GlobalConnectionStats};
+use crate::utils::network_utils;
 use anyhow::Result;
 use bandix_common::ConnectionStats;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 /// 连接 statistics API handler
@@ -167,19 +169,41 @@ pub struct PagedConnectionFlowsResponse {
     pub total_pages: usize,
 }
 
+/// LuCI 按设备筛选连接时传的是设备的 IPv4 地址，这里展开成同一台设备（同 MAC）的全部地址，
+/// 否则该设备的 IPv6 连接会被过滤掉。地址无法解析时返回 None，表示不做过滤。
+fn device_filter_addresses(filter: &str) -> Option<Vec<IpAddr>> {
+    let addr = filter.parse::<IpAddr>().ok()?;
+    let mut addresses = vec![addr];
+
+    if let IpAddr::V4(v4) = addr {
+        let mac = network_utils::get_ip_mac_mapping()
+            .ok()
+            .and_then(|mapping| mapping.get(&v4.octets()).copied());
+        if let Some(mac) = mac {
+            if let Ok(neighbors) = network_utils::get_ipv6_neighbors() {
+                if let Some(ipv6_addresses) = neighbors.get(&mac) {
+                    addresses.extend(ipv6_addresses.iter().map(|a| IpAddr::from(*a)));
+                }
+            }
+        }
+    }
+
+    Some(addresses)
+}
+
 fn flow_to_response(f: &ConnectionFlowDetail) -> ConnectionFlowResponse {
     ConnectionFlowResponse {
         protocol: f.protocol.clone(),
         state: f.state.clone(),
         orig: FlowEndpoint {
-            src: format_ip(&f.orig_src),
-            dst: format_ip(&f.orig_dst),
+            src: f.orig_src.to_string(),
+            dst: f.orig_dst.to_string(),
             sport: f.orig_sport,
             dport: f.orig_dport,
         },
         repl: FlowEndpoint {
-            src: format_ip(&f.repl_src),
-            dst: format_ip(&f.repl_dst),
+            src: f.repl_src.to_string(),
+            dst: f.repl_dst.to_string(),
             sport: f.repl_sport,
             dport: f.repl_dport,
         },
@@ -220,31 +244,27 @@ impl ConnectionApiHandler {
         filter_state: Option<&str>,
     ) -> Result<Vec<ConnectionFlowResponse>> {
         let flows = parse_connection_flows()?;
-        let mut result: Vec<ConnectionFlowResponse> = flows
+        let filter_addresses = filter_ip.and_then(device_filter_addresses);
+        let mut matched: Vec<&ConnectionFlowDetail> = flows
             .iter()
             .filter(|f| {
-                filter_ip.map_or(true, |ip| {
-                    if let Ok(filter) = ip.parse::<std::net::Ipv4Addr>() {
-                        f.orig_src == filter.octets()
-                    } else {
-                        true
-                    }
-                })
+                filter_addresses
+                    .as_ref()
+                    .map_or(true, |addresses| addresses.contains(&f.orig_src))
                     && filter_protocol.map_or(true, |p| f.protocol.eq_ignore_ascii_case(p))
                     && filter_state.map_or(true, |s| {
                         f.state.as_ref().map_or(false, |st| st.eq_ignore_ascii_case(s))
                     })
             })
-            .map(flow_to_response)
             .collect();
-        result.sort_by(|a, b| {
-            let ip_cmp = a.orig.src.cmp(&b.orig.src);
-            if ip_cmp != std::cmp::Ordering::Equal {
-                return ip_cmp;
-            }
-            a.orig.dst.cmp(&b.orig.dst).then_with(|| a.orig.sport.cmp(&b.orig.sport))
+        // 直接按 IpAddr 排序：IPv4 在前、IPv6 在后，同族内是数值序而不是字符串序
+        matched.sort_by(|a, b| {
+            a.orig_src
+                .cmp(&b.orig_src)
+                .then_with(|| a.orig_dst.cmp(&b.orig_dst))
+                .then_with(|| a.orig_sport.cmp(&b.orig_sport))
         });
-        Ok(result)
+        Ok(matched.into_iter().map(flow_to_response).collect())
     }
 
     /// 处理HTTP requests for connection statistics

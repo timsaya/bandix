@@ -327,6 +327,26 @@ pub mod network_utils {
         network1 == network2
     }
 
+    /// 检查 IPv6 地址是否落在给定前缀内（IPv6 版的 is_ip_in_subnet）
+    pub fn is_ipv6_in_prefix(ip: &[u8; 16], prefix: &[u8; 16], prefix_len: u8) -> bool {
+        if prefix_len == 0 || prefix_len > 128 {
+            return false;
+        }
+
+        let full_bytes = (prefix_len / 8) as usize;
+        if ip[..full_bytes] != prefix[..full_bytes] {
+            return false;
+        }
+
+        let remaining_bits = prefix_len % 8;
+        if remaining_bits == 0 {
+            return true;
+        }
+
+        let mask = 0xffu8 << (8 - remaining_bits);
+        (ip[full_bytes] & mask) == (prefix[full_bytes] & mask)
+    }
+
     /// 获取IPv6 address information for a specific interface
     /// Returns a list of (IPv6 address, prefix length) tuples
     pub fn get_interface_ipv6_info(interface: &str) -> Vec<([u8; 16], u8)> {
@@ -615,6 +635,27 @@ pub mod network_utils {
             assert!(!is_ip_in_subnet([192, 168, 2, 1], interface_ip, subnet_mask));
             assert!(!is_ip_in_subnet([10, 0, 0, 1], interface_ip, subnet_mask));
             assert!(!is_ip_in_subnet([127, 0, 0, 1], interface_ip, subnet_mask));
+        }
+
+        #[test]
+        fn test_is_ipv6_in_prefix() {
+            use std::net::Ipv6Addr;
+            use std::str::FromStr;
+
+            let prefix = Ipv6Addr::from_str("2408:8256:3b8c:1d2a::").unwrap().octets();
+            let inside = Ipv6Addr::from_str("2408:8256:3b8c:1d2a:7c4e:9f01:ab23:4567").unwrap().octets();
+            let outside = Ipv6Addr::from_str("2408:8256:3b8c:1d2b::1").unwrap().octets();
+
+            assert!(is_ipv6_in_prefix(&inside, &prefix, 64));
+            assert!(!is_ipv6_in_prefix(&outside, &prefix, 64));
+
+            // 前缀长度不是 8 的倍数
+            assert!(is_ipv6_in_prefix(&outside, &prefix, 60));
+
+            // 完整匹配与非法前缀长度
+            assert!(is_ipv6_in_prefix(&inside, &inside, 128));
+            assert!(!is_ipv6_in_prefix(&inside, &prefix, 0));
+            assert!(!is_ipv6_in_prefix(&inside, &prefix, 129));
         }
 
         #[test]
