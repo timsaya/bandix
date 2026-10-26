@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod dns;
+pub mod geoip;
 pub mod traffic;
 
 use serde::{Deserialize, Serialize};
@@ -115,12 +116,16 @@ impl ApiHandler {
 /// API 路由器，用于管理模块 API 处理程序
 #[derive(Clone)]
 pub struct ApiRouter {
+    pub geoip: std::sync::Arc<crate::geoip::GeoIpManager>,
     handlers: HashMap<String, ApiHandler>,
 }
 
 impl ApiRouter {
-    pub fn new() -> Self {
-        Self { handlers: HashMap::new() }
+    pub fn new(geoip: std::sync::Arc<crate::geoip::GeoIpManager>) -> Self {
+        Self {
+            handlers: HashMap::new(),
+            geoip,
+        }
     }
 
     /// Register an API handler for a module
@@ -130,6 +135,9 @@ impl ApiRouter {
 
     /// Route a request to the appropriate handler
     pub async fn route_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        if request.path.starts_with("/api/geoip/") {
+            return geoip::handle_request(&self.geoip, request).await;
+        }
         // Try to find a handler that supports this route
         for handler in self.handlers.values() {
             for route in handler.supported_routes() {
@@ -203,6 +211,7 @@ pub async fn send_http_response(stream: &mut TcpStream, response: &HttpResponse)
     let status_text = match response.status {
         200 => "OK",
         400 => "BAD REQUEST",
+        403 => "FORBIDDEN",
         404 => "Not Found",
         500 => "INTERNAL SERVER ERROR",
         _ => "UNKNOWN",

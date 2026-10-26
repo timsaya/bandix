@@ -47,6 +47,7 @@ sudo ./bandix --iface <network_interface_name> [options]
 ### Command-line Options
 
 - **--iface**: Network interface to monitor (required)
+- **--host**: Web server listening IPv4 or IPv6 address. Default: `127.0.0.1` (debug and release). Use `0.0.0.0` or `::` to listen on all IPv4 or IPv6 interfaces.
 - **--port**: Web server listening port. Default: `8686`
 - **--data-dir**: Data directory (ring files and rate limit configurations will be stored here). Default: `bandix-data`
 - **--log-level**: Log level: trace, debug, info, warn, error (default: info). Web and DNS logs are always at DEBUG level.
@@ -74,6 +75,9 @@ sudo ./bandix --iface br-lan --enable-dns
 
 # Enable all monitoring modules
 sudo ./bandix --iface br-lan --enable-traffic --enable-connection --enable-dns
+
+# Listen on a specific address (the HTTP API has no authentication; restrict access to trusted clients)
+sudo ./bandix --iface br-lan --host 192.168.2.1 --enable-connection
 
 # Custom port and data directory
 sudo ./bandix --iface br-lan --port 8080 --data-dir /var/lib/bandix --enable-traffic --enable-connection --enable-dns
@@ -590,3 +594,42 @@ Update DNS monitoring configuration (Not Yet Implemented).
 ## License
 
 This project is licensed under the MIT License.
+
+## Offline IP location databases (GeoIP)
+
+In LuCI, open **Settings → Connection Monitor Settings → IP location database**.
+Choose Country, Country + ASN, or City + ASN and click **Download and enable**.
+Production databases are optional downloads, not embedded in the Bandix package.
+Downloads run in the background and report progress after reopening the page.
+
+Bandix uses the P3TERX GeoLite2 GitHub release, pins the selected release asset,
+checks its size and GitHub-provided SHA-256, validates the MMDB structure, and
+activates an immutable generation atomically. Failed/cancelled updates retain the
+previous database; already-current versions are not downloaded again. First
+installation enables lookup; later updates preserve the current enable state.
+
+Country/City/ASN `.mmdb` files can also be uploaded; install location data before
+adding ASN. Database readers are memory mapped, lookups are deduplicated after
+pagination, and the result cache is bounded to 2048 IPs. Existing flow addresses
+and legacy responses retain their semantics.
+
+The default directory is `/usr/share/bandix-geoip`; override it with `--geoip-dir`
+or OpenWrt's `bandix.connections.geoip_dir`. Enable state, profile and version are
+persisted there. Do not modify or truncate active MMDB files in place. Updates
+through the manager do not require restarting the service.
+
+- `GET /api/geoip/status`: installed files, storage, enable state and job progress.
+- `POST /api/geoip/manage`: `download` (`profile`: `country`, `country_asn`,
+  `city_asn`, or `city`), `cancel`, `enable` (boolean `enabled`), `delete`, `import`.
+- Management writes accept only the router itself (loopback or a source IP matching the accepted socket's local IP); LuCI exposes them through its write ACL.
+- `import` reads only `/tmp/bandix-geoip-upload.mmdb`, never a client-supplied path.
+- `GET /api/connection/flows?page=1&page_size=100&geoip=1`: adds an optional,
+  deduplicated `geoip` map to the paged response. No enrichment for legacy arrays.
+
+Source: [P3TERX/GeoLite.mmdb](https://github.com/P3TERX/GeoLite.mmdb).
+Data: [MaxMind GeoLite2 terms](https://www.maxmind.com/en/geolite2/eula), separate
+from the application license. Production databases are not included in packages.
+
+Run `cargo test -p bandix -p bandix-common` for offline validation. The ignored
+`live_country_asn_download` test verifies real downloads in a temporary directory;
+set `BANDIX_GEOIP_LIVE_CITY=1` to verify City + ASN instead.

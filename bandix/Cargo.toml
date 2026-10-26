@@ -23,6 +23,7 @@ tokio = { workspace = true, features = [
     "signal",
     "time",
     "io-util",
+    "fs",
     "sync",
 ], default-features = false }
 clap = { workspace = true, features = ["derive"] }
@@ -35,6 +36,9 @@ comfy-table = { workspace = true }
 chrono = { workspace = true }
 trust-dns-proto = { workspace = true }
 reqwest = { workspace = true }
+maxminddb = { version = "0.32", features = ["mmap"] }
+sha2 = "0.10"
+tempfile = "3"
 
 [build-dependencies]
 anyhow = { workspace = true }

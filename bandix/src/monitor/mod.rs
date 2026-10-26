@@ -5,12 +5,12 @@ pub mod traffic;
 use crate::api::ApiRouter;
 use crate::command::Options;
 use crate::device::DeviceManager;
-use crate::storage::traffic::{LongTermRingManager, RealtimeRingManager, ScheduledRateLimit};
 use crate::storage::quota::TrafficQuotaManager;
+use crate::storage::traffic::{LongTermRingManager, RealtimeRingManager, ScheduledRateLimit};
 use std::collections::HashMap as StdHashMap;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 // 从连接模块重新导出 ConnectionModuleContext
 pub use connection::ConnectionModuleContext;
@@ -271,14 +271,14 @@ impl ModuleType {
             (ModuleType::Dns, ModuleContext::Dns(dns_ctx)) => {
                 // DNS 模块数据初始化逻辑
                 let base_dir = dns_ctx.options.data_dir();
-                
+
                 // 确保 DNS 存储目录结构存在
                 crate::storage::dns::ensure_dns_schema(base_dir)?;
-                
+
                 // 如果启用了持久化，加载历史记录
                 if dns_ctx.options.dns_enable_storage() {
                     let max_records = dns_ctx.options.dns_max_records();
-                    
+
                     match crate::storage::dns::load_dns_queries(base_dir, max_records) {
                         Ok(records) => {
                             let mut queries = dns_ctx.dns_queries.lock().unwrap();
@@ -290,7 +290,7 @@ impl ModuleType {
                         }
                     }
                 }
-                
+
                 Ok(())
             }
             (ModuleType::Connection, ModuleContext::Connection(_connection_ctx)) => {
@@ -348,6 +348,10 @@ impl ModuleType {
                 let handler = ApiHandler::Connection(ConnectionApiHandler::new(
                     Arc::clone(&connection_ctx.device_connection_stats),
                     Arc::clone(&connection_ctx.hostname_bindings),
+                    Arc::clone(&api_router.geoip),
+                    connection_ctx.interface.clone(),
+                    connection_ctx.interface_ip,
+                    connection_ctx.subnet_mask,
                 ));
 
                 // 注册到 API 路由器
@@ -393,7 +397,7 @@ pub struct MonitorManager {
 }
 
 impl MonitorManager {
-    pub fn from_contexts(contexts: &[ModuleContext]) -> Self {
+    pub fn from_contexts(contexts: &[ModuleContext], geoip: Arc<crate::geoip::GeoIpManager>) -> Self {
         let modules: Vec<ModuleType> = contexts
             .iter()
             .map(|ctx| match ctx {
@@ -405,7 +409,7 @@ impl MonitorManager {
 
         MonitorManager {
             modules,
-            api_router: ApiRouter::new(),
+            api_router: ApiRouter::new(geoip),
         }
     }
 

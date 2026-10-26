@@ -4,13 +4,18 @@ use crate::utils::network_utils;
 use anyhow::Result;
 use bandix_common::ConnectionStats;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 /// 连接 statistics API handler
 #[derive(Clone)]
 pub struct ConnectionApiHandler {
+    geoip: Arc<crate::geoip::GeoIpManager>,
+    query_slots: Arc<tokio::sync::Semaphore>,
+    interface: String,
+    interface_ip: [u8; 4],
+    subnet_mask: [u8; 4],
     device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
     hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
 }
@@ -19,10 +24,19 @@ impl ConnectionApiHandler {
     pub fn new(
         device_connection_stats: Arc<Mutex<GlobalConnectionStats>>,
         hostname_bindings: Arc<Mutex<HashMap<[u8; 6], String>>>,
+        geoip: Arc<crate::geoip::GeoIpManager>,
+        interface: String,
+        interface_ip: [u8; 4],
+        subnet_mask: [u8; 4],
     ) -> Self {
         Self {
             device_connection_stats,
             hostname_bindings,
+            geoip,
+            query_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            interface,
+            interface_ip,
+            subnet_mask,
         }
     }
 
@@ -162,6 +176,8 @@ pub struct FlowEndpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PagedConnectionFlowsResponse {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub geoip: BTreeMap<String, crate::geoip::GeoInfo>,
     pub items: Vec<ConnectionFlowResponse>,
     pub total: usize,
     pub page: usize,
@@ -221,13 +237,10 @@ fn paginate_flows(flows: Vec<ConnectionFlowResponse>, page: usize, page_size: us
     let current_page = page.max(1).min(total_pages);
     let start = (current_page - 1).saturating_mul(page_size);
     let end = (start + page_size).min(total);
-    let items = if start < total {
-        flows[start..end].to_vec()
-    } else {
-        Vec::new()
-    };
+    let items = if start < total { flows[start..end].to_vec() } else { Vec::new() };
 
     PagedConnectionFlowsResponse {
+        geoip: BTreeMap::new(),
         items,
         total,
         page: current_page,
@@ -252,9 +265,7 @@ impl ConnectionApiHandler {
                     .as_ref()
                     .map_or(true, |addresses| addresses.contains(&f.orig_src))
                     && filter_protocol.map_or(true, |p| f.protocol.eq_ignore_ascii_case(p))
-                    && filter_state.map_or(true, |s| {
-                        f.state.as_ref().map_or(false, |st| st.eq_ignore_ascii_case(s))
-                    })
+                    && filter_state.map_or(true, |s| f.state.as_ref().map_or(false, |st| st.eq_ignore_ascii_case(s)))
             })
             .collect();
         // 直接按 IpAddr 排序：IPv4 在前、IPv6 在后，同族内是数值序而不是字符串序
@@ -265,6 +276,29 @@ impl ConnectionApiHandler {
                 .then_with(|| a.orig_sport.cmp(&b.orig_sport))
         });
         Ok(matched.into_iter().map(flow_to_response).collect())
+    }
+
+    fn enrich_geoip(&self, page: &mut PagedConnectionFlowsResponse) {
+        let prefixes = network_utils::get_interface_ipv6_info(&self.interface);
+        for flow in &page.items {
+            for address in [&flow.orig.src, &flow.orig.dst, &flow.repl.src, &flow.repl.dst] {
+                if page.geoip.contains_key(address) {
+                    continue;
+                }
+                let Ok(ip) = address.parse::<IpAddr>() else {
+                    continue;
+                };
+                let local = match ip {
+                    IpAddr::V4(ip) => {
+                        self.subnet_mask != [0; 4] && network_utils::is_ip_in_subnet(ip.octets(), self.interface_ip, self.subnet_mask)
+                    }
+                    IpAddr::V6(ip) => prefixes
+                        .iter()
+                        .any(|(prefix, length)| *length > 0 && network_utils::is_ipv6_in_prefix(&ip.octets(), prefix, *length)),
+                };
+                page.geoip.insert(address.clone(), self.geoip.lookup(ip, local));
+            }
+        }
     }
 
     /// 处理HTTP requests for connection statistics
@@ -306,23 +340,33 @@ impl ConnectionApiHandler {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(200)
                     .clamp(1, 1000);
-                match self.get_connection_flows(filter_ip, filter_protocol, filter_state) {
-                    Ok(flows) => {
-                        let body = if has_pagination {
-                            let api_response = ApiResponse::success(paginate_flows(flows, page, page_size));
-                            serde_json::to_string(&api_response)?
-                        } else {
-                            let api_response = ApiResponse::success(flows);
-                            serde_json::to_string(&api_response)?
-                        };
-                        Ok(HttpResponse::ok(body))
+                let permit = self.query_slots.clone().acquire_owned().await?;
+                let handler = self.clone();
+                let filter_ip = filter_ip.map(str::to_owned);
+                let filter_protocol = filter_protocol.map(str::to_owned);
+                let filter_state = filter_state.map(str::to_owned);
+                let include_geoip = request.query_params.get("geoip").is_some_and(|value| value == "1");
+                // Conntrack dumps and cold MMDB page faults must not block the
+                // async monitor workers. Bound concurrent snapshots on small routers.
+                let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                    let _permit = permit;
+                    let flows = handler.get_connection_flows(filter_ip.as_deref(), filter_protocol.as_deref(), filter_state.as_deref())?;
+                    if has_pagination {
+                        let mut page_data = paginate_flows(flows, page, page_size);
+                        if include_geoip && handler.geoip.enabled() {
+                            handler.enrich_geoip(&mut page_data);
+                        }
+                        Ok(serde_json::to_string(&ApiResponse::success(page_data))?)
+                    } else {
+                        Ok(serde_json::to_string(&ApiResponse::success(flows))?)
                     }
+                })
+                .await?;
+                match result {
+                    Ok(body) => Ok(HttpResponse::ok(body)),
                     Err(e) => {
                         log::error!("Failed to get connection flows: {}", e);
-                        Ok(HttpResponse::error(
-                            500,
-                            format!("Failed to get connection flows: {}", e),
-                        ))
+                        Ok(HttpResponse::error(500, format!("Failed to get connection flows: {}", e)))
                     }
                 }
             }
@@ -333,5 +377,60 @@ impl ConnectionApiHandler {
     /// 获取supported routes for this handler
     pub fn supported_routes(&self) -> Vec<&'static str> {
         vec!["/api/connection/devices", "/api/connection/flows"]
+    }
+}
+
+#[cfg(test)]
+mod geoip_tests {
+    use super::*;
+    #[test]
+    fn paged_lookup_deduplicates_nat_addresses_and_marks_lan_addresses() {
+        let directory = tempfile::tempdir().unwrap();
+        let generation = format!("db-{}", uuid::Uuid::new_v4());
+        std::fs::create_dir(directory.path().join(&generation)).unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/geoip/country.mmdb"),
+            directory.path().join(&generation).join("GeoLite2-Country.mmdb"),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("state.json"),
+            serde_json::to_vec(&serde_json::json!({"enabled":true,"active":generation})).unwrap(),
+        )
+        .unwrap();
+        let manager = crate::geoip::GeoIpManager::new(directory.path().to_path_buf());
+        let handler = ConnectionApiHandler::new(
+            Arc::new(Mutex::new(GlobalConnectionStats::default())),
+            Arc::new(Mutex::new(HashMap::new())),
+            manager,
+            "lo".into(),
+            [192, 168, 1, 1],
+            [255, 255, 255, 0],
+        );
+        let endpoint = || FlowEndpoint {
+            src: "192.168.1.2".into(),
+            dst: "81.2.69.160".into(),
+            sport: 1234,
+            dport: 443,
+        };
+        let flow = ConnectionFlowResponse {
+            protocol: "tcp".into(),
+            state: None,
+            orig: endpoint(),
+            repl: endpoint(),
+            orig_packets: 0,
+            orig_bytes: 0,
+            repl_packets: 0,
+            repl_bytes: 0,
+            flags: vec![],
+        };
+        let mut page = paginate_flows(vec![flow.clone(), flow], 1, 1);
+        assert!(serde_json::to_value(&page).unwrap().get("geoip").is_none());
+        handler.enrich_geoip(&mut page);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.geoip.len(), 2);
+        assert_eq!(page.geoip["192.168.1.2"].scope, "local");
+        assert_eq!(page.geoip["81.2.69.160"].country_code.as_deref(), Some("GB"));
     }
 }

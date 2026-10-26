@@ -9,6 +9,7 @@ use aya::maps::Array;
 use clap::{Args, Parser};
 use log::info;
 use log::LevelFilter;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal;
@@ -58,6 +59,13 @@ impl TcBackend {
 pub struct CommonArgs {
     #[clap(long, help = "Network interface to monitor (required)")]
     pub iface: String,
+
+    #[clap(
+        long,
+        default_value = "127.0.0.1",
+        help = "Web server listening IP address (IPv4 or IPv6)"
+    )]
+    pub host: IpAddr,
 
     #[clap(long, default_value = "8686", help = "Web server listening port")]
     pub port: u16,
@@ -213,6 +221,12 @@ pub struct DnsArgs {
 pub struct ConnectionArgs {
     #[clap(
         long,
+        default_value = "/usr/share/bandix-geoip",
+        help = "Directory for optional GeoIP databases"
+    )]
+    pub geoip_dir: std::path::PathBuf,
+    #[clap(
+        long,
         default_value = "false",
         help = "Enable connection statistics monitoring module"
     )]
@@ -242,6 +256,11 @@ impl Options {
     /// 从通用参数获取接口
     pub fn iface(&self) -> &str {
         &self.common.iface
+    }
+
+    /// 从通用参数获取监听地址
+    pub fn host(&self) -> IpAddr {
+        self.common.host
     }
 
     /// 从通用参数获取端口
@@ -403,10 +422,7 @@ fn parse_cidr(cidr: &str) -> Result<([u8; 4], [u8; 4]), anyhow::Error> {
     Ok((network_addr, subnet_mask))
 }
 
-pub fn build_allowed_ipv4_subnets(
-    subnet_info: &SubnetInfo,
-    additional_subnets: &str,
-) -> Vec<([u8; 4], [u8; 4])> {
+pub fn build_allowed_ipv4_subnets(subnet_info: &SubnetInfo, additional_subnets: &str) -> Vec<([u8; 4], [u8; 4])> {
     let mut subnets = Vec::new();
     let net: [u8; 4] = [
         subnet_info.interface_ip[0] & subnet_info.subnet_mask[0],
@@ -465,9 +481,7 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
         }
         _ => {
             if opt.tcx_anchor_ingress_id().is_some() || opt.tcx_anchor_egress_id().is_some() {
-                anyhow::bail!(
-                    "--tcx-anchor-ingress-id and --tcx-anchor-egress-id can only be used when --tc-order is before/after"
-                );
+                anyhow::bail!("--tcx-anchor-ingress-id and --tcx-anchor-egress-id can only be used when --tc-order is before/after");
             }
         }
     }
@@ -503,6 +517,37 @@ fn validate_arguments(opt: &Options) -> Result<(), anyhow::Error> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn default_host_is_ipv4_loopback() {
+        let options = Options::try_parse_from(["bandix", "--iface", "br-lan"]).unwrap();
+        assert_eq!(options.host(), "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(options.port(), 8686);
+    }
+
+    #[test]
+    fn custom_ipv4_and_ipv6_hosts_are_accepted() {
+        for host in ["0.0.0.0", "192.168.2.1", "::", "::1", "fd00::1"] {
+            let options = Options::try_parse_from(["bandix", "--iface", "br-lan", "--host", host, "--port", "8080"]).unwrap();
+            assert_eq!(options.host(), host.parse::<IpAddr>().unwrap());
+            assert_eq!(options.port(), 8080);
+        }
+    }
+
+    #[test]
+    fn invalid_hosts_are_rejected_before_startup() {
+        for host in ["localhost", "256.1.2.3", "127.0.0.1:8686", "[::1]", "192.168.1.0/24", ""] {
+            assert!(
+                Options::try_parse_from(["bandix", "--iface", "br-lan", "--host", host]).is_err(),
+                "{host}"
+            );
+        }
+    }
 }
 
 // 初始化共享的 eBPF 程序（被流量和 DNS 模块共同使用）
@@ -842,11 +887,7 @@ fn start_hostname_refresh_task(
     })
 }
 
-fn start_neighbor_flush_task(
-    iface: String,
-    interval_secs: u64,
-    shutdown_notify: Arc<tokio::sync::Notify>,
-) -> tokio::task::JoinHandle<()> {
+fn start_neighbor_flush_task(iface: String, interval_secs: u64, shutdown_notify: Arc<tokio::sync::Notify>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -927,7 +968,10 @@ async fn run_service(options: &Options) -> Result<(), anyhow::Error> {
     let module_contexts = create_module_contexts(options, &subnet_info, &shared_hostname_bindings, Arc::clone(&device_manager)).await?;
 
     // 初始化模块
-    let mut monitor_manager = MonitorManager::from_contexts(&module_contexts);
+    let mut monitor_manager = MonitorManager::from_contexts(
+        &module_contexts,
+        crate::geoip::GeoIpManager::new(options.connection.geoip_dir.clone()),
+    );
     monitor_manager.init_modules(&module_contexts).await?;
 
     // 启动 Web 服务器

@@ -149,7 +149,10 @@ pub fn log_startup_info(options: &Options) {
     if uid != 0 {
         warn!("It is recommended to run as root to enable eBPF capabilities");
     }
-    info!("Listening port: {}", options.port());
+    info!(
+        "Listening address: {}",
+        std::net::SocketAddr::new(options.host(), options.port())
+    );
     info!("Data directory: {}", options.data_dir());
     info!("Log level: {}", options.log_level());
     info!("Retention seconds: {}", options.traffic_realtime_window());
