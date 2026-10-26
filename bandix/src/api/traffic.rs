@@ -30,6 +30,9 @@ pub struct DeviceInfo {
     pub uplink: String,
     #[serde(rename = "w_ch")]
     pub wifi_channel: u32,
+    /// Primary Wi-Fi frequency in MHz; 0 when unavailable or not Wi-Fi.
+    #[serde(rename = "w_freq", default)]
+    pub wifi_frequency_mhz: u32,
 
     #[serde(rename = "t_rx_b")]
     pub total_rx_bytes: u64,
@@ -725,7 +728,7 @@ impl TrafficApiHandler {
 
         let bindings_map = self.hostname_bindings.lock().unwrap();
         let bridge_port_map = self.device_manager.get_bridge_port_map_snapshot();
-        let wifi_channel_map = self.device_manager.get_wifi_channel_map_snapshot();
+        let wifi_radio_map = self.device_manager.get_wifi_radio_map_snapshot();
 
         // 从设备管理器收集所有设备（包括在线和离线设备）
         let all_devices = self.device_manager.get_all_devices_with_mac();
@@ -763,10 +766,10 @@ impl TrafficApiHandler {
                 let connection_type = self.device_manager.resolve_connection_type(&mac);
 
                 let uplink = bridge_port_map.get(&mac).cloned().unwrap_or_default();
-                let wifi_channel = if connection_type == "wifi" {
-                    wifi_channel_map.get(&uplink).copied().unwrap_or(0)
+                let radio = if connection_type == "wifi" {
+                    wifi_radio_map.get(&uplink).copied().unwrap_or_default()
                 } else {
-                    0
+                    crate::device::WifiRadioInfo::default()
                 };
 
                 // 计算指定时间段的流量
@@ -878,7 +881,8 @@ impl TrafficApiHandler {
                     hostname,
                     connection_type,
                     uplink,
-                    wifi_channel,
+                    wifi_channel: radio.channel,
+                    wifi_frequency_mhz: radio.frequency_mhz,
                     total_rx_bytes: final_total_rx_bytes,
                     total_tx_bytes: final_total_tx_bytes,
                     total_rx_rate: device.total_rx_rate(),

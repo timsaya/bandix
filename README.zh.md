@@ -125,6 +125,9 @@ curl http://127.0.0.1:8686/api/system/info
         "mac": "00:11:22:33:44:55",
         "host": "我的设备",
         "conn": "wifi",
+        "uplink": "phy2-ap0",
+        "w_ch": 5,
+        "w_freq": 5975,
         "t_rx_b": 1024,
         "t_tx_b": 2048,
         "t_rx_r": 100,
@@ -147,6 +150,8 @@ curl http://127.0.0.1:8686/api/system/info
 ```
 
 **字段说明：** `d`=设备列表；`ip4`=IPv4；`ip6`=IPv6 地址列表；`host`=主机名；`conn`=连接类型(wifi/wired/router)；`t_rx_b`/`t_tx_b`=总收/发字节；`t_rx_r`/`t_tx_r`=总收/发速率；`w_rx_l`/`w_tx_l`=WAN 限速；`l_rx_b`/`l_tx_b`=LAN 字节；`l_rx_r`/`l_tx_r`=LAN 速率；`w_rx_b`/`w_tx_b`=WAN 字节；`w_rx_r`/`w_tx_r`=WAN 速率；`last`=最后在线时间戳(ms)。
+
+`uplink` 为接入接口名；`w_ch` 为 Wi-Fi 主信道号；`w_freq` 为主信道实际频率（MHz），非 Wi-Fi 或无法读取时为 `0`。频率取自 `iw dev <接口> info`，与信道号一起每约 30 秒刷新。客户端应依据 `w_freq` 判断频段：不同频段的信道号会重叠，例如 6 GHz 的信道 5 为 5975 MHz，不能仅凭 `w_ch=5` 判断为 2.4 GHz。旧服务端缺少 `w_freq` 时应将频段视为未知。
 
 #### DELETE /api/traffic/devices/batch
 

@@ -57,6 +57,27 @@ fn batch(body: Value) -> HttpRequest {
 }
 
 #[tokio::test]
+async fn device_api_reports_unknown_frequency_and_accepts_legacy_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let handler = handler(&directory);
+    let response = handler
+        .handle_request(&request("GET", "/api/traffic/devices", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    let mut body: Value = serde_json::from_str(&response.body).unwrap();
+    let devices = body["data"]["d"].as_array_mut().unwrap();
+    assert_eq!(devices.len(), 2);
+    for device in devices {
+        assert_eq!(device["w_ch"], 0);
+        assert_eq!(device["w_freq"], 0);
+        device.as_object_mut().unwrap().remove("w_freq");
+        let legacy: DeviceInfo = serde_json::from_value(device.clone()).unwrap();
+        assert_eq!(legacy.wifi_frequency_mhz, 0);
+    }
+}
+
+#[tokio::test]
 async fn batch_deletion_routes_deduplicates_and_reports_missing_devices() {
     let directory = tempfile::tempdir().unwrap();
     let handler = handler(&directory);

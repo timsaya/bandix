@@ -128,6 +128,9 @@ Get real-time traffic statistics for all devices.
         "mac": "00:11:22:33:44:55",
         "host": "MyDevice",
         "conn": "wifi",
+        "uplink": "phy2-ap0",
+        "w_ch": 5,
+        "w_freq": 5975,
         "t_rx_b": 1024,
         "t_tx_b": 2048,
         "t_rx_r": 100,
@@ -150,6 +153,8 @@ Get real-time traffic statistics for all devices.
 ```
 
 **Fields:** `d`=devices; `ip4`=IPv4; `ip6`=IPv6 list; `host`=hostname; `conn`=connection type; `t_rx_b`/`t_tx_b`=total bytes; `t_rx_r`/`t_tx_r`=total rate; `w_rx_l`/`w_tx_l`=WAN limits; `l_*`=LAN; `w_*`=WAN; `last`=last online timestamp (ms).
+
+`uplink` identifies the ingress interface; `w_ch` is the primary Wi-Fi channel; `w_freq` is its actual frequency in MHz, or `0` for non-Wi-Fi/unknown. Both are read from `iw dev <interface> info` and refreshed approximately every 30 seconds. Clients must determine the band from `w_freq`: channel numbers overlap across bands (6 GHz channel 5 is 5975 MHz). Treat the band as unknown when older servers omit `w_freq`.
 
 #### DELETE /api/traffic/devices/batch
 

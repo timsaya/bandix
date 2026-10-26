@@ -146,6 +146,30 @@ impl UnifiedDevice {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WifiRadioInfo {
+    pub channel: u32,
+    pub frequency_mhz: u32,
+}
+
+impl WifiRadioInfo {
+    fn from_iw_info(output: &str) -> Option<Self> {
+        let channel_info = output.lines().find_map(|line| line.trim().strip_prefix("channel "))?;
+        let channel = channel_info.split_whitespace().next()?.parse::<u32>().ok()?;
+        if channel == 0 {
+            return None;
+        }
+        // Keep the primary frequency, not center1/center2. Channel numbers alone
+        // overlap across 2.4, 5 and 6 GHz and cannot identify the band.
+        let frequency_mhz = channel_info
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split_once(" MHz)"))
+            .and_then(|(frequency, _)| frequency.trim().parse().ok())
+            .unwrap_or(0);
+        Some(Self { channel, frequency_mhz })
+    }
+}
+
 pub struct DeviceManager {
     devices: Arc<Mutex<HashMap<[u8; 6], UnifiedDevice>>>,
     iface: String,
@@ -157,7 +181,7 @@ pub struct DeviceManager {
     wifi_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
     wired_macs: Arc<Mutex<HashSet<[u8; 6]>>>,
     bridge_port_map: Arc<Mutex<HashMap<[u8; 6], String>>>,
-    wifi_channel_map: Arc<Mutex<HashMap<String, u32>>>,
+    wifi_radio_map: Arc<Mutex<HashMap<String, WifiRadioInfo>>>,
     exclude_iface_device: bool,
 }
 
@@ -180,7 +204,7 @@ impl DeviceManager {
             wifi_macs: Arc::new(Mutex::new(HashSet::new())),
             wired_macs: Arc::new(Mutex::new(HashSet::new())),
             bridge_port_map: Arc::new(Mutex::new(HashMap::new())),
-            wifi_channel_map: Arc::new(Mutex::new(HashMap::new())),
+            wifi_radio_map: Arc::new(Mutex::new(HashMap::new())),
             exclude_iface_device,
         }
     }
@@ -569,8 +593,8 @@ impl DeviceManager {
         self.bridge_port_map.lock().unwrap().clone()
     }
 
-    pub fn get_wifi_channel_map_snapshot(&self) -> HashMap<String, u32> {
-        self.wifi_channel_map.lock().unwrap().clone()
+    pub fn get_wifi_radio_map_snapshot(&self) -> HashMap<String, WifiRadioInfo> {
+        self.wifi_radio_map.lock().unwrap().clone()
     }
 
     pub fn get_interface_mac(&self) -> [u8; 6] {
@@ -584,7 +608,10 @@ impl DeviceManager {
 
         let bridge_map = self.bridge_port_map.lock().unwrap();
         if let Some(iface_name) = bridge_map.get(mac) {
-            return if iface_name.contains("phy") || iface_name.contains("wlan") {
+            return if self.wifi_radio_map.lock().unwrap().contains_key(iface_name)
+                || iface_name.contains("phy")
+                || iface_name.contains("wlan")
+            {
                 "wifi".to_string()
             } else {
                 "wired".to_string()
@@ -686,7 +713,7 @@ impl DeviceManager {
         }
 
         self.refresh_bridge_port_map();
-        self.refresh_wifi_channel_map();
+        self.refresh_wifi_radio_map();
     }
 
     fn refresh_bridge_port_map(&self) {
@@ -748,42 +775,34 @@ impl DeviceManager {
         *guard = new_map;
     }
 
-    fn refresh_wifi_channel_map(&self) {
+    fn refresh_wifi_radio_map(&self) {
         let brif_path = format!("/sys/class/net/{}/brif", self.iface);
         let members = match std::fs::read_dir(&brif_path) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect::<Vec<String>>(),
-            Err(_) => return,
+            Err(_) => {
+                self.wifi_radio_map.lock().unwrap().clear();
+                return;
+            }
         };
 
-        let mut new_map: HashMap<String, u32> = HashMap::new();
+        let mut new_map = HashMap::new();
         for member in members {
-            if !member.contains("phy") && !member.contains("wlan") {
-                continue;
-            }
+            // Probe bridge members rather than assuming driver-specific names.
+            // iw returns an error for Ethernet interfaces.
             if let Ok(output) = std::process::Command::new("iw").args(["dev", &member, "info"]).output() {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with("channel ") {
-                            if let Some(ch_str) = trimmed.strip_prefix("channel ") {
-                                if let Some(ch_num) = ch_str.split_whitespace().next() {
-                                    if let Ok(ch) = ch_num.parse::<u32>() {
-                                        new_map.insert(member.clone(), ch);
-                                    }
-                                }
-                            }
-                            break;
-                        }
+                    if let Some(radio) = WifiRadioInfo::from_iw_info(&stdout) {
+                        new_map.insert(member, radio);
                     }
                 }
             }
         }
 
-        let mut guard = self.wifi_channel_map.lock().unwrap();
+        let mut guard = self.wifi_radio_map.lock().unwrap();
         *guard = new_map;
     }
 
@@ -905,6 +924,75 @@ impl DeviceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iw_info_preserves_primary_frequency_for_overlapping_channels() {
+        for (channel, frequency) in [(5, 2432), (149, 5745), (5, 5975), (37, 6135), (149, 6695), (2, 5935)] {
+            let output = format!(
+                "Interface wl0\n\ttype AP\n\tchannel {} ({} MHz), width: 320 MHz, center1: 6105 MHz\n",
+                channel, frequency
+            );
+            assert_eq!(
+                WifiRadioInfo::from_iw_info(&output),
+                Some(WifiRadioInfo {
+                    channel,
+                    frequency_mhz: frequency
+                }),
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_or_invalid_iw_data_never_invents_a_frequency() {
+        for output in [
+            "",
+            "Interface wlan0\n\ttype AP",
+            "channel invalid (5975 MHz)",
+            "channel 0 (5975 MHz)",
+        ] {
+            assert_eq!(WifiRadioInfo::from_iw_info(output), None);
+        }
+        for output in ["channel 5", "channel 5 (bad MHz), width: 80 MHz, center1: 5985 MHz"] {
+            assert_eq!(
+                WifiRadioInfo::from_iw_info(output),
+                Some(WifiRadioInfo {
+                    channel: 5,
+                    frequency_mhz: 0
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn detected_radios_identify_wifi_without_driver_name_assumptions() {
+        let manager = DeviceManager::new(
+            "br-lan".into(),
+            SubnetInfo {
+                interface_ip: [192, 168, 1, 1],
+                subnet_mask: [255, 255, 255, 0],
+                interface_mac: [2, 0, 0, 0, 0, 1],
+                ipv6_addresses: Vec::new(),
+            },
+            Vec::new(),
+            Arc::new(Mutex::new(HashMap::new())),
+            false,
+        );
+        let mac = [2, 0, 0, 0, 0, 2];
+        for interface in ["wl0", "ra0", "phy2-ap0", "wlan2"] {
+            manager.bridge_port_map.lock().unwrap().insert(mac, interface.into());
+            manager.wifi_radio_map.lock().unwrap().insert(
+                interface.into(),
+                WifiRadioInfo {
+                    channel: 5,
+                    frequency_mhz: 5975,
+                },
+            );
+            assert_eq!(manager.resolve_connection_type(&mac), "wifi");
+        }
+        manager.bridge_port_map.lock().unwrap().insert(mac, "lan1".into());
+        assert_eq!(manager.resolve_connection_type(&mac), "wired");
+    }
 
     #[test]
     fn test_is_special_mac_address() {
