@@ -1,6 +1,7 @@
 pub mod connection;
 pub mod dns;
 pub mod geoip;
+pub mod system;
 pub mod traffic;
 
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,9 @@ impl ApiRouter {
 
     /// Route a request to the appropriate handler
     pub async fn route_request(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        if request.path.starts_with("/api/system/") {
+            return system::handle_request(request);
+        }
         if request.path.starts_with("/api/geoip/") {
             return geoip::handle_request(&self.geoip, request).await;
         }
@@ -213,6 +217,7 @@ pub async fn send_http_response(stream: &mut TcpStream, response: &HttpResponse)
         400 => "BAD REQUEST",
         403 => "FORBIDDEN",
         404 => "Not Found",
+        405 => "Method Not Allowed",
         500 => "INTERNAL SERVER ERROR",
         _ => "UNKNOWN",
     };

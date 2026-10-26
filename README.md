@@ -91,6 +91,26 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 
 ## API Endpoints
 
+### System Information API
+
+#### GET /api/system/info
+
+Read-only endpoint returning only the running Bandix Server version. The version is taken from `bandix/Cargo.toml` at compile time. Available regardless of which monitoring modules are enabled. Other HTTP methods return 405.
+
+```sh
+curl http://127.0.0.1:8686/api/system/info
+```
+
+```json
+{
+  "status": "success",
+  "data": {
+    "version": "0.12.11"
+  },
+  "message": null
+}
+```
+
 ### Traffic Monitoring API
 
 #### GET /api/traffic/devices

@@ -88,6 +88,26 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 
 ## API 接口
 
+### 系统信息 API
+
+#### GET /api/system/info
+
+只读接口，仅返回当前运行的 Bandix Server 版本号。版本在编译时从 `bandix/Cargo.toml` 获取，不依赖监控模块是否启用。其他 HTTP 方法返回 405。
+
+```sh
+curl http://127.0.0.1:8686/api/system/info
+```
+
+```json
+{
+  "status": "success",
+  "data": {
+    "version": "0.12.11"
+  },
+  "message": null
+}
+```
+
 ### 流量监控 API
 
 #### GET /api/traffic/devices
