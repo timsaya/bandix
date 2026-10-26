@@ -68,6 +68,27 @@ MIPS_TARGETS=(
   "mipsel-unknown-linux-musl"
 )
 
+# 目标标准库按 Rust 工具链分别安装；在编译前一次性检查并给出修复命令。
+BUILD_TOOLCHAIN=$(rustup show active-toolchain | awk '{print $1}')
+echo "Rust toolchain: $BUILD_TOOLCHAIN"
+INSTALLED_TARGETS=$(rustup target list --installed --toolchain "$BUILD_TOOLCHAIN")
+MISSING_TARGETS=()
+for TARGET in "${DEFAULT_TARGETS[@]}"; do
+  if ! grep -Fxq "$TARGET" <<< "$INSTALLED_TARGETS"; then
+    MISSING_TARGETS+=("$TARGET")
+  fi
+done
+
+if [ ${#MISSING_TARGETS[@]} -gt 0 ]; then
+  echo "✗ Missing Rust target standard libraries for $BUILD_TOOLCHAIN:"
+  printf '  - %s\n' "${MISSING_TARGETS[@]}"
+  echo "Install them, then rerun ./build_release.sh:"
+  printf '  rustup target add --toolchain %q' "$BUILD_TOOLCHAIN"
+  printf ' %q' "${MISSING_TARGETS[@]}"
+  printf '\n'
+  exit 1
+fi
+
 print_linker_for_target() {
   local target="$1"
   local env_key="CARGO_TARGET_${target//-/_}_LINKER"

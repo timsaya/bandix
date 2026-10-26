@@ -128,6 +128,36 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 
 **字段说明：** `d`=设备列表；`ip4`=IPv4；`ip6`=IPv6 地址列表；`host`=主机名；`conn`=连接类型(wifi/wired/router)；`t_rx_b`/`t_tx_b`=总收/发字节；`t_rx_r`/`t_tx_r`=总收/发速率；`w_rx_l`/`w_tx_l`=WAN 限速；`l_rx_b`/`l_tx_b`=LAN 字节；`l_rx_r`/`l_tx_r`=LAN 速率；`w_rx_b`/`w_tx_b`=WAN 字节；`w_rx_r`/`w_tx_r`=WAN 速率；`last`=最后在线时间戳(ms)。
 
+#### DELETE /api/traffic/devices/batch
+
+按 MAC 地址批量删除设备，清理范围与单设备删除接口 `DELETE /api/traffic/devices`（请求体 `{"mac":"00:11:22:33:44:55"}`）相同：设备记录、实时和长期流量历史、主机名绑定、限速白名单、定时限速、流量配额及用量、eBPF 流量和限制状态。DNS 查询记录不在清理范围内。
+
+```sh
+curl -X DELETE http://127.0.0.1:8686/api/traffic/devices/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"macs":["00:11:22:33:44:55","00:11:22:33:44:66"]}'
+```
+
+**响应示例（HTTP 200）：**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "deleted": ["00:11:22:33:44:55"],
+    "not_found": ["00:11:22:33:44:66"],
+    "failed": []
+  },
+  "message": null
+}
+```
+
+- `macs` 必须包含 1–1000 个 MAC 地址。缺少请求体、JSON 格式错误、空列表、超出上限或任意 MAC 无效时返回 HTTP 400，且不会删除任何设备。
+- MAC 地址按解析后的值去重（不区分十六进制字母大小写），响应地址统一为小写；各结果列表保留请求顺序。
+- 合法请求返回 HTTP 200；`deleted` 为删除成功的地址，`not_found` 为不存在的地址，`failed` 为清理失败的条目（`{"mac":"...","message":"..."}`）。顶层 `success` 表示批次已处理，调用方需要检查 `failed`。
+- 逐项执行，某项失败后继续处理其余设备。删除不具有事务性，失败项可能已有部分数据被清理。
+- 在线设备可能被后台监控重新发现；删除操作不会阻止设备联网。
+
 #### GET /api/traffic/limits/schedule
 获取所有设备的定时限速设置。
 

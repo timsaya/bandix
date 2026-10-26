@@ -131,6 +131,36 @@ Get real-time traffic statistics for all devices.
 
 **Fields:** `d`=devices; `ip4`=IPv4; `ip6`=IPv6 list; `host`=hostname; `conn`=connection type; `t_rx_b`/`t_tx_b`=total bytes; `t_rx_r`/`t_tx_r`=total rate; `w_rx_l`/`w_tx_l`=WAN limits; `l_*`=LAN; `w_*`=WAN; `last`=last online timestamp (ms).
 
+#### DELETE /api/traffic/devices/batch
+
+Delete devices by MAC address using the same cleanup as `DELETE /api/traffic/devices` (single-device body: `{"mac":"00:11:22:33:44:55"}`). Removes device records, realtime and long-term traffic history, hostname bindings, rate-limit whitelist entries, scheduled limits, quotas and usage, and eBPF traffic/limit state. DNS query records are retained.
+
+```sh
+curl -X DELETE http://127.0.0.1:8686/api/traffic/devices/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"macs":["00:11:22:33:44:55","00:11:22:33:44:66"]}'
+```
+
+**Example response (HTTP 200):**
+
+```json
+{
+  "status": "success",
+  "data": {
+    "deleted": ["00:11:22:33:44:55"],
+    "not_found": ["00:11:22:33:44:66"],
+    "failed": []
+  },
+  "message": null
+}
+```
+
+- `macs` must contain 1–1000 MAC addresses. Missing bodies, malformed JSON, empty or oversized lists, and invalid MAC addresses return HTTP 400 before any deletion.
+- Addresses are deduplicated by their parsed value, including case variants, and returned in lowercase. Each result list preserves request order.
+- Valid batches return HTTP 200. `deleted` lists successful deletions, `not_found` lists missing devices, and `failed` contains cleanup errors (`{"mac":"...","message":"..."}`). Top-level `success` means the batch was processed; callers must check `failed`.
+- Devices are processed individually; a cleanup failure does not stop subsequent deletions. Cleanup is not transactional: a failed item may already have lost some state.
+- Online devices may be rediscovered by background monitoring. Deletion does not block network access.
+
 #### GET /api/traffic/limits/schedule
 Get all scheduled rate limits for devices.
 

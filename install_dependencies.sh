@@ -94,11 +94,16 @@ if [ -f "$HOME/.cargo/env" ]; then
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
-echo "安装 Rust 1.91.1 工具链..."
-rustup toolchain install 1.91.1-x86_64-unknown-linux-gnu
+# 与项目固定的 Rust 版本一致，避免把目标标准库装进另一个版本。
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RUST_TOOLCHAIN=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRIPT_DIR/rust-toolchain.toml")
+if [ -z "$RUST_TOOLCHAIN" ]; then
+    echo "错误: 无法从 rust-toolchain.toml 读取 Rust 版本"
+    exit 1
+fi
 
-echo "设置默认工具链为 1.91.1..."
-rustup default 1.91.1-x86_64-unknown-linux-gnu
+echo "安装项目 Rust $RUST_TOOLCHAIN 工具链..."
+rustup toolchain install "$RUST_TOOLCHAIN" --component rust-src --component rust-analyzer
 
 echo "安装/更新 nightly 工具链..."
 rustup toolchain install nightly
@@ -107,7 +112,7 @@ echo "添加 rust-src 组件 (nightly)..."
 rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
 
 echo "安装 bpf-linker (v0.10.2) ..." # bpf-linker 版本需要和 LLVM 版本对应 。  v0.10.2 对应 LLVM 21.1.2
-cargo install bpf-linker@0.10.2
+cargo +"$RUST_TOOLCHAIN" install bpf-linker@0.10.2
 
 RUST_TARGETS=(
     "x86_64-unknown-linux-musl"
@@ -123,8 +128,8 @@ RUST_TARGETS=(
 
 echo "安装/更新 Rust 交叉目标..."
 for TARGET in "${RUST_TARGETS[@]}"; do
-    echo "  rustup target add $TARGET"
-    rustup target add "$TARGET"
+    echo "  rustup target add --toolchain $RUST_TOOLCHAIN $TARGET"
+    rustup target add --toolchain "$RUST_TOOLCHAIN" "$TARGET"
 done
 
 # 安装每个工具链

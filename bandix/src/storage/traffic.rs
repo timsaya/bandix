@@ -1155,6 +1155,11 @@ impl LongTermRingManager {
         if path.exists() {
             fs::remove_file(&path)?;
         }
+        // Remove the device from an existing checkpoint as well, otherwise a
+        // restart can restore its current-hour traffic after deletion.
+        if self.accumulator_file_path().exists() {
+            self.save_accumulators()?;
+        }
         Ok(())
     }
 

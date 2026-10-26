@@ -1,15 +1,18 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
 use crate::storage::quota::{TrafficQuota, TrafficQuotaManager, TrafficQuotaStatus};
-use crate::storage::traffic::{self, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot, save_all_scheduled_limits};
+use crate::storage::traffic::{self, save_all_scheduled_limits, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot};
 use crate::utils::format_utils::{format_bytes, format_mac};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+mod tests;
 
 /// 设备信息，用于 API 响应
 #[derive(Serialize, Deserialize)]
@@ -324,6 +327,24 @@ pub struct DeleteDeviceRequest {
     pub mac: String,
 }
 
+#[derive(Deserialize)]
+pub struct BatchDeleteDevicesRequest {
+    pub macs: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct BatchDeleteDeviceFailure {
+    pub mac: String,
+    pub message: String,
+}
+
+#[derive(Default, Serialize)]
+pub struct BatchDeleteDevicesResponse {
+    pub deleted: Vec<String>,
+    pub not_found: Vec<String>,
+    pub failed: Vec<BatchDeleteDeviceFailure>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SetTrafficQuotaRequest {
     pub mac: String,
@@ -400,6 +421,7 @@ impl TrafficApiHandler {
     pub fn supported_routes(&self) -> Vec<&'static str> {
         vec![
             "/api/traffic/devices",
+            "/api/traffic/devices/batch",
             "/api/traffic/limits/schedule",
             "/api/traffic/metrics",
             "/api/traffic/bindings",
@@ -418,6 +440,10 @@ impl TrafficApiHandler {
             "/api/traffic/devices" => match request.method.as_str() {
                 "GET" => self.handle_devices(request).await,
                 "DELETE" => self.handle_delete_device(request).await,
+                _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
+            },
+            "/api/traffic/devices/batch" => match request.method.as_str() {
+                "DELETE" => self.handle_batch_delete_devices(request).await,
                 _ => Ok(HttpResponse::error(405, "Method not allowed".to_string())),
             },
             "/api/traffic/bindings" => match request.method.as_str() {
@@ -905,8 +931,73 @@ impl TrafficApiHandler {
         let req: DeleteDeviceRequest = serde_json::from_str(body)?;
         let mac = crate::utils::network_utils::parse_mac_address(&req.mac)?;
 
-        if !self.device_manager.remove_device(&mac) {
+        if !self.delete_device(mac)? {
             return Ok(HttpResponse::error(404, "Device not found".to_string()));
+        }
+
+        let body = serde_json::to_string(&ApiResponse::success(()))?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    async fn handle_batch_delete_devices(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
+        let Some(body) = request.body.as_deref() else {
+            return Ok(HttpResponse::error(400, "Missing request body".to_string()));
+        };
+        let req: BatchDeleteDevicesRequest = match serde_json::from_str(body) {
+            Ok(req) => req,
+            Err(error) => return Ok(HttpResponse::error(400, format!("Invalid request body: {}", error))),
+        };
+        if req.macs.is_empty() || req.macs.len() > 1000 {
+            return Ok(HttpResponse::error(
+                400,
+                "macs must contain between 1 and 1000 MAC addresses".to_string(),
+            ));
+        }
+
+        // Validate the entire request before deleting anything. Deduplicate by
+        // parsed address so different letter cases identify the same device.
+        let mut seen = HashSet::new();
+        let mut macs = Vec::new();
+        for (index, value) in req.macs.iter().enumerate() {
+            let mac = match crate::utils::network_utils::parse_mac_address(value) {
+                Ok(mac) => mac,
+                Err(_) => {
+                    return Ok(HttpResponse::error(
+                        400,
+                        format!("Invalid MAC address at macs[{}]: {}", index, value),
+                    ))
+                }
+            };
+            if seen.insert(mac) {
+                macs.push(mac);
+            }
+        }
+
+        let mut response = BatchDeleteDevicesResponse::default();
+        for mac in macs {
+            let formatted = format_mac(&mac);
+            match self.delete_device(mac) {
+                Ok(true) => response.deleted.push(formatted),
+                Ok(false) => response.not_found.push(formatted),
+                Err(error) => {
+                    log::error!("Failed to delete device {}: {}", formatted, error);
+                    response.failed.push(BatchDeleteDeviceFailure {
+                        mac: formatted,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        let body = serde_json::to_string(&ApiResponse::success(response))?;
+        Ok(HttpResponse::ok(body))
+    }
+
+    /// Shared cleanup for single and batch deletion. A cleanup error may occur
+    /// after some state has already been removed; deletion is not transactional.
+    fn delete_device(&self, mac: [u8; 6]) -> Result<bool, anyhow::Error> {
+        if !self.device_manager.remove_device(&mac) {
+            return Ok(false);
         }
 
         self.realtime_manager.remove_device(&mac);
@@ -955,16 +1046,32 @@ impl TrafficApiHandler {
                 let ptr = std::sync::Arc::as_ptr(ingress_ebpf) as *const aya::Ebpf as *mut aya::Ebpf;
                 &mut *ptr
             };
-            if let Ok(mut mac_traffic) = aya::maps::HashMap::<_, [u8; 6], [u64; 4]>::try_from(ebpf_mut.map_mut("MAC_TRAFFIC").ok_or_else(|| anyhow::anyhow!("MAC_TRAFFIC map not found"))?) {
+            if let Ok(mut mac_traffic) = aya::maps::HashMap::<_, [u8; 6], [u64; 4]>::try_from(
+                ebpf_mut
+                    .map_mut("MAC_TRAFFIC")
+                    .ok_or_else(|| anyhow::anyhow!("MAC_TRAFFIC map not found"))?,
+            ) {
                 let _ = mac_traffic.remove(&mac);
             }
-            if let Ok(mut mac_rate_limits) = aya::maps::HashMap::<_, [u8; 6], [u64; 2]>::try_from(ebpf_mut.map_mut("MAC_RATE_LIMITS").ok_or_else(|| anyhow::anyhow!("MAC_RATE_LIMITS map not found"))?) {
+            if let Ok(mut mac_rate_limits) = aya::maps::HashMap::<_, [u8; 6], [u64; 2]>::try_from(
+                ebpf_mut
+                    .map_mut("MAC_RATE_LIMITS")
+                    .ok_or_else(|| anyhow::anyhow!("MAC_RATE_LIMITS map not found"))?,
+            ) {
                 let _ = mac_rate_limits.remove(&mac);
             }
-            if let Ok(mut rate_buckets) = aya::maps::HashMap::<_, [u8; 6], [u64; 3]>::try_from(ebpf_mut.map_mut("RATE_BUCKETS").ok_or_else(|| anyhow::anyhow!("RATE_BUCKETS map not found"))?) {
+            if let Ok(mut rate_buckets) = aya::maps::HashMap::<_, [u8; 6], [u64; 3]>::try_from(
+                ebpf_mut
+                    .map_mut("RATE_BUCKETS")
+                    .ok_or_else(|| anyhow::anyhow!("RATE_BUCKETS map not found"))?,
+            ) {
                 let _ = rate_buckets.remove(&mac);
             }
-            if let Ok(mut quota_blocked) = aya::maps::HashMap::<_, [u8; 6], u8>::try_from(ebpf_mut.map_mut("MAC_QUOTA_BLOCKED").ok_or_else(|| anyhow::anyhow!("MAC_QUOTA_BLOCKED map not found"))?) {
+            if let Ok(mut quota_blocked) = aya::maps::HashMap::<_, [u8; 6], u8>::try_from(
+                ebpf_mut
+                    .map_mut("MAC_QUOTA_BLOCKED")
+                    .ok_or_else(|| anyhow::anyhow!("MAC_QUOTA_BLOCKED map not found"))?,
+            ) {
                 let _ = quota_blocked.remove(&mac);
             }
             if let Ok(mut quota_thresholds) = aya::maps::HashMap::<_, [u8; 6], [u64; 6]>::try_from(
@@ -977,9 +1084,7 @@ impl TrafficApiHandler {
         }
 
         log::info!("Device deleted: {}", format_mac(&mac));
-        let api_response = ApiResponse::success(());
-        let body = serde_json::to_string(&api_response)?;
-        Ok(HttpResponse::ok(body))
+        Ok(true)
     }
 
     async fn handle_metrics(&self, request: &HttpRequest) -> Result<HttpResponse, anyhow::Error> {
