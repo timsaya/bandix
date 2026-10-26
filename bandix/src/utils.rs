@@ -2,16 +2,16 @@
 pub mod format_utils {
     // 转换bytes to human-readable format
     pub fn format_bytes(bytes: u64) -> String {
-        const KB: u64 = 1024;
-        const MB: u64 = KB * 1024;
-        const GB: u64 = MB * 1024;
+        const KIB: u64 = 1024;
+        const MIB: u64 = KIB * 1024;
+        const GIB: u64 = MIB * 1024;
 
-        if bytes >= GB {
-            format!("{:.2} GB", bytes as f64 / GB as f64)
-        } else if bytes >= MB {
-            format!("{:.2} MB", bytes as f64 / MB as f64)
-        } else if bytes >= KB {
-            format!("{:.2} KB", bytes as f64 / KB as f64)
+        if bytes >= GIB {
+            format!("{:.2} GiB", bytes as f64 / GIB as f64)
+        } else if bytes >= MIB {
+            format!("{:.2} MiB", bytes as f64 / MIB as f64)
+        } else if bytes >= KIB {
+            format!("{:.2} KiB", bytes as f64 / KIB as f64)
         } else {
             format!("{} B", bytes)
         }

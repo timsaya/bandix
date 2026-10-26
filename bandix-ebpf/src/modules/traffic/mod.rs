@@ -3,11 +3,12 @@
 
 pub mod maps;
 
-use core::intrinsics::{atomic_xadd, AtomicOrdering};
 use aya_ebpf::{
     bindings::{TC_ACT_SHOT, TC_ACT_UNSPEC},
     programs::TcContext,
 };
+use bandix_common::quota::{QUOTA_DOWNLOAD, QUOTA_UPLOAD};
+use core::intrinsics::{atomic_xadd, AtomicOrdering};
 use network_types::eth::EthHdr;
 use network_types::ip::{Ipv4Hdr, Ipv6Hdr};
 
@@ -73,7 +74,7 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     if is_ingress {
         // Ingress: throttle upload traffic (local -> external)
         if src_is_local && !dst_is_local {
-            if should_block_quota(&src_mac) {
+            if should_block_quota(&src_mac, false) {
                 return Ok(TC_ACT_SHOT);
             }
             let limits = get_rate_limits(&src_mac);
@@ -87,7 +88,7 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     } else {
         // Egress: throttle download traffic (external -> local)
         if dst_is_local && !src_is_local {
-            if should_block_quota(&dst_mac) {
+            if should_block_quota(&dst_mac, true) {
                 return Ok(TC_ACT_SHOT);
             }
             let limits = get_rate_limits(&dst_mac);
@@ -148,7 +149,7 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     if is_ingress {
         // Ingress: throttle upload traffic (local -> external)
         if src_is_local && !dst_is_local {
-            if should_block_quota(&src_mac) {
+            if should_block_quota(&src_mac, false) {
                 return Ok(TC_ACT_SHOT);
             }
             let limits = get_rate_limits(&src_mac);
@@ -162,7 +163,7 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     } else {
         // Egress: throttle download traffic (external -> local)
         if dst_is_local && !src_is_local {
-            if should_block_quota(&dst_mac) {
+            if should_block_quota(&dst_mac, true) {
                 return Ok(TC_ACT_SHOT);
             }
             let limits = get_rate_limits(&dst_mac);
@@ -354,18 +355,19 @@ fn get_rate_limits(mac: &[u8; 6]) -> (u64, u64) {
 }
 
 #[inline]
-fn is_quota_blocked(mac: &[u8; 6]) -> bool {
+fn is_quota_blocked(mac: &[u8; 6], is_download: bool) -> bool {
+    let direction = if is_download { QUOTA_DOWNLOAD } else { QUOTA_UPLOAD };
     unsafe {
         match MAC_QUOTA_BLOCKED.get(mac) {
-            Some(value) => *value != 0,
+            Some(value) => *value & direction != 0,
             None => false,
         }
     }
 }
 
 #[inline(always)]
-fn should_block_quota(mac: &[u8; 6]) -> bool {
-    if is_quota_blocked(mac) {
+fn should_block_quota(mac: &[u8; 6], is_download: bool) -> bool {
+    if is_quota_blocked(mac, is_download) {
         return true;
     }
 
@@ -375,26 +377,11 @@ fn should_block_quota(mac: &[u8; 6]) -> bool {
             None => return false,
         }
     };
-    let wan_total = match MAC_TRAFFIC.get_ptr(mac) {
-        Some(stats) => unsafe {
-            atomic_load_u64(&(*stats)[2])
-                .saturating_add(atomic_load_u64(&(*stats)[3]))
-        },
-        None => 0,
+    let (upload, download) = match MAC_TRAFFIC.get_ptr(mac) {
+        Some(stats) => unsafe { (atomic_load_u64(&(*stats)[2]), atomic_load_u64(&(*stats)[3])) },
+        None => (0, 0),
     };
-    let reached = threshold_reached(thresholds[0], wan_total)
-        || threshold_reached(thresholds[1], wan_total)
-        || threshold_reached(thresholds[2], wan_total)
-        || threshold_reached(thresholds[3], wan_total)
-        || threshold_reached(thresholds[4], wan_total)
-        || threshold_reached(thresholds[5], wan_total);
-    if reached {
-        let _ = MAC_QUOTA_BLOCKED.insert(mac, &1u8, 0);
-    }
-    reached
-}
-
-#[inline(always)]
-fn threshold_reached(threshold: u64, wan_total: u64) -> bool {
-    threshold != u64::MAX && wan_total >= threshold
+    // Thresholds are checked on every packet. Avoid latching a whole-device
+    // block here: exhausting one direction must not disable the other.
+    thresholds.blocks(download, upload, is_download)
 }

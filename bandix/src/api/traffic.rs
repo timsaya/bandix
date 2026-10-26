@@ -1,8 +1,9 @@
 use super::{ApiResponse, HttpRequest, HttpResponse};
 use crate::command::Options;
-use crate::storage::quota::{TrafficQuota, TrafficQuotaManager, TrafficQuotaStatus};
+use crate::storage::quota::{QuotaMode, TrafficQuota, TrafficQuotaLimits, TrafficQuotaManager, TrafficQuotaStatus};
 use crate::storage::traffic::{self, save_all_scheduled_limits, LongTermRingManager, RealtimeRingManager, ScheduledRateLimit, TimeSlot};
 use crate::utils::format_utils::{format_bytes, format_mac};
+use bandix_common::quota::QuotaThresholds;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -351,15 +352,26 @@ pub struct BatchDeleteDevicesResponse {
 #[derive(Serialize, Deserialize)]
 pub struct SetTrafficQuotaRequest {
     pub mac: String,
+    /// Legacy requests select combined mode. Directional mode must be explicit.
+    #[serde(default)]
+    pub mode: QuotaMode,
     /// Bytes allowed in the local minute/calendar periods. 0 = unlimited.
     #[serde(default)]
-    pub minute_bytes: u64,
-    pub hourly_bytes: u64,
-    pub daily_bytes: u64,
-    pub weekly_bytes: u64,
-    pub monthly_bytes: u64,
+    pub minute_bytes: Option<u64>,
+    #[serde(default)]
+    pub hourly_bytes: Option<u64>,
+    #[serde(default)]
+    pub daily_bytes: Option<u64>,
+    #[serde(default)]
+    pub weekly_bytes: Option<u64>,
+    #[serde(default)]
+    pub monthly_bytes: Option<u64>,
     /// Lifetime bytes since this device quota was first created. 0 = unlimited.
-    pub total_bytes: u64,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    /// Omitted directions retain their configured limits; an empty object clears them.
+    pub upload: Option<TrafficQuotaLimits>,
+    pub download: Option<TrafficQuotaLimits>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -370,6 +382,8 @@ pub struct DeleteTrafficQuotaRequest {
 #[derive(Serialize)]
 pub struct TrafficQuotasResponse {
     pub quotas: Vec<TrafficQuotaStatus>,
+    pub supports_directional: bool,
+    pub supports_quota_modes: bool,
 }
 
 #[derive(Clone)]
@@ -648,7 +662,11 @@ impl TrafficApiHandler {
 
     async fn handle_traffic_quotas_get(&self) -> Result<HttpResponse, anyhow::Error> {
         let quotas = self.traffic_quota_manager.lock().unwrap().statuses(&chrono::Local::now());
-        let response = ApiResponse::success(TrafficQuotasResponse { quotas });
+        let response = ApiResponse::success(TrafficQuotasResponse {
+            quotas,
+            supports_directional: true,
+            supports_quota_modes: true,
+        });
         Ok(HttpResponse::ok(serde_json::to_string(&response)?))
     }
 
@@ -657,15 +675,19 @@ impl TrafficApiHandler {
         let req: SetTrafficQuotaRequest = serde_json::from_str(body)?;
         let mac = crate::utils::network_utils::parse_mac_address(&req.mac)?;
         let mut manager = self.traffic_quota_manager.lock().unwrap();
+        let previous = manager.quota(&mac).unwrap_or_default();
         manager.set_quota(
             mac,
             TrafficQuota {
-                minute_bytes: req.minute_bytes,
-                hourly_bytes: req.hourly_bytes,
-                daily_bytes: req.daily_bytes,
-                weekly_bytes: req.weekly_bytes,
-                monthly_bytes: req.monthly_bytes,
-                total_bytes: req.total_bytes,
+                mode: req.mode,
+                minute_bytes: req.minute_bytes.unwrap_or(previous.minute_bytes),
+                hourly_bytes: req.hourly_bytes.unwrap_or(previous.hourly_bytes),
+                daily_bytes: req.daily_bytes.unwrap_or(previous.daily_bytes),
+                weekly_bytes: req.weekly_bytes.unwrap_or(previous.weekly_bytes),
+                monthly_bytes: req.monthly_bytes.unwrap_or(previous.monthly_bytes),
+                total_bytes: req.total_bytes.unwrap_or(previous.total_bytes),
+                upload: req.upload.unwrap_or(previous.upload),
+                download: req.download.unwrap_or(previous.download),
             },
             &chrono::Local::now(),
         );
@@ -717,7 +739,6 @@ impl TrafficApiHandler {
                 ));
             }
         };
-
 
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -840,7 +861,10 @@ impl TrafficApiHandler {
                             log::debug!("MAC {}: no active current-hour increments found", format_mac(&mac));
                         }
                     } else {
-                        log::debug!("MAC {}: query does not overlap current hour, skip accumulator", format_mac(&mac));
+                        log::debug!(
+                            "MAC {}: query does not overlap current hour, skip accumulator",
+                            format_mac(&mac)
+                        );
                     }
 
                     log::debug!(
@@ -871,8 +895,6 @@ impl TrafficApiHandler {
                         device.wan_tx_bytes,
                     )
                 };
-
-                
 
                 let device_info = DeviceInfo {
                     ip: ip_str,
@@ -1078,7 +1100,7 @@ impl TrafficApiHandler {
             ) {
                 let _ = quota_blocked.remove(&mac);
             }
-            if let Ok(mut quota_thresholds) = aya::maps::HashMap::<_, [u8; 6], [u64; 6]>::try_from(
+            if let Ok(mut quota_thresholds) = aya::maps::HashMap::<_, [u8; 6], QuotaThresholds>::try_from(
                 ebpf_mut
                     .map_mut("MAC_QUOTA_THRESHOLDS")
                     .ok_or_else(|| anyhow::anyhow!("MAC_QUOTA_THRESHOLDS map not found"))?,
@@ -1254,12 +1276,7 @@ impl TrafficApiHandler {
         let mac = crate::utils::network_utils::parse_mac_address(&set_request.mac)?;
         let time_slot = TimeSlot::try_from(&set_request.time_slot).map_err(|e| anyhow::anyhow!("Invalid time slot: {}", e))?;
 
-        let scheduled_limit = ScheduledRateLimit::new(
-            mac,
-            time_slot,
-            set_request.wan_rx_rate_limit,
-            set_request.wan_tx_rate_limit,
-        );
+        let scheduled_limit = ScheduledRateLimit::new(mac, time_slot, set_request.wan_rx_rate_limit, set_request.wan_tx_rate_limit);
 
         {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
@@ -1321,7 +1338,10 @@ impl TrafficApiHandler {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
             let found = srl.iter().any(|r| r.id == scheduled_limit.id);
             if !found {
-                return Ok(HttpResponse::error(404, format!("Rule with id {} not found", scheduled_limit.id)));
+                return Ok(HttpResponse::error(
+                    404,
+                    format!("Rule with id {} not found", scheduled_limit.id),
+                ));
             }
             srl.retain(|r| r.id != scheduled_limit.id);
             srl.push(scheduled_limit.clone());
@@ -1367,7 +1387,10 @@ impl TrafficApiHandler {
             let mut srl = self.scheduled_rate_limits.lock().unwrap();
             deleted_rule = srl.iter().find(|r| r.id == delete_request.id).cloned();
             if deleted_rule.is_none() {
-                return Ok(HttpResponse::error(404, format!("Rule with id {} not found", delete_request.id)));
+                return Ok(HttpResponse::error(
+                    404,
+                    format!("Rule with id {} not found", delete_request.id),
+                ));
             }
             srl.retain(|r| r.id != delete_request.id);
             save_all_scheduled_limits(self.options.data_dir(), &srl)?;

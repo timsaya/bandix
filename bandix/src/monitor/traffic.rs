@@ -2,6 +2,7 @@ use crate::monitor::TrafficModuleContext;
 use anyhow::Result;
 use aya::maps::HashMap;
 use aya::maps::MapData;
+use bandix_common::quota::QuotaThresholds;
 use chrono::Local;
 use serde::Serialize;
 use std::collections::HashMap as StdHashMap;
@@ -353,9 +354,8 @@ impl TrafficMonitor {
             log::warn!("Failed to update device stats for {:?}: {}", mac, e);
         }
 
-        let wan_delta = wan_rx_delta.saturating_add(wan_tx_delta);
         let mut quota_manager = ctx.traffic_quota_manager.lock().unwrap();
-        if quota_manager.record_usage(mac, wan_delta, &Local::now()) {
+        if quota_manager.record_usage(mac, wan_rx_delta, wan_tx_delta, &Local::now()) {
             // Persist an exhausted quota immediately so a restart cannot clear
             // the block before the normal checkpoint interval.
             if let Err(e) = quota_manager.save() {
@@ -455,7 +455,7 @@ impl TrafficMonitor {
         let (quota_blocked, quota_remaining) = {
             let mut manager = ctx.traffic_quota_manager.lock().unwrap();
             let now = Local::now();
-            (manager.blocked_macs(&now), manager.enforcement_remaining(&now))
+            (manager.blocked_directions(&now), manager.enforcement_remaining(&now))
         };
 
         let device_macs: std::collections::HashSet<[u8; 6]> = ctx
@@ -548,7 +548,7 @@ impl TrafficMonitor {
         }
 
         if let Some(traffic_data) = traffic_data {
-            let mut quota_thresholds_map: HashMap<_, [u8; 6], [u64; 6]> = HashMap::try_from(
+            let mut quota_thresholds_map: HashMap<_, [u8; 6], QuotaThresholds> = HashMap::try_from(
                 ebpf_mut
                     .map_mut("MAC_QUOTA_THRESHOLDS")
                     .ok_or(anyhow::anyhow!("Cannot find MAC_QUOTA_THRESHOLDS"))?,
@@ -559,11 +559,12 @@ impl TrafficMonitor {
             }
 
             for (mac, remaining) in quota_remaining {
-                let wan_total = traffic_data
-                    .get(&mac)
-                    .map(|stats| stats[2].saturating_add(stats[3]))
-                    .unwrap_or(0);
-                let thresholds = build_quota_thresholds(wan_total, remaining);
+                let stats = traffic_data.get(&mac).copied().unwrap_or([0; 4]);
+                let thresholds = QuotaThresholds {
+                    combined: build_quota_thresholds(stats[2].saturating_add(stats[3]), remaining.combined),
+                    download: build_quota_thresholds(stats[3], remaining.download),
+                    upload: build_quota_thresholds(stats[2], remaining.upload),
+                };
                 quota_thresholds_map.insert(mac, thresholds, 0)?;
                 existing_quota_macs.remove(&mac);
             }
@@ -582,8 +583,8 @@ impl TrafficMonitor {
         for (mac, _) in quota_blocked_map.iter().flatten() {
             existing_blocked.insert(mac);
         }
-        for mac in quota_blocked {
-            quota_blocked_map.insert(mac, 1, 0)?;
+        for (mac, mask) in quota_blocked {
+            quota_blocked_map.insert(mac, mask, 0)?;
             existing_blocked.remove(&mac);
         }
         for mac in existing_blocked {
@@ -661,13 +662,15 @@ impl TrafficMonitor {
 }
 
 fn build_quota_thresholds(wan_total: u64, remaining: [u64; 6]) -> [u64; 6] {
-    remaining.map(|value| {
-        if value == u64::MAX {
-            u64::MAX
-        } else {
-            wan_total.saturating_add(value)
-        }
-    })
+    remaining.map(
+        |value| {
+            if value == u64::MAX {
+                u64::MAX
+            } else {
+                wan_total.saturating_add(value)
+            }
+        },
+    )
 }
 
 #[cfg(test)]

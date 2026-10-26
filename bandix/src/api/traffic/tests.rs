@@ -57,6 +57,150 @@ fn batch(body: Value) -> HttpRequest {
 }
 
 #[tokio::test]
+async fn directional_quota_api_preserves_usage_and_omitted_limits() {
+    let directory = tempfile::tempdir().unwrap();
+    let handler = handler(&directory);
+    let path = "/api/traffic/quotas";
+    let response = handler
+        .handle_request(&request(
+            "POST",
+            path,
+            Some(
+                json!({
+                    "mac": format_mac(&FIRST), "mode": "directional", "upload": {"daily_bytes": 100}, "download": {"daily_bytes": 200}
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    let created: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(created["data"]["upload"]["daily_bytes"], 100);
+    assert_eq!(created["data"]["download"]["daily_bytes"], 200);
+    assert_eq!(created["data"]["daily_bytes"], 0);
+    handler
+        .traffic_quota_manager
+        .lock()
+        .unwrap()
+        .record_usage(&FIRST, 50, 100, &chrono::Local::now());
+    // Within directional mode, omitted direction objects retain their limits.
+    let response = handler
+        .handle_request(&request(
+            "PUT",
+            path,
+            Some(
+                json!({
+                    "mac": format_mac(&FIRST), "mode": "directional", "total_bytes": 1000
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let updated: Value = serde_json::from_str(&response.body).unwrap();
+    let status = &updated["data"];
+    assert_eq!(status["total_used_bytes"], 150);
+    assert_eq!(status["upload"]["daily_bytes"], 100);
+    assert_eq!(status["download"]["daily_bytes"], 200);
+    assert_eq!(status["upload"]["total_used_bytes"], 100);
+    assert_eq!(status["download"]["total_used_bytes"], 50);
+    assert_eq!(status["upload"]["blocked"], true);
+    assert_eq!(status["download"]["blocked"], false);
+    assert_eq!(status["upload"]["exceeded_periods"], json!(["daily"]));
+    let response = handler.handle_request(&request("GET", path, None)).await.unwrap();
+    let listed: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(listed["data"]["supports_directional"], true);
+    assert_eq!(listed["data"]["supports_quota_modes"], true);
+    assert_eq!(status["mode"], "directional");
+    assert_eq!(status["total_bytes"], 0);
+    assert_eq!(&listed["data"]["quotas"][0], status);
+    let mut restored = TrafficQuotaManager::new(directory.path().to_str().unwrap());
+    restored.load().unwrap();
+    assert_eq!(
+        restored.status(&FIRST, &chrono::Local::now()).unwrap().upload.total_used_bytes,
+        100
+    );
+    // An empty direction clears its limits while retaining the other rules and usage.
+    let response = handler
+        .handle_request(&request(
+            "PUT",
+            path,
+            Some(
+                json!({
+                    "mac": format_mac(&FIRST), "mode": "directional", "upload": {}
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let cleared: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(cleared["data"]["upload"]["blocked"], false);
+    assert_eq!(cleared["data"]["upload"]["total_used_bytes"], 100);
+    assert_eq!(cleared["data"]["download"]["daily_bytes"], 200);
+    assert_eq!(cleared["data"]["total_bytes"], 0);
+    // Missing mode from a legacy client switches to combined and clears directional limits.
+    let response = handler
+        .handle_request(&request(
+            "PUT",
+            path,
+            Some(
+                json!({
+                    "mac": format_mac(&FIRST), "total_bytes": 150
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let combined: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(combined["data"]["mode"], "combined");
+    assert_eq!(combined["data"]["download"]["daily_bytes"], 0);
+    assert_eq!(combined["data"]["upload"]["total_used_bytes"], 100);
+    assert_eq!(combined["data"]["upload"]["blocked"], true);
+    assert_eq!(combined["data"]["download"]["blocked"], true);
+    let response = handler
+        .handle_request(&request("DELETE", path, Some(json!({"mac": format_mac(&FIRST)}).to_string())))
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert!(handler
+        .traffic_quota_manager
+        .lock()
+        .unwrap()
+        .status(&FIRST, &chrono::Local::now())
+        .is_none());
+}
+
+#[tokio::test]
+async fn directional_quota_api_rejects_invalid_limits_without_creating_a_rule() {
+    let directory = tempfile::tempdir().unwrap();
+    let handler = handler(&directory);
+    for invalid in [
+        json!({"daily_bytes": -1}),
+        json!({"daily_bytes": 1.5}),
+        json!({"daily_bytes": "100"}),
+        json!({"daliy_bytes": 100}),
+    ] {
+        assert!(handler
+            .handle_request(&request(
+                "POST",
+                "/api/traffic/quotas",
+                Some(
+                    json!({
+                        "mac": format_mac(&FIRST), "upload": invalid
+                    })
+                    .to_string()
+                )
+            ))
+            .await
+            .is_err());
+        assert!(handler.traffic_quota_manager.lock().unwrap().quota(&FIRST).is_none());
+    }
+}
+
+#[tokio::test]
 async fn device_api_reports_unknown_frequency_and_accepts_legacy_payloads() {
     let directory = tempfile::tempdir().unwrap();
     let handler = handler(&directory);
@@ -153,7 +297,7 @@ async fn batch_deletion_cleans_history_and_persisted_policies_only_for_selected_
             },
             &now,
         );
-        quotas.record_usage(&mac, 50, &now);
+        quotas.record_usage(&mac, 50, 0, &now);
         handler.last_ebpf_traffic.lock().unwrap().insert(mac, [1; 4]);
     }
     save_all_scheduled_limits(base, &handler.scheduled_rate_limits.lock().unwrap()).unwrap();
@@ -222,7 +366,10 @@ async fn batch_deletion_cleans_history_and_persisted_policies_only_for_selected_
     assert!(!handler.last_ebpf_traffic.lock().unwrap().contains_key(&FIRST));
     assert!(handler.last_ebpf_traffic.lock().unwrap().contains_key(&SECOND));
 
-    handler.handle_request(&batch(json!({"macs": [format_mac(&SECOND)]}))).await.unwrap();
+    handler
+        .handle_request(&batch(json!({"macs": [format_mac(&SECOND)]})))
+        .await
+        .unwrap();
     assert!(!directory.path().join("metrics/longterm/accumulator.json").exists());
 }
 

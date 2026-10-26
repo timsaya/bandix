@@ -247,13 +247,30 @@ Delete a scheduled rate limit.
 }
 ```
 
+Traffic sizes and byte rates use binary prefixes (KiB, MiB, GiB and KiB/s, MiB/s, GiB/s), with a factor of 1024 per step. Bit rates use decimal prefixes (kbps, Mbps, Gbps), with a factor of 1000 per step. API values remain raw bytes or bytes per second; existing limits and usage are unchanged.
+
 #### GET /api/traffic/quotas
 
-Returns every device quota, current usage, exceeded periods, and blocking state. Usage is WAN download plus upload. Minute/hour/day/week/month periods follow the router's local calendar (weeks start on Monday); lifetime usage never resets automatically.
+The response includes `data.supports_directional: true` and `data.supports_quota_modes: true`. The latter advertises mutually exclusive quota modes, including when no quotas exist. Each quota reports `mode` as `combined` or `directional`.
+
+Returns every device quota, current usage, exceeded periods, and blocking state. WAN upload and download are counted independently in `upload` and `download`; the top-level fields retain their legacy combined meaning. Each direction contains limits, `*_used_bytes`, `blocked`, and `exceeded_periods`. Top-level `blocked` means at least one direction is blocked; top-level `exceeded_periods` lists combined limits that were reached. Minute/hour/day/week/month periods follow the router's local calendar (weeks start on Monday); lifetime usage never resets automatically.
 
 #### POST /api/traffic/quotas
 
 Creates or updates a device quota. All values are bytes and `0` means unlimited for that period. Usage begins when the quota is first created and is retained when limits are updated. `PUT` accepts the same request.
+
+The default `mode` is `combined`, including requests from legacy clients that omit it. Set `mode: "directional"` and use `upload` and `download` to configure independent limits. Each accepts `minute_bytes`, `hourly_bytes`, `daily_bytes`, `weekly_bytes`, `monthly_bytes`, and `total_bytes`; omitted fields inside a supplied direction default to zero. For example, allow 1 GiB of uploads and 5 GiB of downloads per day:
+
+```json
+{
+  "mac": "00:11:22:33:44:55",
+  "mode": "directional",
+  "upload": { "daily_bytes": 1073741824 },
+  "download": { "daily_bytes": 5368709120 }
+}
+```
+
+Within directional mode, an omitted direction retains its current limits; `{ "mode": "directional", "upload": {} }` clears upload limits without clearing usage. Within combined mode, omitted top-level limits retain their values. Saving either mode clears the inactive mode’s limits, while retaining all usage counters. Modes never apply simultaneously. The following legacy combined configuration remains supported:
 
 ```json
 {
@@ -267,7 +284,9 @@ Creates or updates a device quota. All values are bytes and `0` means unlimited 
 }
 ```
 
-Reaching any non-zero limit blocks that device's IPv4 and IPv6 WAN upload and download without affecting LAN traffic. Enforcement uses absolute WAN-byte thresholds in the TC eBPF program, so packets are checked in the kernel rather than waiting for the one-second userspace sampling cycle. The packet that crosses a threshold is allowed; subsequent packets are dropped, limiting normal overshoot to roughly one packet (or a small number of concurrently processed packets).
+Reaching an upload limit blocks only WAN upload; reaching a download limit blocks only WAN download. A combined limit blocks both directions. Combined and directional limits are mutually exclusive, enforced by the service even if a client submits both sets. IPv4 and IPv6 are covered; LAN traffic is unaffected. Enforcement uses absolute WAN-byte thresholds in the TC eBPF program, so packets are checked in the kernel rather than waiting for the one-second userspace sampling cycle. The packet that crosses a threshold is allowed; subsequent packets are dropped, limiting normal overshoot to roughly one packet (or a small number of concurrently processed packets).
+
+Limits and directional usage survive restarts in quota storage schema version 2. Version 1 files are migrated automatically: existing combined limits and usage are retained, while directional counters start at zero because historical combined usage cannot be split accurately. Existing clients can continue to manage combined limits; independent controls require a client that explicitly selects directional mode and sends the direction objects. Stored quotas without a mode default to combined on load; inactive limits are cleared. Older services support the legacy combined fields; clients must check `supports_quota_modes` before offering directional mode.
 
 #### DELETE /api/traffic/quotas
 

@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod quota;
+
 #[cfg(feature = "serde")]
 extern crate serde;
 
