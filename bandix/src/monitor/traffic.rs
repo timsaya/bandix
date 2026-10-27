@@ -1,5 +1,5 @@
 use crate::monitor::TrafficModuleContext;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use aya::maps::HashMap;
 use aya::maps::MapData;
 use bandix_common::quota::QuotaThresholds;
@@ -202,7 +202,7 @@ impl TrafficMonitor {
         )?;
 
         for entry in traffic_map.iter() {
-            let (key, value) = entry.unwrap();
+            let (key, value) = entry.context("Failed to read MAC_TRAFFIC entry")?;
             // 排除广播和多播地址
             if self.is_special_mac_address(&key) {
                 continue;
@@ -478,30 +478,9 @@ impl TrafficMonitor {
                 default_limit = Some(default_limits);
             }
 
-            let final_limit = match (scheduled_limit, default_limit) {
-                (Some(sched), Some(def)) => {
-                    let rx = if sched[0] == 0 {
-                        def[0]
-                    } else if def[0] == 0 {
-                        sched[0]
-                    } else {
-                        sched[0].min(def[0])
-                    };
-                    let tx = if sched[1] == 0 {
-                        def[1]
-                    } else if def[1] == 0 {
-                        sched[1]
-                    } else {
-                        sched[1].min(def[1])
-                    };
-                    [rx, tx]
-                }
-                (Some(sched), None) => sched,
-                (None, Some(def)) => def,
-                (None, None) => [0, 0],
-            };
-
-            desired_limits.insert(mac, final_limit);
+            if let Some(limit) = effective_rate_limit(scheduled_limit, default_limit) {
+                desired_limits.insert(mac, limit);
+            }
         }
 
         drop(scheduled_limits);
@@ -519,76 +498,45 @@ impl TrafficMonitor {
             &mut *ptr
         };
 
-        {
-            let mut mac_rate_limits: HashMap<_, [u8; 6], [u64; 2]> = HashMap::try_from(
-                ebpf_mut
-                    .map_mut("MAC_RATE_LIMITS")
-                    .ok_or(anyhow::anyhow!("Cannot find MAC_RATE_LIMITS"))?,
-            )?;
+        // A full or otherwise failing map must not prevent the other policies
+        // from being synchronized. Report failures after attempting every map.
+        let mut errors = Vec::new();
+        if let Err(error) = sync_policy_map(ebpf_mut, "MAC_RATE_LIMITS", &desired_limits) {
+            errors.push(format!("{error:#}"));
+        }
 
-            // 收集当前在 eBPF 映射中的所有 MAC
-            let mut existing_macs_in_ebpf: std::collections::HashSet<[u8; 6]> = std::collections::HashSet::new();
-            for entry in mac_rate_limits.iter() {
-                if let Ok((mac, _)) = entry {
-                    existing_macs_in_ebpf.insert(mac);
-                }
-            }
-
-            // 将有效限制应用到 eBPF 映射（更新或添加）
-            for (mac, lim) in desired_limits.iter() {
-                mac_rate_limits.insert(mac, &[lim[0], lim[1]], 0).unwrap();
-                existing_macs_in_ebpf.remove(mac);
-            }
-
-            // 清除不再有匹配规则的 MAC 的限制
-            // 设置为 [0, 0] 以移除速率限制（无限制）
-            for mac in existing_macs_in_ebpf.iter() {
-                mac_rate_limits.insert(mac, &[0, 0], 0).unwrap();
-            }
+        // Buckets outlive their rules unless explicitly removed. Retain buckets
+        // for rules actually present, including any whose removal just failed.
+        if let Err(error) = prune_rate_buckets(ebpf_mut) {
+            errors.push(format!("RATE_BUCKETS: {error:#}"));
         }
 
         if let Some(traffic_data) = traffic_data {
-            let mut quota_thresholds_map: HashMap<_, [u8; 6], QuotaThresholds> = HashMap::try_from(
-                ebpf_mut
-                    .map_mut("MAC_QUOTA_THRESHOLDS")
-                    .ok_or(anyhow::anyhow!("Cannot find MAC_QUOTA_THRESHOLDS"))?,
-            )?;
-            let mut existing_quota_macs = std::collections::HashSet::new();
-            for (mac, _) in quota_thresholds_map.iter().flatten() {
-                existing_quota_macs.insert(mac);
-            }
-
-            for (mac, remaining) in quota_remaining {
-                let stats = traffic_data.get(&mac).copied().unwrap_or([0; 4]);
-                let thresholds = QuotaThresholds {
-                    combined: build_quota_thresholds(stats[2].saturating_add(stats[3]), remaining.combined),
-                    download: build_quota_thresholds(stats[3], remaining.download),
-                    upload: build_quota_thresholds(stats[2], remaining.upload),
-                };
-                quota_thresholds_map.insert(mac, thresholds, 0)?;
-                existing_quota_macs.remove(&mac);
-            }
-
-            for mac in existing_quota_macs {
-                let _ = quota_thresholds_map.remove(&mac);
+            let thresholds = quota_remaining
+                .into_iter()
+                .map(|(mac, remaining)| {
+                    let stats = traffic_data.get(&mac).copied().unwrap_or([0; 4]);
+                    (
+                        mac,
+                        QuotaThresholds {
+                            combined: build_quota_thresholds(stats[2].saturating_add(stats[3]), remaining.combined),
+                            download: build_quota_thresholds(stats[3], remaining.download),
+                            upload: build_quota_thresholds(stats[2], remaining.upload),
+                        },
+                    )
+                })
+                .collect();
+            if let Err(error) = sync_policy_map(ebpf_mut, "MAC_QUOTA_THRESHOLDS", &thresholds) {
+                errors.push(format!("{error:#}"));
             }
         }
 
-        let mut quota_blocked_map: HashMap<_, [u8; 6], u8> = HashMap::try_from(
-            ebpf_mut
-                .map_mut("MAC_QUOTA_BLOCKED")
-                .ok_or(anyhow::anyhow!("Cannot find MAC_QUOTA_BLOCKED"))?,
-        )?;
-        let mut existing_blocked = std::collections::HashSet::new();
-        for (mac, _) in quota_blocked_map.iter().flatten() {
-            existing_blocked.insert(mac);
+        if let Err(error) = sync_policy_map(ebpf_mut, "MAC_QUOTA_BLOCKED", &quota_blocked) {
+            errors.push(format!("{error:#}"));
         }
-        for (mac, mask) in quota_blocked {
-            quota_blocked_map.insert(mac, mask, 0)?;
-            existing_blocked.remove(&mac);
-        }
-        for mac in existing_blocked {
-            let _ = quota_blocked_map.remove(&mac);
+
+        if !errors.is_empty() {
+            anyhow::bail!("{}", errors.join("; "));
         }
 
         Ok(())
@@ -661,6 +609,97 @@ impl TrafficMonitor {
     // events are emitted by DeviceManager background refresh task (neighbor-table based)
 }
 
+/// Missing entries mean unlimited in the eBPF datapath. Do not allocate a slot
+/// for historical devices that have no effective limit in either direction.
+fn effective_rate_limit(scheduled: Option<[u64; 2]>, default: Option<[u64; 2]>) -> Option<[u64; 2]> {
+    let scheduled = scheduled.unwrap_or([0; 2]);
+    let default = default.unwrap_or([0; 2]);
+    let limits = std::array::from_fn(|i| match (scheduled[i], default[i]) {
+        (0, value) | (value, 0) => value,
+        (a, b) => a.min(b),
+    });
+    (limits != [0; 2]).then_some(limits)
+}
+
+fn sync_policy_map<V: aya::Pod + PartialEq>(ebpf: &mut aya::Ebpf, name: &str, desired: &StdHashMap<[u8; 6], V>) -> Result<()> {
+    let mut map = HashMap::<_, [u8; 6], V>::try_from(ebpf.map_mut(name).with_context(|| format!("Cannot find {name}"))?)?;
+    let existing = map
+        .iter()
+        .collect::<Result<StdHashMap<_, _>, _>>()
+        .with_context(|| format!("Failed to read {name}"))?;
+    reconcile_policy_entries(&existing, desired, |mac, value| {
+        match value {
+            Some(value) => map.insert(mac, value, 0),
+            None => map.remove(mac),
+        }
+        .map_err(Into::into)
+    })
+    .with_context(|| format!("Failed to synchronize {name}"))
+}
+
+fn prune_rate_buckets(ebpf: &mut aya::Ebpf) -> Result<()> {
+    let limits = HashMap::<_, [u8; 6], [u64; 2]>::try_from(ebpf.map("MAC_RATE_LIMITS").context("Cannot find MAC_RATE_LIMITS")?)?;
+    let limited: std::collections::HashSet<_> = limits
+        .iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(_, value)| *value != [0; 2])
+        .map(|(mac, _)| mac)
+        .collect();
+    let mut buckets = HashMap::<_, [u8; 6], [u64; 3]>::try_from(ebpf.map_mut("RATE_BUCKETS").context("Cannot find RATE_BUCKETS")?)?;
+    let existing = buckets.iter().collect::<Result<StdHashMap<_, _>, _>>()?;
+    let desired = existing
+        .iter()
+        .filter(|(mac, _)| limited.contains(*mac))
+        .map(|(mac, value)| (*mac, *value))
+        .collect();
+    // Retained buckets are never rewritten: eBPF updates them concurrently.
+    reconcile_policy_entries(&existing, &desired, |mac, _| buckets.remove(mac).map_err(Into::into))
+}
+
+/// Free obsolete slots first, update existing rules next, then admit new MACs
+/// in stable order. Attempt every operation even if a map write fails. Keep
+/// diagnostics bounded when the desired policy exceeds the kernel map capacity.
+fn reconcile_policy_entries<V: PartialEq>(
+    existing: &StdHashMap<[u8; 6], V>,
+    desired: &StdHashMap<[u8; 6], V>,
+    mut apply: impl FnMut(&[u8; 6], Option<&V>) -> Result<()>,
+) -> Result<()> {
+    let mut removals: Vec<_> = existing.keys().filter(|mac| !desired.contains_key(*mac)).collect();
+    removals.sort_unstable();
+    let mut updates: Vec<_> = desired
+        .iter()
+        .filter(|(mac, value)| existing.get(*mac) != Some(*value))
+        .collect();
+    updates.sort_unstable_by_key(|(mac, _)| (!existing.contains_key(*mac), **mac));
+    let mut failures = 0;
+    let mut examples = Vec::new();
+    for (mac, value) in removals
+        .into_iter()
+        .map(|mac| (mac, None))
+        .chain(updates.into_iter().map(|(mac, value)| (mac, Some(value))))
+    {
+        if let Err(error) = apply(mac, value) {
+            failures += 1;
+            if examples.len() < 4 {
+                examples.push(format!(
+                    "{} {}: {error:#}",
+                    if value.is_some() { "write" } else { "remove" },
+                    crate::utils::format_utils::format_mac(mac)
+                ));
+            }
+        }
+    }
+    if failures != 0 {
+        anyhow::bail!(
+            "{failures} map operation(s) failed ({} desired entries): {}",
+            desired.len(),
+            examples.join("; ")
+        );
+    }
+    Ok(())
+}
+
 fn build_quota_thresholds(wan_total: u64, remaining: [u64; 6]) -> [u64; 6] {
     remaining.map(
         |value| {
@@ -675,7 +714,125 @@ fn build_quota_thresholds(wan_total: u64, remaining: [u64; 6]) -> [u64; 6] {
 
 #[cfg(test)]
 mod tests {
-    use super::build_quota_thresholds;
+    use super::{build_quota_thresholds, effective_rate_limit, reconcile_policy_entries};
+    use std::collections::HashMap;
+
+    fn mac(index: u32) -> [u8; 6] {
+        let bytes = index.to_be_bytes();
+        [2, 0, bytes[0], bytes[1], bytes[2], bytes[3]]
+    }
+
+    fn sync_bounded<V: Copy + PartialEq>(
+        map: &mut HashMap<[u8; 6], V>,
+        desired: &HashMap<[u8; 6], V>,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        reconcile_policy_entries(&map.clone(), desired, |mac, value| {
+            if let Some(value) = value {
+                if !map.contains_key(mac) && map.len() >= capacity {
+                    return Err(std::io::Error::from_raw_os_error(libc::E2BIG).into());
+                }
+                map.insert(*mac, *value);
+            } else {
+                map.remove(mac);
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn restored_unlimited_devices_do_not_fill_the_rate_map() {
+        // Reproduce a map populated by the old implementation, then restore
+        // more than 1024 known devices with only one real rate limit.
+        let mut map: HashMap<_, _> = (0..1024).map(|i| (mac(i), [0; 2])).collect();
+        let desired: HashMap<_, _> = (0..2048)
+            .filter_map(|i| {
+                let scheduled = (i == 2047).then_some([100, 0]);
+                effective_rate_limit(scheduled, None).map(|limit| (mac(i), limit))
+            })
+            .collect();
+        sync_bounded(&mut map, &desired, 1024).unwrap();
+        assert_eq!(map, HashMap::from([(mac(2047), [100, 0])]));
+    }
+
+    #[test]
+    fn rate_policy_preserves_directional_and_default_limit_semantics() {
+        assert_eq!(effective_rate_limit(None, None), None);
+        assert_eq!(effective_rate_limit(Some([0, 0]), Some([0, 0])), None);
+        assert_eq!(effective_rate_limit(None, Some([100, 200])), Some([100, 200]));
+        assert_eq!(effective_rate_limit(Some([100, 0]), None), Some([100, 0]));
+        assert_eq!(effective_rate_limit(Some([0, 200]), None), Some([0, 200]));
+        assert_eq!(effective_rate_limit(Some([100, 0]), Some([50, 200])), Some([50, 200]));
+        assert_eq!(effective_rate_limit(Some([0, 80]), Some([100, 200])), Some([100, 80]));
+    }
+
+    #[test]
+    fn full_map_replaces_stale_rules_before_admitting_new_ones() {
+        let mut map = HashMap::from([(mac(1), [100, 0]), (mac(2), [0, 200])]);
+        let desired = HashMap::from([(mac(2), [0, 300]), (mac(3), [400, 0])]);
+        sync_bounded(&mut map, &desired, 2).unwrap();
+        assert_eq!(map, desired);
+        sync_bounded(&mut map, &HashMap::new(), 2).unwrap();
+        assert!(map.is_empty(), "disabling all limits must free every slot");
+    }
+
+    #[test]
+    fn over_capacity_reports_failures_but_updates_existing_rules_and_retries() {
+        let mut map = HashMap::from([(mac(10), [10, 0]), (mac(20), [20, 0])]);
+        let mut desired = HashMap::from([(mac(1), [1, 0]), (mac(10), [100, 0]), (mac(20), [200, 0])]);
+        let error = sync_bounded(&mut map, &desired, 2).unwrap_err().to_string();
+        assert!(error.contains("1 map operation(s) failed"));
+        assert!(error.contains("02:00:00:00:00:01"));
+        assert_eq!(map[&mac(10)], [100, 0]);
+        assert_eq!(map[&mac(20)], [200, 0]);
+        desired.remove(&mac(10));
+        sync_bounded(&mut map, &desired, 2).unwrap();
+        assert_eq!(map, desired, "failed writes must be retried after capacity is freed");
+    }
+
+    #[test]
+    fn failed_removal_does_not_prevent_other_policy_updates() {
+        let mut map = HashMap::from([(mac(1), [1, 0]), (mac(2), [2, 0])]);
+        let desired = HashMap::from([(mac(2), [200, 0]), (mac(3), [300, 0])]);
+        let result = reconcile_policy_entries(&map.clone(), &desired, |mac, value| {
+            match value {
+                None => anyhow::bail!("injected removal failure"),
+                Some(value) => {
+                    map.insert(*mac, *value);
+                }
+            }
+            Ok(())
+        });
+        assert!(result.unwrap_err().to_string().contains("remove 02:00:00:00:00:01"));
+        assert_eq!(map[&mac(2)], [200, 0]);
+        assert_eq!(map[&mac(3)], [300, 0]);
+    }
+
+    #[test]
+    fn quota_rollover_can_replace_a_full_blocked_map() {
+        let mut map = HashMap::from([(mac(1), bandix_common::quota::QUOTA_UPLOAD)]);
+        let desired = HashMap::from([(mac(2), bandix_common::quota::QUOTA_DOWNLOAD)]);
+        sync_bounded(&mut map, &desired, 1).unwrap();
+        assert_eq!(map, desired);
+    }
+
+    #[test]
+    fn retained_entries_are_not_rewritten_and_new_admission_is_stable() {
+        let existing = HashMap::from([(mac(1), [10, 20, 30]), (mac(2), [40, 50, 60])]);
+        let desired = HashMap::from([(mac(2), [40, 50, 60])]);
+        let mut operations = Vec::new();
+        reconcile_policy_entries(&existing, &desired, |mac, value| {
+            operations.push((*mac, value.copied()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(operations, vec![(mac(1), None)], "active token buckets must not be overwritten");
+
+        let mut map = HashMap::new();
+        let desired = HashMap::from([(mac(3), 3u8), (mac(1), 1), (mac(2), 2)]);
+        assert!(sync_bounded(&mut map, &desired, 2).is_err());
+        assert_eq!(map, HashMap::from([(mac(1), 1), (mac(2), 2)]));
+    }
 
     #[test]
     fn quota_thresholds_preserve_unlimited_and_exhausted_periods() {
