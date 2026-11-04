@@ -7,6 +7,7 @@ use aya_ebpf::{
     bindings::{TC_ACT_SHOT, TC_ACT_UNSPEC},
     programs::TcContext,
 };
+use bandix_common::attribution::{accounting_mac, address_key, arp_target_on_subnet, decode_mac, encode_mac, mac_key, ndp_target_is_unicast, MODE_KEY, UNKNOWN};
 use bandix_common::quota::{QUOTA_DOWNLOAD, QUOTA_UPLOAD};
 use core::intrinsics::{atomic_xadd, AtomicOrdering};
 use network_types::eth::EthHdr;
@@ -70,6 +71,10 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     let src_is_local = is_subnet_ip(&src_ip);
     let dst_is_local = is_subnet_ip(&dst_ip);
 
+    if is_ingress {
+        queue_ipv4_resolution(&src_ip);
+    }
+
     // Rate limiting logic
     if is_ingress {
         // Ingress: throttle upload traffic (local -> external)
@@ -102,7 +107,12 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     }
 
     // Monitor traffic stats
-    monitor_traffic(&src_mac, &dst_mac, data_len, &src_ip, &dst_ip);
+    if src_is_local {
+        count_endpoint(&src_mac, &src_ip, data_len, false, dst_is_local);
+    }
+    if dst_is_local {
+        count_endpoint(&dst_mac, &dst_ip, data_len, true, src_is_local);
+    }
 
     Ok(TC_ACT_UNSPEC)
 }
@@ -145,6 +155,10 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     let src_is_local = is_subnet_ipv6(&src_ip);
     let dst_is_local = is_subnet_ipv6(&dst_ip);
 
+    if is_ingress && src_is_local && ndp_target_is_unicast(&src_ip) {
+        queue_neighbor_resolution(&src_ip);
+    }
+
     // Rate limiting logic
     if is_ingress {
         // Ingress: throttle upload traffic (local -> external)
@@ -177,7 +191,12 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     }
 
     // Monitor traffic stats
-    monitor_traffic_v6(&src_mac, &dst_mac, data_len, &src_ip, &dst_ip);
+    if src_is_local {
+        count_endpoint(&src_mac, &src_ip, data_len, false, dst_is_local);
+    }
+    if dst_is_local {
+        count_endpoint(&dst_mac, &dst_ip, data_len, true, src_is_local);
+    }
 
     Ok(TC_ACT_UNSPEC)
 }
@@ -240,42 +259,48 @@ unsafe fn atomic_load_u64(value: *const u64) -> u64 {
     core::ptr::read_volatile(value)
 }
 
-#[inline]
-fn monitor_traffic(src_mac: &[u8; 6], dst_mac: &[u8; 6], data_len: u64, src_ip: &[u8; 4], dst_ip: &[u8; 4]) {
-    // check if source ip and destination ip are in local network
-    let src_is_local = is_subnet_ip(&src_ip);
-    let dst_is_local = is_subnet_ip(&dst_ip);
-
-    if src_is_local {
-        // source ip is in local network, this is local network traffic
-        let is_local_traffic = dst_is_local;
-        update_traffic_stats(&src_mac, data_len, false, is_local_traffic);
+#[inline(always)]
+fn count_endpoint<const N: usize>(mac: &[u8; 6], ip: &[u8; N], bytes: u64, rx: bool, local: bool) {
+    let lookup = |key: &[u8; 17]| unsafe { maps::TRAFFIC_OWNERS.get(key).copied().unwrap_or(UNKNOWN) };
+    let mode = lookup(&MODE_KEY);
+    if mode == UNKNOWN {
+        update_traffic_stats(mac, bytes, rx, local);
+        return;
     }
-
-    if dst_is_local {
-        // destination ip is in local network, this is local network traffic
-        let is_local_traffic = src_is_local;
-        update_traffic_stats(&dst_mac, data_len, true, is_local_traffic);
+    let owner = accounting_mac(encode_mac(mac), lookup(&address_key(ip)), lookup(&mac_key(mac)), mode != 0);
+    if owner != 0 {
+        update_traffic_stats(&decode_mac(owner), bytes, rx, local);
     }
 }
 
-#[inline]
-fn monitor_traffic_v6(src_mac: &[u8; 6], dst_mac: &[u8; 6], data_len: u64, src_ip: &[u8; 16], dst_ip: &[u8; 16]) {
-    // check if source ip and destination ip are in local network
-    let src_is_local = is_subnet_ipv6(&src_ip);
-    let dst_is_local = is_subnet_ipv6(&dst_ip);
-
-    if src_is_local {
-        // source ip is in local network
-        let is_local_traffic = dst_is_local;
-        update_traffic_stats(&src_mac, data_len, false, is_local_traffic);
+#[inline(always)]
+fn queue_ipv4_resolution(ip: &[u8; 4]) {
+    let Some(config) = maps::NEIGHBOR_RESOLVE_CONFIG.get(0) else { return };
+    if config[8] == 0 {
+        return;
     }
-
-    if dst_is_local {
-        // destination ip is in local network
-        let is_local_traffic = src_is_local;
-        update_traffic_stats(&dst_mac, data_len, true, is_local_traffic);
+    let local = [config[0], config[1], config[2], config[3]];
+    let mask = [config[4], config[5], config[6], config[7]];
+    if !arp_target_on_subnet(ip, &local, &mask) {
+        return;
     }
+    queue_neighbor_resolution(ip);
+}
+
+#[inline(always)]
+fn queue_neighbor_resolution<const N: usize>(ip: &[u8; N]) {
+    let Some(config) = maps::NEIGHBOR_RESOLVE_CONFIG.get(0) else { return };
+    if config[8] == 0 {
+        return;
+    }
+    let key = address_key(ip);
+    if unsafe { maps::TRAFFIC_OWNERS.get(&key) }.is_some()
+        || unsafe { maps::NEIGHBOR_RESOLVE_PENDING.get(&key) }.is_some()
+    {
+        return;
+    }
+    // BPF_NOEXIST deduplicates concurrent observations of the same source.
+    let _ = maps::NEIGHBOR_RESOLVE_PENDING.insert(&key, &1, 1);
 }
 
 // ============================================================================

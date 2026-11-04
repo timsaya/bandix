@@ -1,5 +1,6 @@
 use aya_ebpf::macros::map;
-use aya_ebpf::maps::HashMap;
+use aya_ebpf::maps::{Array, HashMap};
+use bandix_common::attribution::NEIGHBOR_PENDING_CAPACITY;
 use bandix_common::quota::QuotaThresholds;
 
 // ============================================================================
@@ -11,6 +12,19 @@ use bandix_common::quota::QuotaThresholds;
 pub static MAC_TRAFFIC: HashMap<[u8; 6], [u64; 4]> = HashMap::with_max_entries(1024, 0);
 
 // ============================================================================
+// Address ownership for automatic attribution and manual exclusions. BPF_F_NO_PREALLOC keeps
+// an unconfigured router from allocating the full neighbor-table capacity.
+#[map]
+pub static TRAFFIC_OWNERS: HashMap<[u8; 17], u64> = HashMap::with_max_entries(16384, 1);
+
+// Primary interface IPv4 address, netmask, enabled flag, and padding.
+#[map]
+pub static NEIGHBOR_RESOLVE_CONFIG: Array<[u8; 12]> = Array::with_max_entries(1, 0);
+
+// Unknown source addresses actually observed at the ingress hook.
+#[map]
+pub static NEIGHBOR_RESOLVE_PENDING: HashMap<[u8; 17], u8> = HashMap::with_max_entries(NEIGHBOR_PENDING_CAPACITY, 1);
+
 // Rate Limiting Maps
 // ============================================================================
 

@@ -47,6 +47,8 @@ sudo ./bandix --iface <网络接口名称> [选项]
 ### 命令行参数
 
 - **--iface**: 要监控的网络接口（必需）
+- **--traffic-exclude-ips** 指定从设备流量统计中排除的 IPv4 或 IPv6 地址，多个地址以逗号分隔。若排除的是中继设备，且抓包点仍能看到客户端 IP 并从邻居表中解析出其 MAC，流量就会计入原客户端。
+- **--traffic-neighbor-resolve** 启用主动解析未知源地址，对监听链路上实际观察到的未知源地址发送 IPv4 ARP 或 IPv6 NDP 请求。默认关闭，两个地址族合计每秒最多请求八个地址，同一地址的请求间隔至少为 30 秒。原有 `--traffic-arp-resolve` 仍作为兼容别名接受。
 - **--host**: Web 服务器监听的 IPv4 或 IPv6 地址。调试版和发布版均默认为 `127.0.0.1`。使用 `0.0.0.0` 或 `::` 可监听所有 IPv4 或 IPv6 接口。
 - **--port**: Web 服务器监听端口。默认值：`8686`
 - **--data-dir**: 数据目录（环形文件和限速配置将存储在此处）。默认值：`bandix-data`
@@ -63,9 +65,14 @@ sudo ./bandix --iface <网络接口名称> [选项]
 
 ### 使用示例
 
+启用流量监控后，Bandix 会自动刷新 LAN 的 IP 与 MAC 归属映射。中继保留原始客户端 IP，且邻居表能识别该客户端时，转发流量会自动计入原设备。仍可通过手动排除 IP 跳过指定设备。
+
 ```shell
 # 仅启用流量监控
 sudo ./bandix --iface br-lan --enable-traffic
+
+# 统计设备流量时排除地址为 192.168.1.2 的中继
+sudo ./bandix --iface br-lan --traffic-exclude-ips 192.168.1.2 --enable-traffic
 
 # 同时启用流量和连接监控
 sudo ./bandix --iface br-lan --enable-traffic --enable-connection
