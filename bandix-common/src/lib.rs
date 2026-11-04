@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod attribution;
 pub mod quota;
 
 #[cfg(feature = "serde")]

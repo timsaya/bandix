@@ -47,6 +47,7 @@ sudo ./bandix --iface <network_interface_name> [options]
 ### Command-line Options
 
 - **--iface**: Network interface to monitor (required)
+- **--traffic-exclude-ips** accepts a comma-separated list of IPv4 or IPv6 addresses to exclude from device traffic counters. For an excluded relay, Bandix credits the original client when its IP is visible and its MAC can be resolved from the neighbor table.
 - **--host**: Web server listening IPv4 or IPv6 address. Default: `127.0.0.1` (debug and release). Use `0.0.0.0` or `::` to listen on all IPv4 or IPv6 interfaces.
 - **--port**: Web server listening port. Default: `8686`
 - **--data-dir**: Data directory (ring files and rate limit configurations will be stored here). Default: `bandix-data`
@@ -63,9 +64,14 @@ sudo ./bandix --iface <network_interface_name> [options]
 
 ### Example Usage
 
+Traffic monitoring refreshes LAN IP-to-MAC ownership automatically. When a relay preserves the original client's IP and the neighbor table identifies that client, forwarded traffic is credited to the client. Manual IP exclusions remain available to skip selected devices.
+
 ```shell
 # Enable traffic monitoring only
 sudo ./bandix --iface br-lan --enable-traffic
+
+# Exclude the relay at 192.168.1.2 from device traffic accounting
+sudo ./bandix --iface br-lan --traffic-exclude-ips 192.168.1.2 --enable-traffic
 
 # Enable both traffic and connection monitoring
 sudo ./bandix --iface br-lan --enable-traffic --enable-connection

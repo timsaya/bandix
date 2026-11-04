@@ -11,6 +11,11 @@ use bandix_common::quota::QuotaThresholds;
 pub static MAC_TRAFFIC: HashMap<[u8; 6], [u64; 4]> = HashMap::with_max_entries(1024, 0);
 
 // ============================================================================
+// Address ownership when IP exclusions are enabled. BPF_F_NO_PREALLOC keeps
+// an unconfigured router from allocating the full neighbor-table capacity.
+#[map]
+pub static TRAFFIC_OWNERS: HashMap<[u8; 17], u64> = HashMap::with_max_entries(16384, 1);
+
 // Rate Limiting Maps
 // ============================================================================
 
