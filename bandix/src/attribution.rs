@@ -7,6 +7,8 @@ use std::net::IpAddr;
 use std::process::Command;
 use std::time::Duration;
 
+mod arp;
+
 type Mac = [u8; 6];
 type Owners = HashMap<[u8; 17], Mac>;
 
@@ -103,7 +105,7 @@ impl OwnerMap {
     }
 }
 
-pub fn configure(ebpf: &mut aya::Ebpf, iface: &str, subnet: &SubnetInfo, excluded: &[IpAddr]) -> Result<()> {
+pub fn configure(ebpf: &mut aya::Ebpf, iface: &str, subnet: &SubnetInfo, excluded: &[IpAddr], arp_resolve: bool) -> Result<()> {
     let map = BpfMap::try_from(ebpf.take_map("TRAFFIC_OWNERS").context("missing TRAFFIC_OWNERS")?)?;
     let mut owners = OwnerMap { map, installed: Owners::new() };
     if let Err(err) = owners.refresh(iface, subnet, excluded) {
@@ -112,12 +114,19 @@ pub fn configure(ebpf: &mut aya::Ebpf, iface: &str, subnet: &SubnetInfo, exclude
         }
         log::warn!("Initializing traffic attribution neighbors failed: {err}");
     }
+    let mut resolver = if arp_resolve { Some(arp::ArpResolver::new(ebpf, iface, subnet)?) } else { None };
+    let interval = Duration::from_secs(if arp_resolve { 1 } else { 5 });
     let (iface, subnet, excluded) = (iface.to_owned(), subnet.clone(), excluded.to_vec());
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(interval).await;
             if let Err(err) = owners.refresh(&iface, &subnet, &excluded) {
                 log::warn!("Refreshing traffic attribution neighbors failed: {err}");
+            }
+            if let Some(resolver) = resolver.as_mut() {
+                if let Err(err) = resolver.resolve_pending(&owners.installed, &subnet) {
+                    log::warn!("Reading pending ARP resolutions failed: {err}");
+                }
             }
         }
     });

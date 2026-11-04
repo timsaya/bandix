@@ -2,6 +2,20 @@
 pub const MODE_KEY: [u8; 17] = [0; 17];
 pub const EXCLUDED: [u8; 6] = [0; 6];
 pub const UNKNOWN: u64 = u64::MAX;
+pub const ARP_PENDING_CAPACITY: u32 = 256;
+
+#[inline(always)]
+pub fn arp_target_on_subnet(ip: &[u8; 4], interface_ip: &[u8; 4], mask: &[u8; 4]) -> bool {
+    let address = u32::from_be_bytes(*ip);
+    let local = u32::from_be_bytes(*interface_ip);
+    let mask = u32::from_be_bytes(*mask);
+    let host_mask = !mask;
+    ip[0] != 0 && ip[0] != 127 && ip[0] < 224
+        && address != local
+        && address & mask == local & mask
+        // RFC 3021 point-to-point /31 links have no network or broadcast host.
+        && (host_mask <= 1 || (address & host_mask != 0 && address & host_mask != host_mask))
+}
 
 #[inline(always)]
 pub fn encode_mac(mac: &[u8; 6]) -> u64 {
@@ -42,6 +56,17 @@ pub fn accounting_mac(wire_mac: u64, ip_owner: u64, hop_owner: u64, all_relays_r
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arp_targets_are_unicast_peers_on_the_direct_subnet() {
+        let local = [192, 168, 1, 1];
+        let mask = [255, 255, 255, 0];
+        assert!(arp_target_on_subnet(&[192, 168, 1, 100], &local, &mask));
+        for address in [[192, 168, 1, 0], [192, 168, 1, 255], local, [192, 168, 2, 100], [0; 4], [127, 0, 0, 1], [224, 0, 0, 1], [255; 4]] {
+            assert!(!arp_target_on_subnet(&address, &local, &mask));
+        }
+        assert!(arp_target_on_subnet(&[192, 168, 1, 0], &local, &[255, 255, 255, 254]));
+    }
 
     #[test]
     fn automatic_attribution_preserves_the_relay_and_credits_the_client() {

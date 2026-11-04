@@ -48,6 +48,7 @@ sudo ./bandix --iface <network_interface_name> [options]
 
 - **--iface**: Network interface to monitor (required)
 - **--traffic-exclude-ips** accepts a comma-separated list of IPv4 or IPv6 addresses to exclude from device traffic counters. For an excluded relay, Bandix credits the original client when its IP is visible and its MAC can be resolved from the neighbor table.
+- **--traffic-arp-resolve** enables rate-limited ARP requests for observed IPv4 sources that have no known neighbor on the monitored interface's subnet. Disabled by default. Requests are limited to eight addresses per second with a 30-second cooldown per address.
 - **--host**: Web server listening IPv4 or IPv6 address. Default: `127.0.0.1` (debug and release). Use `0.0.0.0` or `::` to listen on all IPv4 or IPv6 interfaces.
 - **--port**: Web server listening port. Default: `8686`
 - **--data-dir**: Data directory (ring files and rate limit configurations will be stored here). Default: `bandix-data`

@@ -7,7 +7,7 @@ use aya_ebpf::{
     bindings::{TC_ACT_SHOT, TC_ACT_UNSPEC},
     programs::TcContext,
 };
-use bandix_common::attribution::{accounting_mac, address_key, decode_mac, encode_mac, mac_key, MODE_KEY, UNKNOWN};
+use bandix_common::attribution::{accounting_mac, address_key, arp_target_on_subnet, decode_mac, encode_mac, mac_key, MODE_KEY, UNKNOWN};
 use bandix_common::quota::{QUOTA_DOWNLOAD, QUOTA_UPLOAD};
 use core::intrinsics::{atomic_xadd, AtomicOrdering};
 use network_types::eth::EthHdr;
@@ -70,6 +70,10 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     // 检查是否addresses are in local subnet
     let src_is_local = is_subnet_ip(&src_ip);
     let dst_is_local = is_subnet_ip(&dst_ip);
+
+    if is_ingress {
+        queue_arp_resolution(&src_ip);
+    }
 
     // Rate limiting logic
     if is_ingress {
@@ -263,6 +267,26 @@ fn count_endpoint<const N: usize>(mac: &[u8; 6], ip: &[u8; N], bytes: u64, rx: b
     if owner != 0 {
         update_traffic_stats(&decode_mac(owner), bytes, rx, local);
     }
+}
+
+#[inline(always)]
+fn queue_arp_resolution(ip: &[u8; 4]) {
+    let Some(config) = maps::ARP_RESOLVE_CONFIG.get(0) else { return };
+    if config[8] == 0 {
+        return;
+    }
+    let local = [config[0], config[1], config[2], config[3]];
+    let mask = [config[4], config[5], config[6], config[7]];
+    if !arp_target_on_subnet(ip, &local, &mask) {
+        return;
+    }
+    if unsafe { maps::TRAFFIC_OWNERS.get(&address_key(ip)) }.is_some()
+        || unsafe { maps::ARP_RESOLVE_PENDING.get(ip) }.is_some()
+    {
+        return;
+    }
+    // BPF_NOEXIST deduplicates concurrent observations of the same source.
+    let _ = maps::ARP_RESOLVE_PENDING.insert(ip, &1, 1);
 }
 
 // ============================================================================
