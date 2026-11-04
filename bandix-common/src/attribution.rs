@@ -2,7 +2,7 @@
 pub const MODE_KEY: [u8; 17] = [0; 17];
 pub const EXCLUDED: [u8; 6] = [0; 6];
 pub const UNKNOWN: u64 = u64::MAX;
-pub const ARP_PENDING_CAPACITY: u32 = 256;
+pub const NEIGHBOR_PENDING_CAPACITY: u32 = 256;
 
 #[inline(always)]
 pub fn arp_target_on_subnet(ip: &[u8; 4], interface_ip: &[u8; 4], mask: &[u8; 4]) -> bool {
@@ -15,6 +15,19 @@ pub fn arp_target_on_subnet(ip: &[u8; 4], interface_ip: &[u8; 4], mask: &[u8; 4]
         && address & mask == local & mask
         // RFC 3021 point-to-point /31 links have no network or broadcast host.
         && (host_mask <= 1 || (address & host_mask != 0 && address & host_mask != host_mask))
+}
+
+#[inline(always)]
+pub fn ndp_target_is_unicast(ip: &[u8; 16]) -> bool {
+    ip[0] != 0xff && u128::from_be_bytes(*ip) > 1
+}
+
+pub fn ndp_target_on_prefix(ip: &[u8; 16], interface_ip: &[u8; 16], prefix_len: u8) -> bool {
+    if !ndp_target_is_unicast(ip) || ip == interface_ip || !(1..=128).contains(&prefix_len) {
+        return false;
+    }
+    let mask = u128::MAX << (128 - prefix_len);
+    u128::from_be_bytes(*ip) & mask == u128::from_be_bytes(*interface_ip) & mask
 }
 
 #[inline(always)]
@@ -66,6 +79,25 @@ mod tests {
             assert!(!arp_target_on_subnet(&address, &local, &mask));
         }
         assert!(arp_target_on_subnet(&[192, 168, 1, 0], &local, &[255, 255, 255, 254]));
+    }
+
+    #[test]
+    fn ndp_targets_are_unicast_peers_on_a_current_prefix() {
+        let local = [0xfd, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let mut peer = local;
+        peer[15] = 100;
+        assert!(ndp_target_on_prefix(&peer, &local, 64));
+        peer[3] = 2;
+        assert!(!ndp_target_on_prefix(&peer, &local, 64));
+        for address in [[0; 16], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], [0xff; 16], local] {
+            assert!(!ndp_target_on_prefix(&address, &local, 64));
+        }
+        assert!(!ndp_target_on_prefix(&peer, &local, 0));
+        assert!(!ndp_target_on_prefix(&peer, &local, 129));
+        let link_local = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let mut peer = link_local;
+        peer[15] = 2;
+        assert!(ndp_target_on_prefix(&peer, &link_local, 64));
     }
 
     #[test]

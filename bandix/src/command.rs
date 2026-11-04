@@ -169,8 +169,8 @@ pub struct TrafficArgs {
     #[clap(long, value_delimiter = ',', help = "IPv4 or IPv6 addresses to exclude from traffic accounting (comma-separated)")]
     pub traffic_exclude_ips: Vec<IpAddr>,
 
-    #[clap(long, help = "Resolve unknown IPv4 sources on the monitored subnet using ARP")]
-    pub traffic_arp_resolve: bool,
+    #[clap(long, alias = "traffic-arp-resolve", help = "Resolve unknown local IPv4 and IPv6 sources using ARP and NDP")]
+    pub traffic_neighbor_resolve: bool,
 
     #[clap(
         long,
@@ -530,11 +530,13 @@ mod host_tests {
     use super::*;
 
     #[test]
-    fn arp_resolution_is_opt_in() {
+    fn neighbor_resolution_is_opt_in_with_a_legacy_alias() {
         let options = Options::try_parse_from(["bandix", "--iface", "br-lan"]).unwrap();
-        assert!(!options.traffic.traffic_arp_resolve);
-        let options = Options::try_parse_from(["bandix", "--iface", "br-lan", "--traffic-arp-resolve"]).unwrap();
-        assert!(options.traffic.traffic_arp_resolve);
+        assert!(!options.traffic.traffic_neighbor_resolve);
+        for flag in ["--traffic-neighbor-resolve", "--traffic-arp-resolve"] {
+            let options = Options::try_parse_from(["bandix", "--iface", "br-lan", flag]).unwrap();
+            assert!(options.traffic.traffic_neighbor_resolve);
+        }
     }
 
     #[test]
@@ -657,7 +659,7 @@ async fn create_module_contexts(
         // 如果启用了流量模块，则配置子网信息映射
         if options.enable_traffic() {
             log::info!("Configuring subnet info maps for traffic module...");
-            crate::attribution::configure(&mut ebpf, options.iface(), subnet_info, &options.traffic.traffic_exclude_ips, options.traffic.traffic_arp_resolve)?;
+            crate::attribution::configure(&mut ebpf, options.iface(), subnet_info, &options.traffic.traffic_exclude_ips, options.traffic.traffic_neighbor_resolve)?;
 
             // 配置 IPv4 子网信息映射 (支持多个子网)
             let mut ipv4_subnet_info: Array<_, [u8; 16]> = Array::try_from(ebpf.take_map("IPV4_SUBNET_INFO").unwrap())?;

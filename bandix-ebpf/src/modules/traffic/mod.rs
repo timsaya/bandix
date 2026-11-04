@@ -7,7 +7,7 @@ use aya_ebpf::{
     bindings::{TC_ACT_SHOT, TC_ACT_UNSPEC},
     programs::TcContext,
 };
-use bandix_common::attribution::{accounting_mac, address_key, arp_target_on_subnet, decode_mac, encode_mac, mac_key, MODE_KEY, UNKNOWN};
+use bandix_common::attribution::{accounting_mac, address_key, arp_target_on_subnet, decode_mac, encode_mac, mac_key, ndp_target_is_unicast, MODE_KEY, UNKNOWN};
 use bandix_common::quota::{QUOTA_DOWNLOAD, QUOTA_UPLOAD};
 use core::intrinsics::{atomic_xadd, AtomicOrdering};
 use network_types::eth::EthHdr;
@@ -72,7 +72,7 @@ fn handle_ipv4(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     let dst_is_local = is_subnet_ip(&dst_ip);
 
     if is_ingress {
-        queue_arp_resolution(&src_ip);
+        queue_ipv4_resolution(&src_ip);
     }
 
     // Rate limiting logic
@@ -154,6 +154,10 @@ fn handle_ipv6(ctx: &TcContext, is_ingress: bool) -> Result<i32, ()> {
     // 检查是否addresses are in local subnet
     let src_is_local = is_subnet_ipv6(&src_ip);
     let dst_is_local = is_subnet_ipv6(&dst_ip);
+
+    if is_ingress && src_is_local && ndp_target_is_unicast(&src_ip) {
+        queue_neighbor_resolution(&src_ip);
+    }
 
     // Rate limiting logic
     if is_ingress {
@@ -270,8 +274,8 @@ fn count_endpoint<const N: usize>(mac: &[u8; 6], ip: &[u8; N], bytes: u64, rx: b
 }
 
 #[inline(always)]
-fn queue_arp_resolution(ip: &[u8; 4]) {
-    let Some(config) = maps::ARP_RESOLVE_CONFIG.get(0) else { return };
+fn queue_ipv4_resolution(ip: &[u8; 4]) {
+    let Some(config) = maps::NEIGHBOR_RESOLVE_CONFIG.get(0) else { return };
     if config[8] == 0 {
         return;
     }
@@ -280,13 +284,23 @@ fn queue_arp_resolution(ip: &[u8; 4]) {
     if !arp_target_on_subnet(ip, &local, &mask) {
         return;
     }
-    if unsafe { maps::TRAFFIC_OWNERS.get(&address_key(ip)) }.is_some()
-        || unsafe { maps::ARP_RESOLVE_PENDING.get(ip) }.is_some()
+    queue_neighbor_resolution(ip);
+}
+
+#[inline(always)]
+fn queue_neighbor_resolution<const N: usize>(ip: &[u8; N]) {
+    let Some(config) = maps::NEIGHBOR_RESOLVE_CONFIG.get(0) else { return };
+    if config[8] == 0 {
+        return;
+    }
+    let key = address_key(ip);
+    if unsafe { maps::TRAFFIC_OWNERS.get(&key) }.is_some()
+        || unsafe { maps::NEIGHBOR_RESOLVE_PENDING.get(&key) }.is_some()
     {
         return;
     }
     // BPF_NOEXIST deduplicates concurrent observations of the same source.
-    let _ = maps::ARP_RESOLVE_PENDING.insert(ip, &1, 1);
+    let _ = maps::NEIGHBOR_RESOLVE_PENDING.insert(&key, &1, 1);
 }
 
 // ============================================================================
